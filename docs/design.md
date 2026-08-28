@@ -4,7 +4,7 @@
 **Date:** 2026-08-28
 **Author:** generated with Claude Code, reviewed by Product Lead (NBS)
 
-Companion documents: requirements in `tasks/prd-mws-iops-autoscaler.md`, decisions in `docs/adr/`,
+Companion documents: requirements in `docs/prd-mws-iops-autoscaler.md`, decisions in `docs/adr/`,
 measured platform behaviour in `CLAUDE.md`, configuration model in `docs/configuration.md`.
 
 ---
