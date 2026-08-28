@@ -480,10 +480,22 @@ alias also exists: `/dev/disk/by-id/scsi-0MWS_PersistentDisk_mws-<deviceName>`.
 
 Metadata token confirmed working from inside the guest.
 
+## Platform changes committed by the NBS team
+
+Confirmed 2026-08-28 — design for these, do not build around their absence permanently:
+
+- **`*_quota_utilization` will be fixed.** Today both `compute_vm_disk_ops_peak_quota_utilization`
+  and `..._bytes_peak_quota_utilization` read 0 at any load. Once served, they replace the computed
+  `ops_peak / spec.iops` and remove the need to fetch the disk spec just to get a denominator.
+- **Queue depth in operations will be added.** Today only `compute_vm_disk_write_queue_length`
+  exists and it is byte-denominated.
+
+The agent should prefer these when present and fall back to the computed values when they are absent
+or zero — see the PRD's metric-source stories.
+
 ## Open questions
 
 1. Rate limit / cooldown on disk modification.
-2. Whether `*_quota_utilization` is expected to work — it reads 0 at full saturation.
 
 Closed: `DiskRequest`/`DiskSpecRequest` schema and mutability; guest device mapping; Prometheus
 metric names, labels and semantics; `<service>` value; read-queue question (none exists);

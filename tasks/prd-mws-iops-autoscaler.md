@@ -104,9 +104,28 @@ works without touching guests.
 **Acceptance Criteria:**
 - [ ] Fetches from `monitoring.mwsapis.ru` using the API key and `monitoring.metricExporter` role
 - [ ] Parses Prometheus exposition format
-- [ ] Extracts per-disk: read/write op counts, read/write throughput, read/write latency quantiles,
-      write queue depth
+- [ ] Extracts per-disk: read/write op counts (`_ops` and `_ops_peak`), read/write throughput,
+      read/write latency histograms, and queue depth
 - [ ] Missing or stale metrics mark the disk as "no data" — the decider must not act on it
+- [ ] Typecheck/lint passes
+
+### US-005a: Adopt platform metrics as they improve
+**Description:** As the agent, I want to use the platform's own utilization and queue-depth metrics
+the moment they start working, without a rewrite, because the NBS team has committed to fixing them.
+
+**Acceptance Criteria:**
+- [ ] Utilization is resolved through one interface with two implementations: read
+      `compute_vm_disk_ops_peak_quota_utilization` when it is present **and non-zero**; otherwise
+      compute `ops_peak / spec.iops`
+- [ ] The same fallback applies to bandwidth utilization via `..._bytes_peak_quota_utilization`
+- [ ] Queue depth prefers an operations-denominated metric when one appears; the existing
+      byte-denominated `write_queue_length` is used only as a fallback and is labelled as bytes so
+      the two are never silently mixed
+- [ ] Which source was used is visible in logs and exported metrics, so a silent switch is
+      observable rather than mysterious
+- [ ] Treating a zero `quota_utilization` as "unavailable" is deliberate and commented: today the
+      metric is always zero, so zero cannot be distinguished from a genuinely idle disk. Once the
+      fix ships, revisit — an idle disk will legitimately report 0
 - [ ] Typecheck/lint passes
 
 ### US-006: Metric source — local `/proc/diskstats`
@@ -322,6 +341,14 @@ needs, per mode, so that I do not have to grant it broad rights.
   that gap should be raised with the platform team rather than papered over.
 - FR-21: The agent must preflight its permissions at startup and fail with a message naming the
   missing capability, not a raw 403.
+- FR-23: Utilization and queue depth must be read through an abstraction with a documented
+  preference order, so the platform's fixes can be adopted by configuration rather than a rewrite:
+  1. `*_quota_utilization` when present and non-zero (committed by the NBS team, currently always 0)
+  2. computed `ops_peak / spec.iops`
+  Queue depth follows the same shape: operations-denominated metric first, byte-denominated
+  `write_queue_length` as fallback, never mixed without an explicit unit label.
+- FR-24: The active metric source must be observable — logged and exported — so a switch between
+  platform-provided and computed values is visible.
 - FR-22: Documentation must state that enabling the `compute` service in the project is a
   prerequisite distinct from role assignment — a project without the service enabled returns
   `403 PERMISSION_DENIED` no matter which roles are granted.
