@@ -1,0 +1,15 @@
+# Claude Code local overrides (permissions, per-checkout settings)
+.claude/settings.local.json
+
+# Go
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
