@@ -2,9 +2,9 @@
 
 | ADR | Decision | Status |
 |---|---|---|
-| [001](ADR-001-external-agent-over-public-apis.md) | External agent over public APIs, not a platform feature | Accepted |
-| [002](ADR-002-metric-source-and-utilization.md) | Platform metrics primary; guest collection opt-in in `local` mode | Accepted |
-| [003](ADR-003-reactive-decider-and-disk-scope.md) | Reactive sliding-window decider; independent disks only | Accepted |
+| [001](ADR-001-metric-source-per-mode.md) | Metric source chosen by mode: `local` → guest, `fleet` → platform | Accepted |
+| [002](ADR-002-saturation-not-utilization.md) | Scale on confirmed saturation, not on utilization | Accepted |
+| [003](ADR-003-disk-write-paths.md) | Two write paths: disk spec for independent, VM spec for dependent | Accepted |
 
 Requirements live in `tasks/prd-mws-iops-autoscaler.md`. Measured platform behaviour lives in
-`CLAUDE.md` — every empirical claim in these ADRs is sourced there.
+`CLAUDE.md`. Design input from the product side is in `docs/iops-autoscaler-artifacts/`.
