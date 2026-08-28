@@ -158,9 +158,11 @@ unused headroom.
 **Description:** As the agent, I need to write the new limit through the Compute API.
 
 **Acceptance Criteria:**
-- [ ] `POST compute.mwsapis.ru/compute/v1/projects/<p>/disks/<d>?updateOnly=true` with body
-      `{"spec": {"iops": N}}`
-- [ ] `updateOnly=true` always set — the agent must never create a disk
+- [ ] Uses the SDK's `DiskSugared.UpdateDisk` — it already targets
+      `POST .../disks/{disk}?updateOnly=true`, so the agent never hand-rolls the HTTP call and can
+      never accidentally create a disk
+- [ ] Sends only `spec.iops`; every other field left unset (`optional.Optional` makes this explicit)
+- [ ] Sets `IdempotencyKey` on every write so a retry after a mid-flight failure cannot double-apply
 - [ ] Verifies the applied value from the response and reconciles against what was requested
 - [ ] Failures are retried with backoff and never leave in-memory state claiming success
 - [ ] Typecheck/lint passes
@@ -178,8 +180,12 @@ unused headroom.
 **Description:** As an operator, I want to see what the agent would do before letting it act.
 
 **Acceptance Criteria:**
-- [ ] `--dry-run` performs discovery, metric collection, and decisions but issues no API writes
-- [ ] Prints each decision with the values that drove it and the resulting IOPS delta
+- [ ] `--dry-run` performs discovery, metric collection, and decisions but applies no change
+- [ ] Each decision is sent with **`ValidateOnly=true`**, so the platform runs its real validation
+      (bounds, 100-IOPS step, permissions) without mutating — a dry run that catches genuine
+      rejections rather than only printing intent
+- [ ] Prints each decision with the values that drove it, the resulting IOPS delta, and the
+      platform's validation verdict
 - [ ] Exits cleanly after a configurable number of evaluation cycles
 - [ ] Typecheck/lint passes
 
@@ -257,7 +263,15 @@ needs, per mode, so that I do not have to grant it broad rights.
   suppress scale-up and emit a "vCPU is the bottleneck" event.
 
 **Application and safety**
-- FR-15: IOPS changes must be applied with `?updateOnly=true`; the agent must never create a disk.
+- FR-15: IOPS changes must go through the SDK's `UpdateDisk`, which carries `?updateOnly=true`; the
+  agent must never create a disk. Every write must set an idempotency key.
+- FR-15a: The platform enforces `1000 ≤ iops ≤ 10000` and divisibility by 100, rejecting violations
+  with `400`. The agent must still clamp and round locally — to avoid wasting a round trip, and
+  because the OpenAPI schema declares no bounds, so this validation is server behaviour rather than
+  a contract.
+- FR-15b: Modifying a disk attached to a VM requires write permission on the **VM**, not the disk;
+  the platform returns `403` naming the VM resource. The permission preflight (FR-21) must check
+  VM-level rights, not disk-level.
 - FR-16: The agent must verify the applied value against the API response.
 - FR-17: A per-disk cooldown and a rolling 24 h change budget must gate every change.
 - FR-18: `--dry-run` must exercise the full decision path with no writes.

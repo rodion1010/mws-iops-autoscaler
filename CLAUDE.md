@@ -131,6 +131,30 @@ mws compute vm update <vm> \
 Reference pages: `https://mws.ru/docs/cloud-platform/api/compute/operations/UpsertDisk.html`
 (also `ListDisks.html`, `GetDisk.html`, `DeleteDisk.html`)
 
+### Server-side validation, measured [V]
+
+Tested with `validateOnly=true` against a standalone disk. `validateOnly` returns 200 and **does not
+mutate** — verified by re-reading the disk after each call.
+
+| Requested `iops` | Result |
+|---|---|
+| 3000, 10000 | `200 OK` |
+| 10100, 20000 | `400 Requested iops can't be greater than maximum iops value: 10000` |
+| 900 | `400 Requested iops can't be less than minimum iops value: 1000` |
+| 1050 | `400 ... iops count 1050 must be divisible by 100` |
+| 0 | `400 Invalid request: diskUpsertRequest.spec.iops has invalid value.` |
+
+So 1000–10000 and the 100-IOPS step are enforced by the server, not just documented.
+
+**Modifying a disk attached to a VM requires permission on the VM, not the disk.** Every attempt on
+an attached disk returns `403 Resource 'compute/.../virtualMachines/<vm>' is forbidden`, naming the
+VM. The same SA creates and edits standalone disks fine. Worth knowing for the least-privilege story:
+`local`/`fleet` modes act on attached disks, so VM-level rights are required.
+
+`status.iops` breaks down as `{base, extra, total}` — `base` is the free tier (1000), `extra` is the
+billed portion. `status.throughput` at 1000 IOPS reads `33554432 Bps` = 32 MiB/s, matching
+`IOPS × 32 KB`.
+
 ---
 
 ## VM service-account token [V]
@@ -331,6 +355,31 @@ vms, err := client.ListVirtualMachines(ctx, computeclient.ListVirtualMachinesReq
 
 Credential sources: static token, SA authorized key, custom provider, Instance Metadata Service.
 
+### Disk client [V]
+
+`computesdk.NewDisk(ctx, sdk)` exists — alongside `NewDiskBackup`, `NewDiskType`, `NewImage`,
+`NewSnapshot`, `NewVirtualMachine`, `NewVmType`. The README only demonstrates `NewVirtualMachine`,
+which is misleading.
+
+```go
+ListDisks(ctx, ListDisksRequest)
+GetDisk(ctx, GetDiskRequest, opts...)
+CreateDisk(ctx, UpsertDiskRequest, opts...)
+UpdateDisk(ctx, UpdateDiskRequest, opts...)   // POST .../disks/{disk}?updateOnly=true
+UpsertDisk(ctx, UpsertDiskRequest, opts...)
+DeleteDisk(ctx, DeleteDiskRequest, opts...)
+```
+
+**`UpdateDisk` already carries `updateOnly=true`** — no need to hand-roll the HTTP call.
+
+Both request structs also expose:
+- `ValidateOnly *bool` — server-side dry run: "выполнить все проверки… но не выполнять саму операцию"
+- `IdempotencyKey *string` — safe retries, which matters given how often requests fail mid-flight here
+
+`model.UpdateDiskSpecRequest` wraps every field in `optional.Optional`, so a partial update is
+expressible in the type system — send `Iops` alone and leave the rest unset. Immutable fields carry
+the "Неизменяемое поле" comment; `Iops` and `Size` do not.
+
 ---
 
 ## Terraform provider
@@ -396,13 +445,11 @@ Metadata token confirmed working from inside the guest.
 
 ## Open questions
 
-1. Metric granularity, publication lag, and retention in the API (15 s is console-only). The scrape
-   window length matters — it sets how far `_peak` and the average diverge.
-2. Rate limit / cooldown on disk modification.
-3. Behaviour when `iops` exceeds the VM ceiling — reject, clamp, or accept and bill. The schema
-   imposes no bound, so this is decided server-side.
-4. Disk client in the Go SDK (`service/compute/sdk`, `service/compute/client`).
-5. Whether `*_quota_utilization` is expected to work — it reads 0 at full saturation.
+1. Rate limit / cooldown on disk modification.
+2. Behaviour when `iops` exceeds the **VM** ceiling (`3000 × vCPU`). Disk-level bounds are enforced
+   (1000–10000, step 100), but the VM pool could not be tested: the SA cannot modify a VM-attached
+   disk, and a standalone disk has no VM pool. Needs VM-level write rights to settle.
+3. Whether `*_quota_utilization` is expected to work — it reads 0 at full saturation.
 
 Closed: `DiskRequest`/`DiskSpecRequest` schema and mutability; guest device mapping; Prometheus
 metric names, labels and semantics; `<service>` value; read-queue question (none exists);
