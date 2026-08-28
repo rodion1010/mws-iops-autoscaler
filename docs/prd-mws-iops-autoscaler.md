@@ -3,6 +3,10 @@
 Status: draft · Last updated: 2026-08-28
 Platform facts referenced here live in `CLAUDE.md` at the repo root.
 
+> **Sync rule.** `docs/design.md` and `docs/adr/` are the authoritative layer. When a decision
+> changes there, this PRD is updated in the same change — always, without being asked. A PRD that
+> contradicts the design is worse than no PRD: it reads as current and is not.
+
 ---
 
 ## 1. Introduction / Overview
@@ -76,11 +80,12 @@ a fleet.
 its VM cannot be modified through the disk API at all.
 
 **Acceptance Criteria:**
-- [ ] For every discovered disk, reads `metadata.usages` and classifies it: `own` present →
-      **dependent** (VM-owned); `attach` only → **independent**
-- [ ] Independent disks are managed through `UpdateDisk` as normal
-- [ ] Dependent disks are, for MVP, reported as unmanageable with the reason and excluded from
-      scaling — never silently skipped
+- [ ] Classifies from the VM's `spec.storage.disks[]`: `disk.ref` → **independent**,
+      `disk.spec` → **dependent**. (`metadata.usages` containing `own` gives the same answer when
+      reading a disk directly. `managed:` is not usable — it exists only in the UI-facing API.)
+- [ ] **Both classes are managed.** Independent disks are written through `UpdateDisk`; dependent
+      disks through `vm update --storage-disks` (US-011a)
+- [ ] The class determines only the write path, never whether a disk is in scope
 - [ ] The classification appears in logs, the dry-run report, and the exported metrics
 - [ ] A disk that changes class between discovery cycles is reclassified, not cached forever
 - [ ] Typecheck/lint passes
@@ -129,14 +134,18 @@ the moment they start working, without a rewrite, because the NBS team has commi
 - [ ] Typecheck/lint passes
 
 ### US-006: Metric source — local `/proc/diskstats`
-**Description:** As the decider in on-VM mode, I want local disk statistics because they are cheaper,
-faster, and finer-grained than the API.
+**Description:** As the decider in `local` mode, I want guest statistics as the **primary** source,
+because they need no metrics credential, cross no network, and carry signals the platform lacks.
 
 **Acceptance Criteria:**
+- [ ] Guest is the **default** source in `local` mode; the platform source is opt-in (ADR-001)
 - [ ] Reads `/proc/diskstats` at a configurable interval
-- [ ] Derives ops/s, throughput, average queue depth, and service time per device
+- [ ] Derives ops/s, throughput, queue depth **in operations for both reads and writes**, and
+      service time per device — none of which the platform exposes
+- [ ] Detects throttling directly: served ≈ provisioned limit **and** queue sustained above zero
 - [ ] Values are attributed to the correct cloud disk via the US-002 mapping
-- [ ] No API quota is consumed for metrics in this mode
+- [ ] Requires **no** monitoring API key and no `monitoring.metricExporter` role
+- [ ] VM-level pool data still comes from the Compute API, on the slow path only
 - [ ] Typecheck/lint passes
 
 ### US-007: Sliding-window evaluator
@@ -155,9 +164,16 @@ single noisy sample cannot trigger a change.
 spikes do not throttle.
 
 **Acceptance Criteria:**
-- [ ] Triggers when window utilization percentile ≥ threshold **and** a saturation signal confirms
-      (latency quantile elevated or write queue non-empty)
-- [ ] New value = `min(current + step, ceiling)`, rounded up to a 100-IOPS multiple
+- [ ] Utilization is a **gate, not a trigger**: at or above `saturation.iops_utilization_threshold`
+      the disk *may* be starved; below it, it cannot be, and the signal checks are skipped
+- [ ] Triggers only on confirmed saturation — queue depth at/above threshold, **or** p95 latency
+      above the disk's own baseline × `baseline_multiplier`, **or** throttling detected — sustained
+      over `scale_up_window`
+- [ ] A disk at 100% utilization with flat latency and an empty queue is efficient and **must not**
+      be scaled up
+- [ ] Target is computed from estimated demand: `demand / target.scale_up_utilization`, not by
+      stepping a fixed percentage
+- [ ] Rounded to a 100-IOPS multiple and clamped by `max_scale_up_ratio`
 - [ ] Never exceeds `min(10000, 3000 × vcpuCount)` — the platform does not enforce this (FR-15c)
 - [ ] Respects cooldown since the last change
 - [ ] Typecheck/lint passes
@@ -181,9 +197,11 @@ does not spend money on the wrong lever.
 unused headroom.
 
 **Acceptance Criteria:**
-- [ ] Triggers when the **high percentile** (not mean) of window utilization ≤ threshold
-- [ ] Blocked while any saturation signal is elevated
-- [ ] New value = `max(current − step, floor)`, rounded down to a 100-IOPS multiple
+- [ ] Triggers on sustained low demand over `scale_down_window`, with every saturation signal quiet:
+      queue low, latency at baseline, no throttling
+- [ ] Target is computed as `p95_demand / target.scale_down_utilization`, deliberately leaving
+      headroom so the new limit does not sit flush against current demand
+- [ ] Rounded to a 100-IOPS multiple and clamped by `max_scale_down_ratio`
 - [ ] Never goes below 1000 IOPS
 - [ ] Down-step and down-cooldown are independently configurable from up
 - [ ] Typecheck/lint passes
@@ -199,6 +217,18 @@ unused headroom.
 - [ ] Sets `IdempotencyKey` on every write so a retry after a mid-flight failure cannot double-apply
 - [ ] Verifies the applied value from the response and reconciles against what was requested
 - [ ] Failures are retried with backoff and never leave in-memory state claiming success
+- [ ] Typecheck/lint passes
+
+### US-011a: Applying the change — dependent disks
+**Description:** As the agent, I need to change IOPS on a VM-owned disk, which the disk API refuses.
+
+**Acceptance Criteria:**
+- [ ] Reads the VM, capturing `etag`
+- [ ] Mutates exactly one entry in `spec.storage.disks[]`, resending `diskType` and `size` unchanged
+- [ ] Asserts every other field is byte-identical to what was read; aborts the write if not
+- [ ] Sends `etag` and an idempotency key; an etag conflict aborts and retries next cycle, never forces
+- [ ] Verifies the applied value from the response
+- [ ] Covered by a concurrent-modification test
 - [ ] Typecheck/lint passes
 
 ### US-012: Rate limiting and change budget
@@ -281,10 +311,11 @@ needs, per mode, so that I do not have to grant it broad rights.
 **Decisions**
 - FR-9: All decisions must be computed over a sliding window using a configurable percentile,
   never a single sample.
-- FR-10: Scale-up requires a utilization percentile above threshold **and** a confirming saturation
-  signal (latency quantile or write queue depth).
-- FR-11: Scale-down requires a **high** percentile of utilization below threshold and no elevated
-  saturation signal.
+- FR-10: Scale-up requires confirmed **saturation**. Utilization at/above the gate is a
+  precondition; the trigger is queue depth, latency above the disk's own baseline, or throttling.
+  Utilization alone must never cause a scale-up (ADR-002).
+- FR-11: Scale-down requires sustained low demand with every saturation signal quiet. Targets on
+  both directions are computed as `demand / target_utilization`, never as a fixed percentage step.
 - FR-12: The agent must never set IOPS outside `[1000, min(10000, 3000 × vcpuCount)]`, and always on
   a 100-IOPS boundary. `vcpuCount` comes from `GET /compute/v1/vmTypes/{vmType}` → `spec.cpu`;
   the documented `spec.disks.totalIops` is `null` on every type and cannot be used. The disk-level
@@ -303,6 +334,9 @@ needs, per mode, so that I do not have to grant it broad rights.
   with `400`. The agent must still clamp and round locally — to avoid wasting a round trip, and
   because the OpenAPI schema declares no bounds, so this validation is server behaviour rather than
   a contract.
+- FR-15d: Dependent disks are written through `vm update --storage-disks`: read the VM, mutate one
+  entry, resend with `etag` and an idempotency key, and assert every other field round-trips
+  unchanged. Independent disks use the single-field disk path (FR-15).
 - FR-15b: A disk **owned** by its VM (created inside the VM spec; `metadata.usages` contains `own`)
   cannot be modified through the disk API — the platform returns `403` naming the VM resource. This
   is an ownership constraint, not a permissions one: an independent disk attached by `ref` to the
@@ -375,38 +409,49 @@ needs, per mode, so that I do not have to grant it broad rights.
 
 ## 6. Default Configuration
 
-All values are overridable. These ship as defaults.
+The user-facing surface is a **preset**, plus limits, plus disk selection. Controller internals are
+`advanced` and opt-in. Full model, preset values and examples: `docs/configuration.md`.
 
-| Parameter | Default | Rationale |
+| Parameter | Default (`balanced`) | Rationale |
 |---|---|---|
-| `step_quantum` | 100 IOPS | matches the billing package size |
-| `floor` | 1000 IOPS | included in the disk base price — free headroom |
-| `ceiling` | `min(10000, 3000 × vcpuCount)` | computed; platform does not enforce it |
+| `preset` | `balanced` | `performance` and `cost` shift the same knobs together |
+| `limits.min_iops` | 1000 | included in the disk base price; lower is impossible |
+| `limits.max_iops` | 10000 | clamped further to `3000 × vcpuCount` at runtime |
+| `billing_step_iops` | 100 | platform-fixed, not user-settable |
 | `discovery_interval` | 5 min | picks up newly attached disks |
-| **Scale-up** | | |
-| `up.window` | 5 min | |
-| `up.percentile` | p90 of utilization | tolerates isolated dips |
-| `up.threshold` | ≥ 80% | |
-| `up.confirm` | latency quantile elevated **or** write queue > 0 | utilization alone is ambiguous under sibling contention |
-| `up.step` | `max(100, 20% of current)` | reach relief in a few steps |
-| `up.cooldown` | 10 min | |
-| **Scale-down** | | |
-| `down.window` | 20 min | |
-| `down.percentile` | **p95** of utilization | the safety property — see note |
-| `down.threshold` | ≤ 40% | wide gap from 80% provides hysteresis |
-| `down.step` | `max(100, 10% of current)` | descend at half the ascent rate |
-| `down.cooldown` | 15 min | |
-| **Guards** | | |
-| `max_changes_per_24h` | 48 per disk | runaway guard, not a billing constraint |
+| **Saturation (gate + signals)** | | |
+| `iops_utilization_threshold` | 0.98 | **gate only** — never triggers a change by itself |
+| `queue_depth_threshold` | 1 | units differ by source: ops in `local`, bytes in `fleet` |
+| `latency.mode` | `relative` | absolute thresholds are wrong for every workload |
+| `latency.baseline_multiplier` | 1.5 | versus the disk's own observed baseline |
+| **Target sizing** | | |
+| `target.scale_up_utilization` | 0.85 | `target = demand / 0.85` after saturation is confirmed |
+| `target.scale_down_utilization` | 0.70 | leaves headroom instead of landing flush on demand |
+| **Windows and cooldowns** | | |
+| `scale_up_window` | 5 min | above the ~135 s platform detection floor |
+| `scale_down_window` | 30 min | down is deliberately slower than up |
+| `cooldown.scale_up` | 5 min | |
+| `cooldown.scale_down` | 30 min | |
+| **Step limits** | | |
+| `min_change_iops` | 200 | suppresses churn worth one or two billing steps |
+| `max_scale_up_ratio` | 2.0 | also bounds a pathological demand estimate |
+| `max_scale_down_ratio` | 0.5 | |
+| `max_changes_per_24h` | 48 per disk | runaway guard; metering is per-minute, so not a cost constraint |
 
-**Why p95 on the way down.** The safety of scale-down comes from the *percentile*, not the window
-length. Requiring the 95th percentile of utilization to sit below 40% means even the busiest moments
-in the window were quiet — an average would let a real spike hide inside a calm mean. Because the
-percentile carries the safety, the window can be 20 minutes instead of an hour without becoming
-twitchy.
+**Why utilization is only a gate.** With provisioned billing the limit is already paid for, so a disk
+using all of it is efficient, not distressed. Scaling on utilization systematically over-provisions
+exactly the workloads that are behaving well. The trigger is unmet demand — queueing, latency above
+the disk's own baseline, throttling. See ADR-002.
 
-**Why the asymmetry.** Scaling up late costs performance during a spike; scaling down late costs
-only money, and only briefly. Up is fast and decisive; down is slower and takes half-size steps.
+**Why latency is relative.** `p95 > 10 ms` is wrong for everyone; acceptable latency is
+workload-specific. Comparing against each disk's own baseline adapts automatically, at the cost of a
+warm-up period before the agent may act.
+
+**Why the asymmetry.** Scaling up late costs performance during a spike; scaling down late costs a
+little money briefly. Up is fast and decisive; down is slow and leaves headroom.
+
+> **These are design defaults, not validated values.** They must be calibrated from observe-only
+> telemetry (design §8.5) before GA.
 
 ---
 
@@ -441,13 +486,15 @@ only money, and only briefly. Up is fast and decisive; down is slower and takes 
 
 ## 8. Success Metrics
 
-- **Throttling reduction:** time spent at ≥ 95% of the disk IOPS limit falls by ≥ 50% versus a
-  static limit on the same workload.
+- **Saturation reduction:** time spent in a confirmed-saturated state (queueing or latency above
+  baseline while at the limit) falls by ≥ 50% versus a static limit on the same workload. Measured
+  on saturation, not utilization — high utilization is not a defect.
 - **Cost:** average provisioned IOPS over a week is lower than the static limit that would have been
   needed to cover the same peaks, on the same workload.
 - **Stability:** fewer than 5 changes per disk per day on a workload with a stable daily profile
   (evidence that hysteresis works).
-- **Correctness:** zero scale-ups issued while the VM pool was saturated.
+- **Correctness:** zero scale-ups issued while the VM pool was saturated; zero scale-ups issued on
+  a disk at high utilization with no saturation signal.
 - **Safety:** zero IOPS values written outside `[1000, min(10000, 3000 × vcpuCount)]`; zero disks created.
 
 ---
@@ -461,9 +508,10 @@ only money, and only briefly. Up is fast and decisive; down is slower and takes 
   no exported names are published. Also unresolved: the `<service>` path value for Compute, and
   whether a **read** queue metric exists (only write queue is documented). One request to
   `monitoring.mwsapis.ru` on a live project settles all three. **Blocks the decider.**
-- **OQ-3 — Dependent disks.** Confirmed unmanageable through the disk API (FR-15b); they need a
-  full-spec round trip through `vm update`. Deferred from MVP — confirm that is acceptable, given a
-  VM's boot disk is always dependent and so always out of scope under this decision.
+- **OQ-3 — resolved.** Dependent disks are supported via the VM write path (ADR-003, US-011a). They
+  are not excluded, and boot disks are therefore in scope. A dependent disk can also be converted to
+  independent (`spec-to-ref`), but that is one-way and changes deletion semantics, so the agent only
+  ever *recommends* it.
 - **OQ-4 — Metric publication lag and granularity in the API.** The documented 15 s refers to console
   graphs. This sets the achievable floor on window length and cooldown.
 - **OQ-5 — Platform rate limits on disk modification.** Undocumented. Determines whether the 24 h
