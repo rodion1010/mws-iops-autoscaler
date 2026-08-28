@@ -146,10 +146,47 @@ mutate** — verified by re-reading the disk after each call.
 
 So 1000–10000 and the 100-IOPS step are enforced by the server, not just documented.
 
-**Modifying a disk attached to a VM requires permission on the VM, not the disk.** Every attempt on
-an attached disk returns `403 Resource 'compute/.../virtualMachines/<vm>' is forbidden`, naming the
-VM. The same SA creates and edits standalone disks fine. Worth knowing for the least-privilege story:
-`local`/`fleet` modes act on attached disks, so VM-level rights are required.
+### Dependent vs independent disks — the critical distinction [V]
+
+A disk created **inside the VM spec** (`disk.spec`) is *owned* by that VM. One created separately and
+attached by reference (`disk.ref`) is not.
+
+`metadata.usages` on the disk is the discriminator:
+
+| Disk | usages | Editable via disk API? |
+|---|---|---|
+| created in VM spec (dependent) | `own` + `attach` | **no — 403** |
+| created standalone, attached by ref | `attach` only | **yes — 200** |
+
+The 403 reads `Resource 'compute/.../virtualMachines/<vm>' is forbidden`, which looks like a
+permissions problem and is not. Proven by attaching an independent disk to the *same* VM with the
+*same* SA: it edits fine (200), while the VM-owned disk on that VM still returns 403. Dependent disks
+must be changed through `mws compute vm update --storage-disks`, resending the full spec.
+
+There is **no `managed` field** in the API response, the SDK model, or the current CLI
+`--storage-disks` schema — it appears only in a docs example. The reliable discriminator is
+`usages` containing `own`, or `spec.storage.disks[].disk` having `spec` vs `ref`.
+
+Also note `deviceName` differs by location: `spec.storage.disks[].deviceName` = `datadisk`,
+`status.storage.disks[].deviceName` = `mws-datadisk`. The status form matches the metric label and
+the `/dev/disk/by-id/` path.
+
+### The VM ceiling is NOT enforced [V]
+
+On a `base-2-8` (2 vCPU → pool `3000 × 2 = 6000`), an attached independent disk accepted every value
+up to the disk maximum:
+
+```
+iops=5000  → 200      iops=8000   → 200
+iops=6000  → 200      iops=10000  → 200
+iops=6100  → 200
+```
+
+The platform takes 10000 on a VM that can only deliver 6000, and bills for it. Only the disk-level
+bounds (1000–10000, step 100) are validated.
+
+→ **The `3000 × vCPU` check is entirely the agent's responsibility.** Nothing server-side prevents
+provisioning IOPS the VM can never use, and `validateOnly` will not catch it either.
 
 `status.iops` breaks down as `{base, extra, total}` — `base` is the free tier (1000), `extra` is the
 billed portion. `status.throughput` at 1000 IOPS reads `33554432 Bps` = 32 MiB/s, matching
@@ -446,14 +483,12 @@ Metadata token confirmed working from inside the guest.
 ## Open questions
 
 1. Rate limit / cooldown on disk modification.
-2. Behaviour when `iops` exceeds the **VM** ceiling (`3000 × vCPU`). Disk-level bounds are enforced
-   (1000–10000, step 100), but the VM pool could not be tested: the SA cannot modify a VM-attached
-   disk, and a standalone disk has no VM pool. Needs VM-level write rights to settle.
-3. Whether `*_quota_utilization` is expected to work — it reads 0 at full saturation.
+2. Whether `*_quota_utilization` is expected to work — it reads 0 at full saturation.
 
 Closed: `DiskRequest`/`DiskSpecRequest` schema and mutability; guest device mapping; Prometheus
 metric names, labels and semantics; `<service>` value; read-queue question (none exists);
-monitoring auth model.
+monitoring auth model; Go SDK disk client; server-side validation bounds; VM ceiling not enforced;
+dependent vs independent disk editability.
 
 ---
 

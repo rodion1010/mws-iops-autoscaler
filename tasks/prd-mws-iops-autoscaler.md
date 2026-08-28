@@ -71,6 +71,20 @@ a fleet.
 - [ ] A VM that does not exist or is unreachable is logged and skipped; other VMs still process
 - [ ] Typecheck/lint passes
 
+### US-004a: Classify disks as dependent or independent
+**Description:** As the agent, I must know which disks I can actually change, because a disk owned by
+its VM cannot be modified through the disk API at all.
+
+**Acceptance Criteria:**
+- [ ] For every discovered disk, reads `metadata.usages` and classifies it: `own` present →
+      **dependent** (VM-owned); `attach` only → **independent**
+- [ ] Independent disks are managed through `UpdateDisk` as normal
+- [ ] Dependent disks are, for MVP, reported as unmanageable with the reason and excluded from
+      scaling — never silently skipped
+- [ ] The classification appears in logs, the dry-run report, and the exported metrics
+- [ ] A disk that changes class between discovery cycles is reclassified, not cached forever
+- [ ] Typecheck/lint passes
+
 ### US-004: Disk selection strategies
 **Description:** As an operator, I want three ways to say which disks are in scope so that I can
 opt in broadly or narrowly.
@@ -125,7 +139,7 @@ spikes do not throttle.
 - [ ] Triggers when window utilization percentile ≥ threshold **and** a saturation signal confirms
       (latency quantile elevated or write queue non-empty)
 - [ ] New value = `min(current + step, ceiling)`, rounded up to a 100-IOPS multiple
-- [ ] Never exceeds `min(10000, vmType.spec.disks.totalIops)`
+- [ ] Never exceeds `min(10000, 3000 × vcpuCount)` — the platform does not enforce this (FR-15c)
 - [ ] Respects cooldown since the last change
 - [ ] Typecheck/lint passes
 
@@ -134,8 +148,9 @@ spikes do not throttle.
 does not spend money on the wrong lever.
 
 **Acceptance Criteria:**
-- [ ] Reads the VM pool size from `GET /compute/v1/vmTypes/{vmType}` → `spec.disks.totalIops`;
-      never hardcodes `3000 × vCPU`
+- [ ] Computes the VM pool as `3000 × spec.cpu.vcpuCount` from `GET /compute/v1/vmTypes/{vmType}`.
+      The documented `spec.disks.totalIops` returns `null` on every VM type, so it cannot be used;
+      re-check whether it starts being served before relying on the hardcoded ratio long-term
 - [ ] Sums observed IOPS across all disks on the VM and compares to that pool size
 - [ ] When the disk is saturated **and** the VM pool is saturated, no scale-up is issued
 - [ ] Emits a distinct, actionable event: the bottleneck is vCPU, not disk IOPS
@@ -251,15 +266,15 @@ needs, per mode, so that I do not have to grant it broad rights.
   signal (latency quantile or write queue depth).
 - FR-11: Scale-down requires a **high** percentile of utilization below threshold and no elevated
   saturation signal.
-- FR-12: The agent must never set IOPS outside `[1000, min(10000, vmType.spec.disks.totalIops)]`,
-  and always on a 100-IOPS boundary. The VM pool size must be read from the `vmTypes` API, not
-  computed from a hardcoded per-vCPU ratio, so the agent tracks the platform if the ratio changes.
-  The OpenAPI schema places no bounds on `iops` (`int64`, no min/max), so this check is the agent's
-  responsibility and cannot be delegated to request validation.
+- FR-12: The agent must never set IOPS outside `[1000, min(10000, 3000 × vcpuCount)]`, and always on
+  a 100-IOPS boundary. `vcpuCount` comes from `GET /compute/v1/vmTypes/{vmType}` → `spec.cpu`;
+  the documented `spec.disks.totalIops` is `null` on every type and cannot be used. The disk-level
+  half (1000–10000, step 100) is enforced server-side, but the VM-pool half is not (FR-15c), so this
+  check cannot be delegated to request validation.
 - FR-13: The following must be configurable, with the defaults in §6: window length, percentile,
   utilization threshold, step, and cooldown — each independently for up and down; plus floor,
   ceiling override, discovery interval, and 24 h change budget.
-- FR-14: When a disk is saturated and the VM pool (`vmType.spec.disks.totalIops`) is also saturated, the agent must
+- FR-14: When a disk is saturated and the VM pool (`3000 × vcpuCount`) is also saturated, the agent must
   suppress scale-up and emit a "vCPU is the bottleneck" event.
 
 **Application and safety**
@@ -269,9 +284,15 @@ needs, per mode, so that I do not have to grant it broad rights.
   with `400`. The agent must still clamp and round locally — to avoid wasting a round trip, and
   because the OpenAPI schema declares no bounds, so this validation is server behaviour rather than
   a contract.
-- FR-15b: Modifying a disk attached to a VM requires write permission on the **VM**, not the disk;
-  the platform returns `403` naming the VM resource. The permission preflight (FR-21) must check
-  VM-level rights, not disk-level.
+- FR-15b: A disk **owned** by its VM (created inside the VM spec; `metadata.usages` contains `own`)
+  cannot be modified through the disk API — the platform returns `403` naming the VM resource. This
+  is an ownership constraint, not a permissions one: an independent disk attached by `ref` to the
+  same VM edits successfully with the same credentials. The agent must classify disks (US-004a) and
+  must not report this as a permissions failure.
+- FR-15c: The VM pool ceiling (`3000 × vCPU`) is **not enforced by the platform**. A 2-vCPU VM with a
+  6000 IOPS pool accepts a disk set to 10000 and bills for it; `validateOnly` does not catch it
+  either. Enforcing the ceiling is entirely the agent's responsibility — FR-12 is the only thing
+  standing between a bug and billed-but-unusable IOPS.
 - FR-16: The agent must verify the applied value against the API response.
 - FR-17: A per-disk cooldown and a rolling 24 h change budget must gate every change.
 - FR-18: `--dry-run` must exercise the full decision path with no writes.
@@ -333,7 +354,7 @@ All values are overridable. These ship as defaults.
 |---|---|---|
 | `step_quantum` | 100 IOPS | matches the billing package size |
 | `floor` | 1000 IOPS | included in the disk base price — free headroom |
-| `ceiling` | `min(10000, vmType.spec.disks.totalIops)` | read from the API, not configured |
+| `ceiling` | `min(10000, 3000 × vcpuCount)` | computed; platform does not enforce it |
 | `discovery_interval` | 5 min | picks up newly attached disks |
 | **Scale-up** | | |
 | `up.window` | 5 min | |
@@ -400,7 +421,7 @@ only money, and only briefly. Up is fast and decisive; down is slower and takes 
 - **Stability:** fewer than 5 changes per disk per day on a workload with a stable daily profile
   (evidence that hysteresis works).
 - **Correctness:** zero scale-ups issued while the VM pool was saturated.
-- **Safety:** zero IOPS values written outside `[1000, min(10000, vmType.spec.disks.totalIops)]`; zero disks created.
+- **Safety:** zero IOPS values written outside `[1000, min(10000, 3000 × vcpuCount)]`; zero disks created.
 
 ---
 
@@ -413,15 +434,14 @@ only money, and only briefly. Up is fast and decisive; down is slower and takes 
   no exported names are published. Also unresolved: the `<service>` path value for Compute, and
   whether a **read** queue metric exists (only write queue is documented). One request to
   `monitoring.mwsapis.ru` on a live project settles all three. **Blocks the decider.**
-- **OQ-3 — Dependent disks.** Changing their IOPS requires a full spec through
-  `mws compute vm update`, a different code path from independent disks. Deferred from MVP —
-  confirm that is acceptable.
+- **OQ-3 — Dependent disks.** Confirmed unmanageable through the disk API (FR-15b); they need a
+  full-spec round trip through `vm update`. Deferred from MVP — confirm that is acceptable, given a
+  VM's boot disk is always dependent and so always out of scope under this decision.
 - **OQ-4 — Metric publication lag and granularity in the API.** The documented 15 s refers to console
   graphs. This sets the achievable floor on window length and cooldown.
 - **OQ-5 — Platform rate limits on disk modification.** Undocumented. Determines whether the 24 h
   change budget needs to be lower.
-- **OQ-6 — Behaviour when `iops` exceeds the VM ceiling.** Reject, silent clamp, or accept and bill?
-  Decides whether the FR-12 check must be strictly pre-emptive.
+- **OQ-6 — resolved.** The platform accepts and bills. See FR-15c.
 - **OQ-7 — Latency thresholds for the confirming signal.** Absolute millisecond thresholds are
   workload-dependent. Options: a configurable absolute value, or a baseline-relative detector that
   learns the disk's quiet-state latency. Needs a decision.
