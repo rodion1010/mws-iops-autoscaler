@@ -7,4 +7,4 @@
 | [003](ADR-003-disk-write-paths.md) | Two write paths: disk spec for independent, VM spec for dependent | Accepted |
 
 Requirements live in `tasks/prd-mws-iops-autoscaler.md`. Measured platform behaviour lives in
-`CLAUDE.md`. Design input from the product side is in `docs/iops-autoscaler-artifacts/`.
+`CLAUDE.md`. Architecture and testing strategy are in `docs/design.md`; configuration in `docs/configuration.md`.
