@@ -27,10 +27,10 @@ Scope: MWS Cloud Platform (`mws.ru/docs/cloud-platform/**`).
 `https://mws.ru/docs/cloud-platform/compute/general/disks-iops-limits.html`
 
 - VM ceiling: **3000 IOPS per vCPU**. 4 vCPU → 12000.
-  **Do not hardcode this — the API serves it.** `GET /compute/v1/vmTypes/{vmType}` →
-  `spec.disks.totalIops` ("Максимальное количество операций ввода-вывода в секунду (IOPS) на ВМ.
-  Зависит от количества виртуальных процессорных ядер (vCPU) у ВМ"). vCPU count itself is
-  `spec.cpu.vcpuCount`.
+  The spec defines `GET /compute/v1/vmTypes/{vmType}` → `spec.disks.totalIops`, but **the API returns
+  `spec.disks: null` on every VM type** (verified on `base-2-8`, `base-2-4`, `base-4-16`, `gen-4-16`,
+  and all 40 in the list response). Only `spec.cpu.vcpuCount` is populated, so the ceiling must be
+  computed as `3000 × vcpuCount` until the field is served.
 - Effective disk performance = whichever limit binds first («ограничение, которое достигается раньше»).
   Docs example: 2 vCPU (6000 pool), two 6000-IOPS disks → one active disk gets 6000, both active get
   3000 each. A disk limit above its fair share is useful (borrows the idle pool); above the whole
@@ -180,6 +180,52 @@ scrape_configs:
     - targets: ['monitoring.mwsapis.ru']
 ```
 
+### Prometheus export — measured against a live project [V]
+
+Verified 2026-08-28 on `example-project` with a `base-2-8` VM, two NBS-PL2 disks at
+1000 IOPS, under `fio randread 4k iodepth=64 numjobs=4`.
+
+- `<service>` = **`compute`**. Invalid names return `400 validating 'service': invalid service name`.
+- Auth: **API key**, not the IAM token. An IAM token returns a misleading
+  `503 "export service: internal error / unexpected status code: 404"` that hides the real cause;
+  the API key returns a clean `403 ACCESS_DENIED permission='monitoring.metric.export'`.
+  Role: `monitoring.metricExporter`. It is **not** grantable from the CLI (`iam role` has only
+  `get`/`list`, and `roleBindings`/`accessBindings`/`getIamPolicy` all 404) — console only.
+- **No `# HELP` / `# TYPE` lines** in the output. Metric semantics must be inferred.
+
+Labels on every disk metric: `device_name`, `disk_name`, `host_name`, `project_name`, `service`,
+`vm_name`.
+`device_name` carries the **`mws-` prefix** — `device_name="mws-datadisk"` for `deviceName: datadisk`,
+so it joins directly to `/dev/disk/by-id/mws-datadisk`. `disk_name` is the generated cloud resource
+name (e.g. `iops-test-vm-mza3njax`), not the deviceName.
+
+| Metric | Notes |
+|---|---|
+| `compute_vm_disk_read_ops` / `_write_ops` | **average** over the scrape window, fractional |
+| `compute_vm_disk_read_ops_peak` / `_write_ops_peak` | **peak** over the window |
+| `compute_vm_disk_read_bytes` / `_write_bytes` (+`_peak`) | throughput, same avg/peak split |
+| `compute_vm_disk_read_latency_hist_bucket` / `_count` / `_sum` | **histogram**, not quantiles; `le` in **nanoseconds** |
+| `compute_vm_disk_write_latency_hist_*` | same |
+| `compute_vm_disk_write_queue_length` / `_max` | write queue only — **no read queue metric exists** |
+| `compute_vm_disk_ops_peak_quota_utilization` | **read 0 even at full saturation — do not use** |
+| `compute_vm_disk_bytes_peak_quota_utilization` | same, reads 0 |
+
+Non-disk VM metrics also exported: `compute_vm_network_{received,sent}_{bytes,packets}`,
+`compute_vm_open_sessions`, `compute_vm_session_limit`, `compute_vm_session_dropped_packets`,
+`compute_vm_firewall_dropped_packets`, `compute_vm_egress_nat_dropped_packets`.
+
+**Use `_peak`, not the average.** Under a load pinned at the 1000 IOPS limit:
+`read_ops = 361.47` but `read_ops_peak = 1002`. The average is diluted by the scrape window and
+understates saturation by ~3×; the peak lands on the limit almost exactly. A decider reading the
+average would conclude the disk is at 36% when it is in fact fully throttled.
+
+**The quota-utilization metrics look purpose-built for this and are broken.** Both read `0` on a disk
+whose peak equals its limit. Utilization must be computed as `read_ops_peak / spec.iops` instead.
+
+**Counter cross-check:** guest `/proc/diskstats` showed 960744 reads on `sdb`;
+`compute_vm_disk_read_latency_hist_count` showed 960770. The platform counts the same operations the
+guest does, so guest-side and platform-side collection are interchangeable for op counts.
+
 ### VM metrics [V]
 
 `https://mws.ru/docs/cloud-platform/compute/general/vm-monitoring.html`
@@ -299,17 +345,42 @@ resource "mws_compute_disk" "disk" {
 
 ---
 
+## Test environment [V]
+
+Project `example-project`, CLI profile `iops-autoscaler` (`client_timeout: 60s`).
+
+| Resource | Detail |
+|---|---|
+| `iops-test-net` / `iops-test-subnet` | `10.10.0.0/24`, internet access on |
+| `allow-ssh` firewall rule | INGRESS ALLOW TCP:22, priority 1000 |
+| `iops-test-vm` | `base-2-8` (2 vCPU → 6000 IOPS pool), Ubuntu 24.04, SA `claude` attached |
+| disks | `bootdisk` 20 GB, `datadisk` 10 GB, both 1000 IOPS |
+| access | `ssh -i secrets/id_ed25519 claude@203.0.113.10` |
+
+**A new network denies all inbound by default** — `fr-wuqpuv` INGRESS DENY `0.0.0.0/0` at priority
+65535, with only RFC1918 allowed. TCP connects (the NAT answers) but the SSH banner never arrives,
+which reads like a network fault rather than a firewall. An explicit ingress rule is required.
+
+`admin` and `root` are rejected as cloud-init usernames.
+
+Guest device mapping confirmed live: `/dev/disk/by-id/mws-datadisk → sdb`. A second undocumented
+alias also exists: `/dev/disk/by-id/scsi-0MWS_PersistentDisk_mws-<deviceName>`.
+
+Metadata token confirmed working from inside the guest.
+
 ## Open questions
 
-1. Metric names and label sets in the Prometheus export; `<service>` value for Compute; whether a
-   read-queue metric exists. → one request to `monitoring.mwsapis.ru`.
-2. Metric granularity, publication lag, and retention in the API (15 s is console-only).
-3. Rate limit / cooldown on disk modification.
-4. Behaviour when `iops` exceeds the VM ceiling — reject, clamp, or accept and bill. The schema
+1. Metric granularity, publication lag, and retention in the API (15 s is console-only). The scrape
+   window length matters — it sets how far `_peak` and the average diverge.
+2. Rate limit / cooldown on disk modification.
+3. Behaviour when `iops` exceeds the VM ceiling — reject, clamp, or accept and bill. The schema
    imposes no bound, so this is decided server-side.
-5. Disk client in the Go SDK (`service/compute/sdk`, `service/compute/client`).
+4. Disk client in the Go SDK (`service/compute/sdk`, `service/compute/client`).
+5. Whether `*_quota_utilization` is expected to work — it reads 0 at full saturation.
 
-Closed: full `DiskRequest`/`DiskSpecRequest` schema and field mutability; guest device mapping.
+Closed: `DiskRequest`/`DiskSpecRequest` schema and mutability; guest device mapping; Prometheus
+metric names, labels and semantics; `<service>` value; read-queue question (none exists);
+monitoring auth model.
 
 ---
 

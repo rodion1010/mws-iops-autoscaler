@@ -206,6 +206,21 @@ dependencies.
 
 ---
 
+### US-016: Least-privilege service account guidance
+**Description:** As an operator, I want to know the minimum permissions the agent's service account
+needs, per mode, so that I do not have to grant it broad rights.
+
+**Acceptance Criteria:**
+- [ ] README documents the minimum role set for `local` mode and for `fleet` mode separately
+- [ ] Documents the read-only subset for running with `--dry-run`, so the agent can be evaluated
+      before it is trusted to write
+- [ ] Startup performs a permission preflight: verifies it can list disks, read the VM type, and
+      (unless `--dry-run`) write IOPS — failing with a message naming the missing capability rather
+      than a raw 403
+- [ ] Documents that enabling the `compute` **service** in the project is a separate prerequisite
+      from granting roles; a project without it returns 403 regardless of role
+- [ ] Typecheck/lint passes
+
 ## 4. Functional Requirements
 
 **Modes and scope**
@@ -247,6 +262,34 @@ dependencies.
 - FR-17: A per-disk cooldown and a rolling 24 h change budget must gate every change.
 - FR-18: `--dry-run` must exercise the full decision path with no writes.
 - FR-19: Every decision, including no-change, must be logged with its inputs.
+
+**Permissions**
+- FR-20: The agent must run with least privilege and must document, per mode, the minimum roles
+  required. Roles confirmed to exist on the platform:
+
+  | Role | Grants |
+  |---|---|
+  | `compute.viewer` | view VMs, disks, images, snapshots |
+  | `compute.disk.user` | view disks and use them as a source |
+  | `compute.editor` | view, create, delete, edit VMs and disks |
+  | `monitoring.metricExporter` | export project metrics to external observability |
+  | `compute.agent` | default role for the `compute` service agent |
+
+  Proposed minimum sets, to be verified empirically before the README claims them:
+
+  | Mode | Read-only (`--dry-run`) | Acting |
+  |---|---|---|
+  | `local` | `compute.viewer` | `compute.viewer` + `compute.editor` |
+  | `fleet` | `compute.viewer` + `monitoring.metricExporter` | the same, plus `compute.editor` |
+
+  `compute.editor` is broader than needed — it grants create and delete on VMs and disks, while the
+  agent only ever updates `spec.iops` on an existing disk. If no narrower role covers disk update,
+  that gap should be raised with the platform team rather than papered over.
+- FR-21: The agent must preflight its permissions at startup and fail with a message naming the
+  missing capability, not a raw 403.
+- FR-22: Documentation must state that enabling the `compute` service in the project is a
+  prerequisite distinct from role assignment — a project without the service enabled returns
+  `403 PERMISSION_DENIED` no matter which roles are granted.
 
 ---
 
