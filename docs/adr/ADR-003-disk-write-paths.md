@@ -7,9 +7,9 @@
 
 ## Context
 
-A disk attached to a VM is either **dependent** (created inside the VM's spec; `metadata.usages`
-contains `own`) or **independent** (a separate resource attached by `ref`; `usages` has `attach`
-only).
+A disk attached to a VM is either **dependent** (created inline in the VM's `spec.storage.disks[]`
+as `disk.spec`) or **independent** (a separate resource referenced as `disk.ref`). Reading the disk
+directly shows the same split in `metadata.usages`: `own` + `attach` versus `attach` alone.
 
 Measured behaviour:
 
@@ -46,8 +46,12 @@ Support both. Classify each disk at discovery and route the write accordingly:
 
 | Class | Detection | Write path |
 |---|---|---|
-| Independent | `usages` has `attach` only | `UpdateDisk` — partial, `spec.iops` alone |
-| Dependent | `usages` contains `own` | `vm update --storage-disks` — full spec round-trip |
+| Independent | VM's `spec.storage.disks[].disk` has `ref` | `UpdateDisk` — partial, `spec.iops` alone |
+| Dependent | VM's `spec.storage.disks[].disk` has `spec` | `vm update --storage-disks` — full spec round-trip |
+
+`metadata.usages` containing `own` gives the same answer and is available when reading the disk
+directly, but `spec` vs `ref` on the VM entry is the primary signal since discovery reads the VM
+anyway.
 
 ## Options Considered
 
@@ -124,9 +128,9 @@ These are manageable with care; they are not reasons to exclude the majority of 
   concurrent-modification test.
 - Dependent writes must carry `etag` and re-read before writing. Without that, this is a latent
   data-loss bug rather than a theoretical one.
-- The `managed: true` field appears in the docs example for `vm update --storage-disks` but is absent
-  from the API response, the SDK model, and the current CLI schema. Its role needs confirming before
-  relying on it.
+- `managed: true` is **not** a usable discriminator. Confirmed with the platform team: it exists only
+  in the API surface serving the UI, and is absent from the public response, the SDK model, and the
+  CLI schema. Classification uses `spec` vs `ref` on the VM's disk entry.
 - Classification must be re-evaluated per discovery cycle, since a disk's class can change under the
   agent's feet.
 
@@ -138,12 +142,12 @@ These are manageable with care; they are not reasons to exclude the majority of 
 
 ## Action Items
 
-1. [ ] `classify(disk)` from `metadata.usages`; re-evaluate every discovery cycle.
+1. [ ] `classify(disk)` from `spec` vs `ref` on the VM's disk entry; re-evaluate every discovery
+       cycle.
 2. [ ] Independent path: `UpdateDisk` with `spec.iops` only, plus idempotency key.
 3. [ ] Dependent path: read VM, mutate one disk entry, write back with `etag` and idempotency key.
 4. [ ] Assert on the dependent path that every field other than the target `iops` round-trips
        unchanged; abort the write if not.
 5. [ ] Add a concurrent-modification test for the dependent path specifically.
-6. [ ] Confirm what `managed: true` does in `--storage-disks`, or confirm it is vestigial.
-7. [ ] Surface a *recommendation* to convert dependent disks to independent, with the one-way and
+6. [ ] Surface a *recommendation* to convert dependent disks to independent, with the one-way and
        deletion-semantics caveats stated. Never convert automatically.
