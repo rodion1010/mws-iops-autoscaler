@@ -214,10 +214,36 @@ Non-disk VM metrics also exported: `compute_vm_network_{received,sent}_{bytes,pa
 `compute_vm_open_sessions`, `compute_vm_session_limit`, `compute_vm_session_dropped_packets`,
 `compute_vm_firewall_dropped_packets`, `compute_vm_egress_nat_dropped_packets`.
 
-**Use `_peak`, not the average.** Under a load pinned at the 1000 IOPS limit:
-`read_ops = 361.47` but `read_ops_peak = 1002`. The average is diluted by the scrape window and
-understates saturation by ~3×; the peak lands on the limit almost exactly. A decider reading the
-average would conclude the disk is at 36% when it is in fact fully throttled.
+### Timing, measured [V]
+
+Two controlled runs (constant 500 IOPS via `fio --rate_iops=500`, and full saturation), sampled
+every 10 s for ~5 min each, cross-checked against `read_latency_hist_count` deltas:
+
+| Property | Value |
+|---|---|
+| **Publication interval** | **exactly 30 s** (all `metric_ts` deltas are multiples of 30000 ms) |
+| **Averaging window** | **trailing 60 s** — windows overlap 50% |
+| **Publication lag** | **62–90 s**, mean 75 s (wall clock minus `metric_ts`) |
+| `_peak` | max within the same 60 s window |
+
+The 60 s window is exact, not approximate: every steady-state sample matched
+`(hist_count[t] − hist_count[t−60s]) / 60` to within 0.5 ops/s, while the 30 s calculation did not.
+
+**At steady state the average and the peak agree.** Saturated at the 1000 IOPS limit:
+`read_ops = 999.9–1000.3`, `read_ops_peak = 1001–1002`. At a constant 500: `read_ops = 499.8–500.1`,
+`read_ops_peak = 500–519`. Ratio peak/avg ≈ 1.01.
+
+**They diverge only during load transitions**, because the 60 s trailing window still contains the
+previous regime. Measured on the ramp into saturation: `read_ops` went 636 → 1136 → 999.9 across
+three publications while `read_ops_peak` sat at 1001 from the first one. The 1136 overshoot is the
+window straddling idle and full load.
+
+→ **`_peak` reacts within one publication; the average takes up to 60 s longer.** Prefer `_peak` for
+scale-up decisions. The average is not wrong, just slower.
+
+→ **Worst-case detection latency ≈ 75 s lag + 60 s window ≈ 135 s.** This is the hard floor on dwell
+time: no decision can be based on data younger than this, and any dwell shorter than ~3 min is
+measuring noise.
 
 **The quota-utilization metrics look purpose-built for this and are broken.** Both read `0` on a disk
 whose peak equals its limit. Utilization must be computed as `read_ops_peak / spec.iops` instead.
