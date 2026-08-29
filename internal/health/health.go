@@ -18,6 +18,16 @@ type Readiness struct {
 	configValid        bool
 	discoverySucceeded bool
 	sourceReachable    bool
+
+	// budgetUnhealthy is inverted relative to the other three fields
+	// (zero value = healthy) specifically so a freshly zero-valued
+	// Readiness — including every existing `&Readiness{}` construction
+	// site — starts healthy by default, matching state.Tracker's own
+	// default, without requiring a constructor call (issue #10). The
+	// exported surface (SetBudgetHealthy, the JSON body's BudgetHealthy
+	// field) stays framed positively like every other field here; only
+	// the internal storage is inverted.
+	budgetUnhealthy bool
 }
 
 func (r *Readiness) SetConfigValid(v bool) {
@@ -38,12 +48,25 @@ func (r *Readiness) SetSourceReachable(v bool) {
 	r.sourceReachable = v
 }
 
+// SetBudgetHealthy reports whether the durable 24h change budget can
+// currently be trusted (issue #10) — false once any budget persistence
+// operation (reserve/confirm/release) has failed, which state.Tracker
+// treats as sticky for the process's lifetime. A process reporting
+// unready for this reason needs a restart (which re-runs LoadBudget and
+// startup reconciliation) to recover, not a wait — matching how the other
+// three conditions here behave.
+func (r *Readiness) SetBudgetHealthy(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.budgetUnhealthy = !v
+}
+
 // Ready reports whether every condition design.md §7.3 requires currently
 // holds.
 func (r *Readiness) Ready() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.configValid && r.discoverySucceeded && r.sourceReachable
+	return r.configValid && r.discoverySucceeded && r.sourceReachable && !r.budgetUnhealthy
 }
 
 type readyzBody struct {
@@ -51,6 +74,7 @@ type readyzBody struct {
 	ConfigValid        bool `json:"config_valid"`
 	DiscoverySucceeded bool `json:"discovery_succeeded"`
 	SourceReachable    bool `json:"source_reachable"`
+	BudgetHealthy      bool `json:"budget_healthy"`
 }
 
 // ReadyzHandler returns 200 with a breakdown when every condition holds,
@@ -61,10 +85,11 @@ func (r *Readiness) ReadyzHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		r.mu.RLock()
 		body := readyzBody{
-			Ready:              r.configValid && r.discoverySucceeded && r.sourceReachable,
+			Ready:              r.configValid && r.discoverySucceeded && r.sourceReachable && !r.budgetUnhealthy,
 			ConfigValid:        r.configValid,
 			DiscoverySucceeded: r.discoverySucceeded,
 			SourceReachable:    r.sourceReachable,
+			BudgetHealthy:      !r.budgetUnhealthy,
 		}
 		r.mu.RUnlock()
 

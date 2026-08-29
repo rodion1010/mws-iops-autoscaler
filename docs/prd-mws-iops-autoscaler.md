@@ -319,6 +319,13 @@ unused headroom.
       Cooldowns may reset in memory on restart; this is safe because `--validate-config` requires
       each cooldown ≤ its paired window, so the cold-start wait after a restart is never shorter than
       the cooldown it forgot (ADR-013)
+- [ ] The hard cap holds under a crash mid-write, not just across a clean restart: the budget slot is
+      durably reserved before a write is attempted, not only recorded after one succeeds, so a crash
+      between the platform confirming a change and this process recording that fact can never silently
+      undercount it (ADR-013's M6 amendment, issue #10)
+- [ ] A budget persistence failure at any point — reservation, confirmation, or release, not only at
+      startup — permanently disables further writes for that process's lifetime and is surfaced on
+      `/readyz` and `/metrics`, not merely logged (issue #10)
 - [ ] Budget and cooldowns are configurable
 - [ ] Typecheck/lint passes
 

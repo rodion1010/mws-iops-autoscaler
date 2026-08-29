@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -284,6 +285,7 @@ func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent
 		tracker:              state.NewTracker(budget),
 		telemetry:            telemetry.NewRegistry(),
 		journal:              journal.NewWriter(discard{}),
+		readiness:            &health.Readiness{},
 	}, act
 }
 
@@ -440,5 +442,211 @@ func TestDiscover_selectedSucceedsWhenEveryDeviceMatches(t *testing.T) {
 	}
 	if len(a.managed) != 1 || a.managed[0].Disk.DeviceName != "good" {
 		t.Errorf("managed = %+v, want exactly the selected disk", a.managed)
+	}
+}
+
+// --- issue #10 (reopened): crash-safe/fail-closed budget persistence ---
+
+func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
+	act := &recordingActuator{}
+	a, tracker := newTestAgent(t, true, act)
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 1 {
+		t.Errorf("ChangesInLast24h = %d, want 1 — a successful write must be reserved and confirmed", got)
+	}
+	if len(tracker.PendingChanges()) != 0 {
+		t.Errorf("PendingChanges() = %+v, want none — a successful write must be Confirmed, not left Pending", tracker.PendingChanges())
+	}
+}
+
+func TestActuate_releasesReservationOnWriteFailure(t *testing.T) {
+	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
+	a, tracker := newTestAgent(t, true, act)
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if len(act.calls) != 1 {
+		t.Fatalf("Actuator.Apply called %d times, want 1", len(act.calls))
+	}
+	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 0 {
+		t.Errorf("ChangesInLast24h = %d, want 0 — a failed write's reservation must be released, not left counted", got)
+	}
+	if len(tracker.PendingChanges()) != 0 {
+		t.Errorf("PendingChanges() = %+v, want none after a released reservation", tracker.PendingChanges())
+	}
+}
+
+func TestActuate_releasesReservationOnDryRun(t *testing.T) {
+	act := &recordingActuator{}
+	a, tracker := newTestAgent(t, true, act)
+	a.dryRun = true
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 0 {
+		t.Errorf("ChangesInLast24h = %d, want 0 — a dry run must never consume real budget", got)
+	}
+}
+
+func TestActuate_refusesWriteWhenBudgetUnhealthy(t *testing.T) {
+	act := &recordingActuator{}
+	a := newTestAgentWithUnhealthyBudget(t, act)
+
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if len(act.calls) != 0 {
+		t.Errorf("Actuator.Apply called %d times, want 0 — an unhealthy budget must refuse before ever reaching the Actuator", len(act.calls))
+	}
+}
+
+// newTestAgentWithUnhealthyBudget builds an Agent whose Tracker is already
+// unhealthy — by pointing its Budget at a directory that's then removed,
+// so one deliberate Reserve call fails and flips Healthy() false, the same
+// mechanism a real filesystem/permissions failure would use in production.
+// This can only be built this indirectly from outside internal/state: its
+// fields (Budget.path, Tracker.budget) are unexported, and rightly so.
+func newTestAgentWithUnhealthyBudget(t *testing.T, act actuator.Actuator) *Agent {
+	t.Helper()
+	sub := t.TempDir() + "/sub"
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	budget, err := state.LoadBudget(sub + "/budget.jsonl")
+	if err != nil {
+		t.Fatalf("LoadBudget: %v", err)
+	}
+	tracker := state.NewTracker(budget)
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := tracker.ReserveChange("force-unhealthy", "force-unhealthy-key", 0, 0, time.Now()); err == nil {
+		t.Fatal("test setup: expected ReserveChange to fail once the budget directory is gone")
+	}
+	if tracker.Healthy() {
+		t.Fatal("test setup: expected the tracker to be unhealthy after a failed Reserve")
+	}
+	return &Agent{
+		vmName:         "vm-1",
+		allowScaleDown: true,
+		actuator:       act,
+		tracker:        tracker,
+		telemetry:      telemetry.NewRegistry(),
+		journal:        journal.NewWriter(discard{}),
+	}
+}
+
+// erroringActuatorRecording is erroringActuator plus call recording, for
+// tests that need both.
+type erroringActuatorRecording struct {
+	err   error
+	calls []decider.Decision
+}
+
+func (e *erroringActuatorRecording) Apply(_ context.Context, d decider.Decision, _ actuator.Target, _ bool, _ string) (actuator.Applied, error) {
+	e.calls = append(e.calls, d)
+	return actuator.Applied{}, e.err
+}
+
+func TestReconcilePendingBudget_confirmsWhenLiveMatchesTarget(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 2000}, // matches Target below — the write landed
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if err := a.tracker.ReserveChange("vm-1-good", "key-1", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if len(a.tracker.PendingChanges()) != 0 {
+		t.Errorf("PendingChanges() = %+v, want none — a reservation whose live current matches Target must be Confirmed", a.tracker.PendingChanges())
+	}
+	if got := a.tracker.State("vm-1-good", time.Now()).ChangesInLast24h; got != 1 {
+		t.Errorf("ChangesInLast24h = %d, want 1 — Confirm must still count", got)
+	}
+}
+
+func TestReconcilePendingBudget_releasesWhenLiveMatchesBefore(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000}, // matches Before — the write never landed
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if err := a.tracker.ReserveChange("vm-1-good", "key-1", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if len(a.tracker.PendingChanges()) != 0 {
+		t.Errorf("PendingChanges() = %+v, want none", a.tracker.PendingChanges())
+	}
+	if got := a.tracker.State("vm-1-good", time.Now()).ChangesInLast24h; got != 0 {
+		t.Errorf("ChangesInLast24h = %d, want 0 — Release must stop it counting", got)
+	}
+}
+
+func TestReconcilePendingBudget_ambiguousLiveValueStaysPending(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 5000}, // neither Before(1000) nor Target(2000)
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if err := a.tracker.ReserveChange("vm-1-good", "key-1", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if len(a.tracker.PendingChanges()) != 1 {
+		t.Errorf("PendingChanges() = %+v, want the reservation left pending — an ambiguous live value must never be guessed at", a.tracker.PendingChanges())
+	}
+	if got := a.tracker.State("vm-1-good", time.Now()).ChangesInLast24h; got != 1 {
+		t.Errorf("ChangesInLast24h = %d, want 1 — still counted while unresolved", got)
+	}
+}
+
+func TestReconcilePendingBudget_detachedDiskLeftPending(t *testing.T) {
+	client := &stubClient{
+		vm:    vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000}, "vm-1-bad": {Name: "vm-1-bad", SpecIOPS: 1000}},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	// Reserve for a disk that is not (and never was, in this test) part of
+	// the managed set — simulating a disk detached between the crash and
+	// this restart.
+	if err := a.tracker.ReserveChange("vm-1-detached", "key-1", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if len(a.tracker.PendingChanges()) != 1 {
+		t.Errorf("PendingChanges() = %+v, want the detached disk's reservation left pending — nothing to verify against, so it must not be silently dropped", a.tracker.PendingChanges())
 	}
 }

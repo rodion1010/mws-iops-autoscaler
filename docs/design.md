@@ -120,7 +120,7 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
 | **Decider** | Demand estimate → raw target | Pure; no clamping here |
 | **Guardrails** | Clamp, round, rate-limit, cooldown, budget, VM headroom | Last line before any write |
 | **Actuator** | Apply the change via the correct write path | Only component that mutates anything |
-| **State/Journal** | Last action per disk, cooldowns, 24h budget, decision history | Cooldowns/history in-memory v1; 24h budget persisted (ADR-013) — see §9.4 |
+| **State/Journal** | Last action per disk, cooldowns, 24h budget, decision history | Cooldowns/history in-memory v1; 24h budget persisted as a crash-safe intent/result log (ADR-013, issue #10) — see §9.4 |
 
 ### 3.3 Why this shape
 
@@ -714,6 +714,14 @@ type GuardrailState struct {
     ChangesInLast24h int
 }
 
+// state.Tracker.State reports ChangesInLast24h as a large sentinel
+// (effectively unbounded) once the durable budget has become unhealthy —
+// any persistence operation (Reserve/Confirm/Release) failing mid-run
+// (issue #10) — rather than adding a second "refuse to act" signal
+// GuardrailState/Decide would need to know about. The existing
+// `ChangesInLast24h >= p.MaxChangesPer24h` → budget_exhausted branch
+// (§4.6 below) already does the right thing unmodified.
+
 type Decider interface {
     // diskID/current mirror Analyzer.Analyze's explicit-diskID rationale —
     // Decision.DiskID/Current must be set even on an Analysis with no
@@ -861,6 +869,7 @@ iops_autoscaler_window_fill_ratio{disk,direction}             gauge
 iops_autoscaler_change_budget_remaining{disk}                 gauge
 iops_autoscaler_cost_delta_iops_hours{disk}                   counter
 iops_autoscaler_disk_discovery_skipped_total{alias,reason}    counter
+iops_autoscaler_budget_healthy                                gauge 0|1
 ```
 
 `disk_latency_baseline_seconds` has no `{op}` label, unlike `disk_observed_iops` — the baseline (§4.4) is
@@ -912,7 +921,8 @@ these records, not from reasoning.
 
 ### 7.3 Health and alerting
 
-`/healthz` (process alive) and `/readyz` (config valid, discovery succeeded, ≥1 source reachable).
+`/healthz` (process alive) and `/readyz` (config valid, discovery succeeded, ≥1 source reachable, budget
+healthy).
 `source_reachable` is driven by the Sampler's own `Tick()` result, not by Compute API discovery
 succeeding (issue #15) — even in `local` mode these are different dependencies: the guest source reads
 `/proc/diskstats`, which can fail (permissions, a missing disk) independent of whether the Compute API
@@ -920,6 +930,13 @@ is reachable. Conflating the two previously meant a metrics-collection outage ne
 `/readyz` as long as discovery kept succeeding. A successful `Tick()` alone is not sufficient, though
 (issue #4): it also requires the managed set to be non-empty, since a `Tick()` over zero disks trivially
 "succeeds" without having verified anything is actually reachable.
+
+`budget_healthy` (issue #10) is `false` once any durable budget persistence operation
+(reserve/confirm/release) has failed during this process's run — polled once per reconcile cycle from
+`state.Tracker.Healthy()`. Recovery requires a restart (which re-runs `LoadBudget` and the startup
+reconciliation pass below), not a wait, matching how the other three conditions behave. Alert-worthy on
+its own: an operator seeing `/readyz` fail for this reason specifically knows the fix is "restart," not
+"wait for the network to come back."
 
 Alert-worthy: metric staleness beyond 3 publication intervals; write failure rate above threshold;
 change budget exhausted; `VM_IOPS_CAP_REACHED` sustained (actionable — add vCPU); any disk pinned at
@@ -1095,7 +1112,28 @@ milestone introduces.
   if restarts prove frequent. **The 24h change budget is not part of this deferral** — see ADR-013:
   the cold-start bound says nothing about total changes across many restarts in a day, so the budget
   counter must be reconstructible from durable storage on startup. M4 (Decider + Guardrails) is not
-  done without it.
+  done without it. Nor is a restart-only guarantee enough on its own (issue #10): a live-actuation
+  process can also crash *between* a write landing and the budget record for it becoming durable, or
+  suffer a mid-run persistence failure with no restart involved at all — see the crash-safety note
+  right below, ADR-013's amendment, and `internal/state`'s `Reserve`/`Confirm`/`Release` intent/result
+  log.
+- **Budget crash-safety (issue #10).** The durable budget is a small intent/result state machine, not
+  a single "record after success" line: `Tracker.ReserveChange` durably reserves a disk's budget slot
+  *before* the write is attempted (`state.StatusPending`), so a crash between the platform confirming a
+  write and this process recording that fact can never silently undercount a real change — the
+  reservation already exists and already counts. `ConfirmChange`/`ReleaseChange` resolve it afterward.
+  A reservation a previous run never resolved survives a restart as `Pending` and is reconciled once,
+  at startup right after the first successful discovery, against a fresh live read of the disk: live
+  current equal to the reservation's target confirms it; equal to its pre-write value releases it;
+  anything else is left pending rather than guessed at. Any persistence failure — at reservation,
+  confirmation, or release — marks `state.Tracker` permanently unhealthy for the rest of the process's
+  life; `Tracker.State` then reports `ChangesInLast24h` as an effectively-unbounded sentinel, so
+  `Decide`'s existing `budget_exhausted` path refuses every further write without the Decider needing a
+  second signal to know about. `Agent.actuate` also checks `Tracker.Healthy()` directly, to avoid even
+  attempting a reservation that would just fail again. `LoadBudget` itself fails closed on corruption: a
+  bad line anywhere but the very last one (which can only be an in-progress append torn by a crash,
+  recoverable by dropping it) refuses to start rather than silently skip the line and understate the
+  count.
 - **Leader election.** Two `fleet` agents on the same project would both act. v1 documents
   "run one"; a lease is the fix if it becomes real.
 - **Absolute latency thresholds.** Relative-to-baseline only in v1; `latency.mode: absolute` is in the

@@ -94,6 +94,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.discover(ctx); err != nil {
 		return fmt.Errorf("initial discovery: %w", err)
 	}
+	// Reconcile any budget reservation left pending by a previous run that
+	// crashed before resolving it (issue #10) — must happen after the
+	// first successful discover() (it needs a.managed to route live-state
+	// reads) and before the first reconcile() (which needs a trustworthy
+	// budget count).
+	a.reconcilePendingBudget(ctx)
+
 	// First sample is taken immediately too, so the first reconcile after
 	// startup isn't waiting a full CollectionInterval before it has
 	// anything at all (it will still be cold-start-empty per NFR-9 either
@@ -208,6 +215,19 @@ func (a *Agent) discover(ctx context.Context) error {
 	// fail — permissions, a missing disk — independent of Compute API
 	// reachability). It is driven solely by sampler.Tick()'s own success,
 	// in Run().
+
+	// Budget compaction scheduled here (issue #10, per Budget.Compact's
+	// own doc comment: "once per discovery cycle... is a natural fit —
+	// far less often than every reconcile"). A failure here is logged but
+	// not treated as making the budget unhealthy: Compact only ever
+	// replaces b.events with the freshly-written set after writeAll
+	// succeeds, so a failed attempt leaves the in-memory budget exactly as
+	// correct as it was before — only the on-disk file's pruning is
+	// deferred to the next cycle, not the budget's own accuracy.
+	if err := a.tracker.Compact(time.Now()); err != nil {
+		log.Printf("discover: budget compaction failed (will retry next cycle): %v", err)
+	}
+
 	return nil
 }
 
@@ -240,6 +260,13 @@ func (a *Agent) reconcile(ctx context.Context) {
 	a.mu.Unlock()
 
 	now := time.Now()
+
+	// Polled once per cycle rather than pushed from Tracker itself (issue
+	// #10) — keeps Tracker decoupled from health/telemetry the same way
+	// every other pure package here stays decoupled from its observers.
+	healthy := a.tracker.Healthy()
+	a.readiness.SetBudgetHealthy(healthy)
+	a.telemetry.RecordBudgetHealthy(healthy)
 
 	// Fail closed on a stale discovery snapshot (issue #15): a.managed
 	// keeps whatever discover() last populated even while discovery has
@@ -312,6 +339,30 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 		return
 	}
 
+	if !a.tracker.Healthy() {
+		// Fail closed (issue #10): a prior budget-persistence failure,
+		// this process's whole lifetime, means the durable count can no
+		// longer be trusted. Decide would already refuse via
+		// budget_exhausted (Tracker.State reports MaxInt), but checking
+		// here too avoids even attempting the ReserveChange call below,
+		// which would just fail again for the same reason.
+		log.Printf("actuate %s (%s): refusing to write — the change budget is unhealthy after a prior persistence failure, fail closed until restart (issue #10)", diskID, m.Disk.DeviceName)
+		return
+	}
+
+	// Reserve the budget slot before the write is even attempted (issue
+	// #10) — never after, which is what let a crash between the
+	// platform confirming a write and this process recording it silently
+	// undercount a real change against the hard cap. idempotencyKey is
+	// generated once here and threaded through both the reservation and
+	// the write itself, so a startup reconciliation can always find the
+	// exact record a given attempt belongs to.
+	idempotencyKey := uuid.NewString()
+	if err := a.tracker.ReserveChange(diskID, idempotencyKey, d.Current, d.Target, now); err != nil {
+		log.Printf("actuate %s (%s): failed to durably reserve a budget slot before writing — refusing to write: %v", diskID, m.Disk.DeviceName, err)
+		return
+	}
+
 	target := actuator.Target{
 		VMName:     a.vmName,
 		DeviceName: m.Disk.DeviceName,
@@ -320,9 +371,21 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	}
 
 	a.tracker.BeginResize(diskID)
-	applied, err := a.actuator.Apply(ctx, d, target, a.dryRun, uuid.NewString())
+	applied, err := a.actuator.Apply(ctx, d, target, a.dryRun, idempotencyKey)
 	a.tracker.EndResize(diskID)
 	if err != nil {
+		// The write did not land (or, for a dry run, was never meant to)
+		// — release the reservation. Live state was never touched by this
+		// attempt in either case, so releasing against d.Current (the
+		// same Before value just reserved with) is safe without a fresh
+		// read: an actuator error means Apply's own pre-write checks
+		// already refused before calling the platform, or the platform
+		// call itself failed outright — neither leaves live state at
+		// d.Target.
+		if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
+			log.Printf("actuate %s (%s): failed to release the budget reservation after a failed write: %v", diskID, m.Disk.DeviceName, rerr)
+		}
+
 		if errors.Is(err, compute.ErrConcurrentModification) {
 			// The write path already refused to touch anything (issue
 			// #16) — the live value moved since this Decision's snapshot
@@ -343,6 +406,13 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	}
 
 	if a.dryRun {
+		// Nothing real happened — release the reservation a dry run's own
+		// probe still had to make (Reserve happens before Apply
+		// regardless of dryRun, so this path stays uniform rather than
+		// special-casing dry-run out of the crash-safety flow).
+		if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
+			log.Printf("actuate %s (%s): failed to release the dry-run budget reservation: %v", diskID, m.Disk.DeviceName, rerr)
+		}
 		log.Printf("[dry-run] %s %s: %d -> %d (%s)", d.Action, m.Disk.DeviceName, d.Current, applied.IOPS, d.Reason)
 		return
 	}
@@ -360,13 +430,101 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	}
 	a.mu.Unlock()
 
-	if err := a.tracker.RecordChange(diskID, d.Action == decider.ActionScaleUp, now); err != nil {
-		// The in-memory cooldown already took effect (Tracker.RecordChange
-		// updates it before touching the durable budget) — only the 24h
-		// count's durability is at risk here, not this cycle's decision.
-		log.Printf("record change %s: %v", diskID, err)
+	if err := a.tracker.ConfirmChange(idempotencyKey); err != nil {
+		// The write landed (verified above) but confirming that fact
+		// durably failed — the reservation stays "pending" on disk, which
+		// is still safe (issue #10: pending counts the same as confirmed)
+		// and will resolve itself via the next restart's reconciliation.
+		log.Printf("actuate %s (%s): failed to durably confirm a successful write — the budget reservation stays pending until the next restart's reconciliation: %v", diskID, m.Disk.DeviceName, err)
 	}
+	a.tracker.RecordChange(diskID, d.Action == decider.ActionScaleUp, now)
 	log.Printf("%s %s: %d -> %d (%s)", d.Action, m.Disk.DeviceName, d.Current, applied.IOPS, d.Reason)
+}
+
+// reconcilePendingBudget resolves every budget reservation a previous run
+// left unresolved (issue #10) — called once at startup, after the first
+// successful discover() has populated a.managed. For each pending
+// reservation whose disk is still managed, a fresh live read decides the
+// outcome: live current equal to the reservation's Target means the write
+// landed (Confirm); equal to Before means it never did (Release); neither
+// is ambiguous and is left pending — fail closed — rather than guessed
+// at. A disk no longer managed at all (detached/replaced) has nothing to
+// verify against, so its reservation is also left as-is: still counted,
+// never silently dropped.
+func (a *Agent) reconcilePendingBudget(ctx context.Context) {
+	pending := a.tracker.PendingChanges()
+	if len(pending) == 0 {
+		return
+	}
+
+	a.mu.Lock()
+	managed := append([]registry.ManagedDisk(nil), a.managed...)
+	a.mu.Unlock()
+	byDiskID := make(map[string]registry.ManagedDisk, len(managed))
+	for _, m := range managed {
+		byDiskID[m.Disk.DiskName] = m
+	}
+
+	for _, ev := range pending {
+		m, ok := byDiskID[ev.DiskID]
+		if !ok {
+			log.Printf("reconcile budget: disk %s has a reservation pending from a previous run but is no longer managed — leaving it counted (fail closed, issue #10)", ev.DiskID)
+			continue
+		}
+
+		live, err := a.liveCurrentIOPS(ctx, m)
+		if err != nil {
+			log.Printf("reconcile budget: disk %s: failed to read live state, leaving the reservation pending (fail closed): %v", ev.DiskID, err)
+			continue
+		}
+
+		switch live {
+		case ev.Target:
+			if err := a.tracker.ConfirmChange(ev.IdempotencyKey); err != nil {
+				log.Printf("reconcile budget: disk %s: failed to confirm a reservation that actually landed: %v", ev.DiskID, err)
+			} else {
+				log.Printf("reconcile budget: disk %s: reservation from a previous run confirmed — live current matches the target", ev.DiskID)
+			}
+		case ev.Before:
+			if err := a.tracker.ReleaseChange(ev.IdempotencyKey); err != nil {
+				log.Printf("reconcile budget: disk %s: failed to release a reservation that never landed: %v", ev.DiskID, err)
+			} else {
+				log.Printf("reconcile budget: disk %s: reservation from a previous run released — live current still matches the pre-write value", ev.DiskID)
+			}
+		default:
+			log.Printf("reconcile budget: disk %s: live current (%d) matches neither the reservation's before (%d) nor target (%d) — leaving it pending (fail closed, ambiguous)",
+				ev.DiskID, live, ev.Before, ev.Target)
+		}
+	}
+}
+
+// liveCurrentIOPS reads diskID's actual current IOPS directly from the
+// Compute API, routed by class — used only for startup budget
+// reconciliation (issue #10), which must never trust a's own in-memory
+// snapshot for this: the whole point is verifying what really happened
+// while this process wasn't running.
+func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (int64, error) {
+	switch m.Disk.Class {
+	case compute.ClassIndependent:
+		disk, err := a.client.GetDisk(ctx, m.Disk.DiskName)
+		if err != nil {
+			return 0, err
+		}
+		return disk.SpecIOPS, nil
+	case compute.ClassDependent:
+		vm, err := a.client.GetVirtualMachine(ctx, a.vmName)
+		if err != nil {
+			return 0, err
+		}
+		for _, d := range vm.Disks {
+			if d.DeviceName == m.Disk.DeviceName {
+				return d.IOPS, nil
+			}
+		}
+		return 0, fmt.Errorf("device_name %q not found on VM %q", m.Disk.DeviceName, a.vmName)
+	default:
+		return 0, fmt.Errorf("disk %q has unknown class %q", m.Disk.DiskName, m.Disk.Class)
+	}
 }
 
 func toEvaluationPolicy(a config.ResolvedAdvanced, maxSampleAge, maxSampleGap time.Duration) analyzer.EvaluationPolicy {

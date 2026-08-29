@@ -37,6 +37,7 @@ type Registry struct {
 	windowFillRatio       *prometheus.GaugeVec
 	changeBudgetRemaining *prometheus.GaugeVec
 	discoverySkippedTotal *prometheus.CounterVec
+	budgetHealthy         prometheus.Gauge
 }
 
 func NewRegistry() *Registry {
@@ -56,6 +57,11 @@ func NewRegistry() *Registry {
 	r.windowFillRatio = r.gauge("iops_autoscaler_window_fill_ratio", "Fraction of the configured window currently buffered.", "disk", "direction")
 	r.changeBudgetRemaining = r.gauge("iops_autoscaler_change_budget_remaining", "Changes remaining in the trailing 24h budget.", "disk")
 	r.discoverySkippedTotal = r.counter("iops_autoscaler_disk_discovery_skipped_total", "Disk attachments excluded from the managed set, by reason.", "alias", "reason")
+	r.budgetHealthy = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "iops_autoscaler_budget_healthy",
+		Help: "1 if the durable 24h change budget can currently be trusted, else 0 (issue #10).",
+	})
+	r.reg.MustRegister(r.budgetHealthy)
 
 	return r
 }
@@ -123,6 +129,15 @@ func (r *Registry) RecordStaleness(diskID string, seconds float64) {
 // why Category exists separately from the free-text Reason.
 func (r *Registry) RecordDiscoverySkipped(alias, reason string) {
 	r.discoverySkippedTotal.WithLabelValues(alias, reason).Inc()
+}
+
+// RecordBudgetHealthy mirrors state.Tracker.Healthy() into
+// iops_autoscaler_budget_healthy (issue #10) — polled once per reconcile
+// cycle rather than pushed from Tracker itself, keeping Tracker decoupled
+// from telemetry the same way every other pure package here stays
+// decoupled from its observers.
+func (r *Registry) RecordBudgetHealthy(healthy bool) {
+	r.budgetHealthy.Set(boolFloat(healthy))
 }
 
 func boolFloat(b bool) float64 {
