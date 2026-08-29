@@ -120,7 +120,7 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
 | **Decider** | Demand estimate → raw target | Pure; no clamping here |
 | **Guardrails** | Clamp, round, rate-limit, cooldown, budget, VM headroom | Last line before any write |
 | **Actuator** | Apply the change via the correct write path | Only component that mutates anything |
-| **State/Journal** | Last action per disk, cooldowns, 24h budget, decision history | In-memory v1; see §9.4 |
+| **State/Journal** | Last action per disk, cooldowns, 24h budget, decision history | Cooldowns/history in-memory v1; 24h budget persisted (ADR-013) — see §9.4 |
 
 ### 3.3 Why this shape
 
@@ -770,9 +770,14 @@ milestone introduces.
 
 ### 9.4 Deferred decisions
 
-- **State persistence.** v1 keeps cooldowns and budgets in memory, so a restart forgets them. Bounded
-  by the cold-start rule (no action until windows refill), which is at least as long as a cooldown.
-  Revisit if restarts prove frequent.
+- **Cooldown persistence (only).** v1 keeps cooldowns in memory, so a restart forgets them. This is
+  safe, not just cheap: `cooldown.scale_up ≤ scale_up_window` and `cooldown.scale_down ≤
+  scale_down_window` are both enforced by `--validate-config`, so the cold-start rule (no action
+  until windows refill) always takes at least as long as the cooldown it would have replaced. Revisit
+  if restarts prove frequent. **The 24h change budget is not part of this deferral** — see ADR-013:
+  the cold-start bound says nothing about total changes across many restarts in a day, so the budget
+  counter must be reconstructible from durable storage on startup. M4 (Decider + Guardrails) is not
+  done without it.
 - **Leader election.** Two `fleet` agents on the same project would both act. v1 documents
   "run one"; a lease is the fix if it becomes real.
 - **Absolute latency thresholds.** Relative-to-baseline only in v1; absolute mode is in the config

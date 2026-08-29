@@ -293,6 +293,11 @@ unused headroom.
 **Acceptance Criteria:**
 - [ ] Per-disk cooldown enforced separately for up and down
 - [ ] Rolling 24 h change budget per disk; exhausting it logs a warning and blocks further changes
+- [ ] The budget is a genuine hard cap: its per-disk change record survives a process restart, so
+      restarting cannot be used — deliberately or by routine redeploys/crash loops — to bypass it.
+      Cooldowns may reset in memory on restart; this is safe because `--validate-config` requires
+      each cooldown ≤ its paired window, so the cold-start wait after a restart is never shorter than
+      the cooldown it forgot (ADR-013)
 - [ ] Budget and cooldowns are configurable
 - [ ] Typecheck/lint passes
 

@@ -14,6 +14,7 @@
 | [010](ADR-010-single-canonical-collection-interval.md) | One canonical sampling cadence (`runtime.metrics.collection_interval`); window readiness is timestamp-based | Accepted |
 | [011](ADR-011-latency-statistic-capability-explicit.md) | Latency statistics carry their own derivation (windowed average vs. platform histogram), never forced uniform across sources | Accepted |
 | [012](ADR-012-baseline-establishment-not-gated-by-saturation.md) | Baseline establishment is never blocked by saturation; only its updates are frozen | Accepted |
+| [013](ADR-013-budget-persisted-cooldowns-stay-in-memory.md) | The 24h change budget must be persisted; cooldowns may safely stay in-memory | Accepted |
 
 ADRs are **derived from the PRD**, which is the primary document: it states the requirement, an ADR
 records how the requirement is met and why that way. An ADR never introduces or drops a requirement

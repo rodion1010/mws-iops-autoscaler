@@ -78,6 +78,11 @@ func validateResolvedPolicy(path string, rp ResolvedPolicy) []error {
 			"%s.advanced.cooldown.scale_up: %s is longer than scale_up_window (%s) — the agent could never act",
 			path, rp.Advanced.CooldownScaleUp, rp.Advanced.ScaleUpWindow))
 	}
+	if rp.Advanced.CooldownScaleDown > rp.Advanced.ScaleDownWindow {
+		errs = append(errs, fmt.Errorf(
+			"%s.advanced.cooldown.scale_down: %s is longer than scale_down_window (%s) — the agent could never act, and a restart could not safely forget a longer-than-window cooldown (ADR-013)",
+			path, rp.Advanced.CooldownScaleDown, rp.Advanced.ScaleDownWindow))
+	}
 
 	errs = append(errs, validateAdvancedRanges(path, rp.Advanced)...)
 

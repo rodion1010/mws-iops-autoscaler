@@ -160,6 +160,21 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "the agent could never act",
 		},
 		{
+			name: "cooldown.scale_down longer than scale_down_window",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Evaluation: &EvaluationSpec{
+						ScaleDownWindow: durationPtr("30m"),
+					},
+					Cooldown: &CooldownSpec{
+						ScaleDown: durationPtr("1h"),
+					},
+				}
+			},
+			wantSub: "cooldown.scale_down",
+		},
+		{
 			name:    "unsupported mode",
 			mutate:  func(c *Config) { c.Mode = "fleet" },
 			wantSub: "not supported in this build",
