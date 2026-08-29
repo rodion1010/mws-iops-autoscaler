@@ -201,17 +201,49 @@ func computeBaseline(samples []metrics.Sample) (LatencyStat, bool) {
 }
 
 // trailingWindow returns the suffix of samples (chronological ascending)
-// whose Timestamp falls within window of the newest sample.
+// whose Timestamp falls within window of the newest sample — plus, only
+// when the natural trim's own span falls short of window, the single real
+// predecessor sample immediately before cutoff.
+//
+// That fallback exists because windowFull's own span check is
+// `newest.Timestamp - samples[0].Timestamp >= window`, and a strict cutoff
+// trim on its own makes that check almost impossible to ever pass in
+// practice: cutoff is computed from real collection timestamps, which land
+// near, but almost never exactly on, an integer multiple of the collection
+// interval — ordinary scheduler jitter, not a fault condition. The first
+// sample kept by a strict trim is then some small delta *after* cutoff,
+// making the returned span some small delta *under* window essentially
+// forever — a window that can never become full is exactly the deadlock
+// this function exists to avoid (NFR-9). Reaching one sample further back
+// closes that gap with a real, already-collected value (one collection
+// interval earlier than the nominal boundary — a negligible skew against a
+// multi-minute window), never a fabricated one.
+//
+// The "only when needed" qualifier is deliberate, not an optimization: if
+// the natural trim already spans a full window on its own — the common
+// case for evenly-spaced data, and exactly what a clean recovery
+// immediately after a long outage looks like — reaching back for a
+// predecessor would have nothing to gain and a real cost, since that
+// predecessor could sit on the far side of an arbitrarily large gap (stale
+// pre-outage history). windowFull's own maxGap check still independently
+// rejects a predecessor that turns out to be a genuine discontinuity
+// rather than an ordinary one-interval jitter — this qualifier just stops
+// a window that didn't need bridging from risking that check for no
+// reason.
 func trailingWindow(samples []metrics.Sample, window time.Duration) []metrics.Sample {
 	if len(samples) == 0 {
 		return nil
 	}
-	cutoff := samples[len(samples)-1].Timestamp.Add(-window)
+	newest := samples[len(samples)-1].Timestamp
+	cutoff := newest.Add(-window)
 	i := 0
 	for ; i < len(samples); i++ {
 		if !samples[i].Timestamp.Before(cutoff) {
 			break
 		}
+	}
+	if i > 0 && newest.Sub(samples[i].Timestamp) < window {
+		i--
 	}
 	return samples[i:]
 }

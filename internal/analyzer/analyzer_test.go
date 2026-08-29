@@ -678,6 +678,69 @@ func TestAnalyze_recoversAfterLongOutageWithoutPoisoningFromOldHistory(t *testin
 	}
 }
 
+// --- pre-merge review: trailingWindow must not deadlock windowFull under
+// ordinary scheduler jitter ---
+
+// TestTrailingWindow_jitterNeverPreventsFullSpan is the core regression: a
+// cutoff computed from real, jittered timestamps almost never lands
+// exactly on an existing sample, so a strict "drop everything before
+// cutoff" trim always returned a span some small delta under window —
+// windowFull's own span check could then never pass, no matter how long
+// collection ran. trailingWindow must reach one sample further back to
+// close that gap.
+func TestTrailingWindow_jitterNeverPreventsFullSpan(t *testing.T) {
+	// 31 samples about 60s apart, each offset by a few seconds of jitter —
+	// none of cutoff's exact multiples-of-5-minutes land on a real sample.
+	base := epoch
+	jitter := []time.Duration{0, 3, -2, 4, -1, 2, 0, -3, 1, 3, -2, 2, 0, 1, -1, 4, -3, 2, 1, -2, 0, 3, -1, 2, -3, 1, 0, 4, -2, 1, 0}
+	samples := make([]metrics.Sample, len(jitter))
+	for i, j := range jitter {
+		samples[i] = metrics.Sample{
+			DiskID:    "disk1",
+			Timestamp: base.Add(time.Duration(i)*time.Minute + j*time.Second),
+			Source:    metrics.SourceGuest,
+		}
+	}
+
+	window := 5 * time.Minute
+	got := trailingWindow(samples, window)
+
+	newest := samples[len(samples)-1].Timestamp
+	span := newest.Sub(got[0].Timestamp)
+	if span < window {
+		t.Fatalf("trailingWindow's own span = %v, want >= %v (window) — jitter must not prevent this", span, window)
+	}
+	if !windowFull(got, window, 90*time.Second) {
+		t.Error("windowFull(trailingWindow(...)) = false, want true — jittered-but-continuous samples spanning well over 5 minutes must read as full")
+	}
+}
+
+// TestTrailingWindow_doesNotReachAcrossAGapItDoesNotNeedTo is the flip
+// side: when the natural cutoff trim already spans a full window on its
+// own, trailingWindow must not reach for a predecessor anyway — doing so
+// could pull in a sample from the far side of an arbitrarily large gap
+// (stale pre-outage history) for no benefit, since nothing needed
+// bridging. Directly exercises the boundary this fix must respect, ahead
+// of TestAnalyze_recoversAfterLongOutageWithoutPoisoningFromOldHistory's
+// full-pipeline version above.
+func TestTrailingWindow_doesNotReachAcrossAGapItDoesNotNeedTo(t *testing.T) {
+	samples := []metrics.Sample{
+		{DiskID: "disk1", Timestamp: epoch, Source: metrics.SourceGuest}, // stale, far pre-outage
+	}
+	for m := 100; m <= 105; m++ {
+		samples = append(samples, sampleAt(m, 0, 0, 0, 0, 0, 0, 0))
+	}
+
+	got := trailingWindow(samples, 5*time.Minute)
+
+	if len(got) != 6 {
+		t.Fatalf("trailingWindow returned %d samples, want exactly the 6-sample recovered segment (the stale predecessor must not be pulled in)", len(got))
+	}
+	if got[0].Timestamp != samples[1].Timestamp {
+		t.Errorf("trailingWindow's first sample = %v, want the recovered segment's own first sample %v", got[0].Timestamp, samples[1].Timestamp)
+	}
+}
+
 func TestAnalyze_baselineNotEstablishedFromIdleWindow(t *testing.T) {
 	// A full up-window where nothing was ever active in either direction —
 	// currentBaseline must decline to establish (issue #9), not freeze a

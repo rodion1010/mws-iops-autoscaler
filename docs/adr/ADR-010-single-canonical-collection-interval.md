@@ -126,3 +126,32 @@ exists on `Sample`) and removes an entire class of "window said full, wasn't rea
 > now computes `ceil(window/interval) + 1 + slack` instead. See `internal/analyzer/analyzer.go`'s
 > `windowFull`/`trailingWindow`, `internal/config/resolve.go`'s `SamplerCapacity`, and ADR-014 (the
 > related `now`-driven staleness work from the same review pass) for the current state.
+
+> **Refined again (2026-08-29, pre-merge review): the ring-buffer off-by-one had a sibling in
+> `trailingWindow` itself.** `trailingWindow` trimmed every sample strictly before `cutoff =
+> newest.Timestamp - window`, keeping only samples with `Timestamp >= cutoff`. That trim's own returned
+> span (`newest.Timestamp - samples[0].Timestamp`) is mathematically bounded by `window`, never above
+> it — and cutoff, computed from real collection timestamps, essentially never lands exactly on an
+> existing sample (ordinary scheduler jitter, not a fault). So the first sample a strict trim keeps is
+> almost always some small delta *after* cutoff, making the trimmed span some small delta *under*
+> `window`, forever. `windowFull`'s own `span >= window` check — the entire reason `trailingWindow` gets
+> called ahead of it — could then essentially never pass on real, jittered data, the same "buffer that
+> can never fill" deadlock this ADR's first refinement fixed for the ring-buffer capacity formula, one
+> layer downstream of it.
+>
+> `trailingWindow` now reaches one sample further back than the strict trim — but only when the
+> strictly-trimmed span itself already falls short of `window`; if the natural trim already spans a full
+> window on its own, nothing needs bridging, and reaching back anyway would risk pulling in a
+> predecessor from the far side of an arbitrarily large gap (stale pre-outage history, exactly what the
+> refinement directly above this one exists to keep out) for no benefit. When a predecessor genuinely is
+> needed, `windowFull`'s existing `MaxSampleGap` check remains an entirely independent safeguard: a
+> predecessor that turns out to sit across a real discontinuity, not ordinary one-interval jitter, still
+> fails that check exactly as it always did.
+
+## Action Items (continued)
+
+5. [x] `internal/analyzer/analyzer.go`: `trailingWindow` reaches one sample past a strict cutoff trim,
+       conditioned on the natural trim's own span falling short of `window`.
+6. [x] Tests: a jittered-but-continuous 31-sample series proves `trailingWindow`'s returned span always
+       reaches `window` and `windowFull` reads it as full; a clean post-outage recovery segment whose
+       natural span already reaches `window` proves the stale pre-outage predecessor is never pulled in.
