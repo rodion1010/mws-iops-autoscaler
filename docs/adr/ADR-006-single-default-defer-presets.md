@@ -58,6 +58,16 @@ cost:                                   # later up, tighter fit, faster down
 
 `cost` already satisfied every §8 rule as originally drafted and needed no correction.
 
+> **Amended 2026-08-29.** The internal registry is laid out now, not deferred to Phase 5: `internal/config`
+> keeps a `PresetName` type and a `presets map[PresetName]ResolvedAdvanced` with all three entries
+> (`balanced`, `performance` corrected, `cost`), each covered by a test asserting it satisfies §8's
+> own validation — the exact check that would have caught the original bug before it shipped. What
+> stays deferred to Phase 5 is *exposure*: no `preset` field on `PolicySpec`, nothing in the config
+> schema or `--validate-config` lets an operator select `performance` or `cost` today; only
+> `presets[DefaultPresetName]` (`balanced`) is ever read. Phase 5 adds the field, the resolver's
+> preset-rebase-on-override logic, and an unknown-preset validation rule against a registry that
+> already exists and is already known-consistent — it does not re-derive the numbers.
+
 ## Options Considered
 
 ### Option A: Patch `performance` and keep three presets
@@ -86,17 +96,19 @@ naming. This ADR defers the *feature*, not the *design principle*.
 ## Consequences
 
 **Easier**
-- One `ResolvedAdvanced` value (`defaultAdvanced` in `internal/config`) instead of a map keyed by
-  preset name — less to keep consistent, one less layer in the resolver, one less validation path to
-  test against.
-- `--validate-config` cannot reject a config for naming an unknown preset, because there is nothing
-  to name.
+- ~~One `ResolvedAdvanced` value instead of a map keyed by preset name~~ — superseded by the
+  amendment above: the registry exists now, so this benefit was never realized. What Phase 1 keeps is
+  narrower but real: `--validate-config` cannot reject a config for naming an unknown preset, because
+  nothing in the schema lets a config name one at all.
+- The resolver (`resolve.go`) has no preset-selection branch to test or keep correct yet — `Resolve`
+  reads `defaultAdvanced` directly, unconditionally.
 
 **Harder**
 - No user-facing choice between "react fast, pay more" and "react slow, pay less" until presets
   return. An operator who wants that today writes `policy.advanced` overrides by hand.
-- Reintroducing presets later is a schema addition (`preset` field back, `advanced` inheritance
-  re-bases on preset change as it did in the first draft's resolver) — not free, but additive: no
+- Reintroducing presets later is still work — a `preset` field, `--validate-config` rejecting an
+  unknown one, and the resolver's preset-rebase-on-override logic from the first draft — but the
+  registry itself is not part of that work anymore per the amendment above. Additive either way: no
   Phase 1 config becomes invalid when it happens.
 
 **Revisit when**
