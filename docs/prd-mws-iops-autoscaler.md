@@ -514,7 +514,7 @@ workload, unlike a wrong scale-up which only overspends.
 | Story | What it delivers |
 |---|---|
 | US-010 | Scale-down decision |
-| — | Preset thresholds calibrated from Phase 1–2 telemetry (design.md §8.5 calibration harness) |
+| — | The default parameter set's thresholds calibrated from Phase 1–2 telemetry (design.md §8.5 calibration harness) |
 
 **Exit criterion:** soak and chaos tests green with scale-down enabled, `local` mode. = design.md M9.
 
@@ -537,18 +537,19 @@ inheritance, and the deployment shape.
 
 **Goal:** not yet broken into stories — deliberately left open rather than scheduled, per
 `docs/TODO.md`'s own rule. Likely candidates: fleet-scale soak/chaos, multi-project scheduling,
-cost/budget reporting across a fleet. = design.md M11.
+cost/budget reporting across a fleet, and reintroducing named presets (ADR-006) once there is a
+reason to choose between tunings rather than one validated default. = design.md M11.
 
 ---
 
 ## 7. Default Configuration
 
-The user-facing surface is a **preset**, plus limits, plus disk selection. Controller internals are
-`advanced` and opt-in. Full model, preset values and examples: `docs/configuration.md`.
+The user-facing surface is limits plus disk selection. Controller internals are `advanced` and
+opt-in. Phase 1 ships one built-in default parameter set — no preset name to choose (ADR-006). Full
+model, default values and examples: `docs/configuration.md`.
 
-| Parameter | Default (`balanced`) | Rationale |
+| Parameter | Default | Rationale |
 |---|---|---|
-| `preset` | `balanced` | `performance` and `cost` shift the same knobs together |
 | `limits.min_iops` | 1000 | included in the disk base price; lower is impossible |
 | `limits.max_iops` | 10000 | clamped further to `3000 × vcpuCount` at runtime |
 | `billing_step_iops` | 100 | platform-fixed, not user-settable |

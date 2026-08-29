@@ -1,0 +1,26 @@
+apiVersion: autoscaling.mws.cloud/v1alpha1
+kind: IOPSAutoScaler
+mode: local
+
+policy:
+  limits: {min_iops: 1000, max_iops: 10000}
+
+disks:
+  mode: selected
+  selected:
+    - device_name: datadisk
+
+    - device_name: logdisk
+      policy:
+        limits: {min_iops: 3000, max_iops: 10000}
+
+    - device_name: backupdisk
+      policy:
+        limits: {min_iops: 1000, max_iops: 6000}
+        advanced:
+          enabled: true
+          step: {min_change_iops: 300}
+
+runtime:
+  metrics:   {source: guest, collection_interval: 10s}
+  controller: {reconcile_interval: 30s, discovery_interval: 5m}

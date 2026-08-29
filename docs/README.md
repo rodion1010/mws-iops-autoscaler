@@ -5,7 +5,7 @@
 | [`prd-mws-iops-autoscaler.md`](prd-mws-iops-autoscaler.md) | **Primary.** What we are building and why: user stories, functional requirements, defaults, success metrics |
 | [`design.md`](design.md) | Derived from the PRD. How it is built: architecture, flows, contracts, NFR, observability, testing, implementation plan |
 | [`adr/`](adr/) | Derived from the PRD. Individual decisions with alternatives and consequences |
-| [`configuration.md`](configuration.md) | Derived from the PRD and design: policy model, presets, inheritance, examples, validation rules |
+| [`configuration.md`](configuration.md) | Derived from the PRD and design: policy model, defaults, inheritance, examples, validation rules |
 | [`TODO.md`](TODO.md) | Parking lot. **Nothing is picked up from here without an explicit decision.** |
 | [`../CLAUDE.md`](../CLAUDE.md) | Measured platform behaviour — every empirical claim above is sourced here |
 

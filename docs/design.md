@@ -43,7 +43,8 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
 **In scope (v1)**
 - Reactive control loop, two modes (`local`, `fleet`).
 - Both disk classes: independent via disk API, dependent via VM spec (ADR-003).
-- Presets (`balanced` / `performance` / `cost`) as the user-facing surface.
+- One built-in default parameter set as the user-facing surface (limits + opt-in `advanced`);
+  named presets deferred past the MVP (ADR-006).
 - Rollout stages: scale-up-only (with `--dry-run` as the pre-live validation step, not a
   separate release), then bidirectional (ADR-005 amends ADR-002's original staging).
 
@@ -65,7 +66,7 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
                      │              Autoscaler                  │
                      │                                          │
   config.yaml ──────▶│  ┌────────────┐                          │
-                     │  │   Config   │  presets, inheritance    │
+                     │  │   Config   │  defaults, inheritance   │
                      │  │  Resolver  │  → EffectivePolicy/disk  │
                      │  └─────┬──────┘                          │
                      │        │                                 │
@@ -395,7 +396,8 @@ bytes; a silent mix would be a real and hard-to-spot bug.
 ### 5.3 Configuration
 
 See `docs/configuration.md` for the full model. Disks are addressed by `device_name` and never by
-kernel device path (ADR-004). Summary: presets are the user-facing surface;
+kernel device path (ADR-004). Summary: limits plus disk selection are the user-facing surface, on top
+of one built-in default parameter set — no preset name to choose in Phase 1 (ADR-006);
 inheritance is `disk → vm → project → platform default` (`fleet`) or `disk → vm → default` (`local`);
 advanced controller knobs exist but are opt-in and treated as experimental until telemetry justifies
 exposing them.
@@ -503,7 +505,7 @@ The pipeline is pure between Discovery and Actuator, so the decision logic is te
 
 | Target | Cases |
 |---|---|
-| Config resolver | Inheritance at every level; preset expansion; overrides; invalid configs rejected |
+| Config resolver | Inheritance at every level; default-set application; overrides; invalid configs rejected |
 | Window/percentile | Empty, partial, exactly-full, wrapped ring; p50/p95/p99 against known series |
 | Saturation | Gate passes but no signal → not saturated; each signal alone triggers; sustained vs momentary |
 | Demand estimator | Open regime (growing queue); closed regime (latency ratio); clamped at `max_scale_up_ratio` |
@@ -590,7 +592,7 @@ rationale (local complete before fleet exists at all; platform metrics validated
 | **M6** | **MVP release.** Scale-up actuation enabled (validated live via `--dry-run` first); binary + systemd + `.deb` | M5 | 1 (exit) |
 | **M7** | Platform `MetricSource` (`PlatformSource`), usable standalone in `local` mode | M2 | 2 |
 | **M8** | Comparison (shadow) mode: `Guest` + `Platform` run concurrently, journaled, divergence surfaced | M6, M7 | 2 (exit) |
-| **M9** | Scale-down decision; presets calibrated from M6–M8 telemetry | M6 | 3 (exit) |
+| **M9** | Scale-down decision; the default parameter set calibrated from M6–M8 telemetry | M6 | 3 (exit) |
 | **M10** | Fleet discovery, project/VM/disk inheritance, container image | M7, M9 | 4 (exit) |
 | **M11** | Further fleet capabilities and optimizations | M10 | 5 |
 

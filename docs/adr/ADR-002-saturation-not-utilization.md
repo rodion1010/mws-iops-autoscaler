@@ -142,6 +142,11 @@ API happily accepts 10000 IOPS on a VM that can deliver 6000, and bills for it.
 `performance`, `cost` — and the underlying values can be recalibrated without breaking anyone.
 Advanced overrides exist but are opt-in.
 
+> **Amended by ADR-006.** Phase 1 ships the `balanced` values as the one built-in default — no preset
+> *choice* until there is a reason to choose between tunings. `performance` and `cost` are deferred,
+> not abandoned: implementing §8's cross-field validation found `performance`'s own numbers violated
+> it, which is what triggered shipping one validated set instead of three.
+
 ## Consequences
 
 **Easier**
@@ -189,4 +194,5 @@ Thresholds cannot be validated by reasoning, so the rollout is staged:
 4. [ ] Implement dynamic `vm_headroom` from sibling p95, not provisioned limits.
 5. [ ] Implement the `VM_IOPS_CAP_REACHED` state as a first-class outcome, not an error.
 6. [ ] Ship observe-only first; treat every default as unvalidated until it has run.
-7. [ ] Define `balanced` / `performance` / `cost` presets as the only default-facing surface.
+7. [ ] ~~Define `balanced` / `performance` / `cost` presets as the only default-facing surface.~~
+   Superseded by ADR-006: ship `balanced`'s values as the one default; presets deferred.
