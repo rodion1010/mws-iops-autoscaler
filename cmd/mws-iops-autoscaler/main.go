@@ -143,21 +143,37 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	// check read the same value, not two independently maintained copies.
 	const allowScaleDown = false
 
+	// Freshness bounds (issue #15), derived from the same collection/
+	// discovery cadence the pipeline already runs on rather than hardcoded
+	// or independently configured: a threshold that isn't a multiple of
+	// the interval it's bounding would either trip on ordinary jitter (too
+	// tight) or defeat its own purpose (too loose). 3x tolerates two fully
+	// missed cycles before failing closed; 2x on the gap bound means one
+	// missed cycle inside a window is still tolerated, two is not.
+	// Calibration-pending, same as every other constant of this shape in
+	// this codebase (design.md §8.5).
+	maxSampleAge := 3 * resolved.Runtime.CollectionInterval
+	maxSampleGap := 2 * resolved.Runtime.CollectionInterval
+	maxDiscoveryAge := 3 * resolved.Runtime.DiscoveryInterval
+
 	agent := &Agent{
-		cfg:            cfg,
-		resolved:       resolved,
-		vmName:         vmName,
-		dryRun:         dryRun,
-		allowScaleDown: allowScaleDown,
-		client:         client,
-		sampler:        sampler,
-		analyzer:       analyzer.NewWindowAnalyzer(),
-		decider:        decider.NewPolicyDecider(allowScaleDown),
-		actuator:       actuator.NewComputeActuator(client),
-		tracker:        tracker,
-		telemetry:      reg,
-		journal:        journal.NewWriter(journalOut),
-		readiness:      readiness,
+		cfg:             cfg,
+		resolved:        resolved,
+		vmName:          vmName,
+		dryRun:          dryRun,
+		allowScaleDown:  allowScaleDown,
+		maxDiscoveryAge: maxDiscoveryAge,
+		maxSampleAge:    maxSampleAge,
+		maxSampleGap:    maxSampleGap,
+		client:          client,
+		sampler:         sampler,
+		analyzer:        analyzer.NewWindowAnalyzer(),
+		decider:         decider.NewPolicyDecider(allowScaleDown),
+		actuator:        actuator.NewComputeActuator(client),
+		tracker:         tracker,
+		telemetry:       reg,
+		journal:         journal.NewWriter(journalOut),
+		readiness:       readiness,
 	}
 
 	mux := http.NewServeMux()

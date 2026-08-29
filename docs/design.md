@@ -542,6 +542,19 @@ type LatencyStat struct {
 type Analysis struct {
     DiskID string
 
+    // Fresh is false when the newest buffered sample is older than
+    // EvaluationPolicy.MaxSampleAge — sampling has stopped or fallen badly
+    // behind (issue #15). Saturated and Underutilized are both
+    // unconditionally false whenever Fresh is false: a window whose
+    // *span* has been full for hours reads as "full" forever even after
+    // sampling silently stops, since nothing inside a fixed buffer alone
+    // can reveal that time has kept passing outside it — only a
+    // comparison against wall clock (Analyze's own `now` parameter,
+    // below) can. SampleAge is exposed alongside Fresh for the journal and
+    // for telemetry.RecordStaleness, not just as an internal gate.
+    Fresh     bool
+    SampleAge time.Duration
+
     // Latest-sample snapshot, for the journal — not what Saturated/
     // Underutilized are computed from (each re-evaluates its own signal
     // against every sample in its own window, not just this one).
@@ -584,8 +597,25 @@ type Analyzer interface {
     // throttling_detected's "served ≈ provisioned_limit" comparison (§4.5).
     // It is live disk state, not a policy value, so it is not part of
     // EvaluationPolicy.
-    Analyze(diskID string, samples []Sample, p EvaluationPolicy, specIOPS int64) Analysis
+    // now is wall clock, explicit for the same testability reason
+    // Decider.Decide takes it — Analysis.Fresh/SampleAge (issue #15) are a
+    // comparison against real time passing, not against anything
+    // derivable from the samples themselves.
+    Analyze(diskID string, samples []Sample, p EvaluationPolicy, specIOPS int64, now time.Time) Analysis
 }
+
+// EvaluationPolicy gained two freshness/gap bounds for issue #15 (and
+// issue #7's "gap-aware window coverage"), both derived by the
+// orchestrator from runtime.collection_interval rather than being
+// per-disk policy knobs (main.go: 3x for MaxSampleAge, 2x for
+// MaxSampleGap — calibration-pending, §8.5):
+//   MaxSampleAge time.Duration // newest sample must be no older than this for Fresh
+//   MaxSampleGap time.Duration // no two consecutive samples inside a window may be farther apart than this
+// windowFull (§4.3/ADR-010) now checks MaxSampleGap between every
+// consecutive pair of samples in the window, not just overall span —
+// a window whose span covers the target duration but contains one large
+// silent gap (a missed collection cycle, a temporary source outage) no
+// longer reads as "full."
 
 // VMState is the sibling-disk headroom picture (§4.6) — pre-aggregated by
 // the caller (analyze_vm in §4.3's pseudocode, not this package): IOPSPool
@@ -650,6 +680,16 @@ type Decider interface {
 // interface, and the caller must not simply trust an implementation to have
 // gotten this right). Phase 3 flips this one constructor argument and
 // nothing else.
+
+// Decide's default (neither Saturated nor Underutilized) branch reports
+// three distinct NoAction reasons, not one generic "no_signal" (issue
+// #15) — an operator reading the journal/metrics needs to tell "this
+// disk's data can't be trusted right now" apart from "this disk hasn't
+// accumulated enough history yet" apart from "this disk is genuinely,
+// trustworthily idle":
+//   metrics_stale    — !a.Fresh
+//   window_not_full  — a.Fresh but neither WindowFullUp nor WindowFullDown
+//   no_signal        — a.Fresh and at least one window full, nothing triggered
 
 type Actuator interface {
     Apply(ctx context.Context, d Decision) (Applied, error)
@@ -735,8 +775,8 @@ exposing them.
 
 | Failure | Behaviour |
 |---|---|
-| Metrics unavailable | Mark disks "no data", take no action, alert after `n` cycles |
-| Compute API unavailable | Retry with backoff; decisions queue but never stack up (latest wins) |
+| Metrics unavailable | Mark disks "no data" (`Analysis.Fresh = false`, reason `metrics_stale`, issue #15), take no action, alert after `n` cycles |
+| Compute API unavailable | Retry with backoff; decisions queue but never stack up (latest wins). Once the last successful discovery exceeds `max_discovery_age` (3× `discovery_interval`), reconcile skips every disk for that cycle rather than keep acting on a snapshot that may no longer reflect reality (issue #15) |
 | Write returns non-2xx | Log with full request context, back off, do not update state |
 | Write succeeds but value differs | Treat as failure, re-read, reconcile on next cycle |
 | Concurrent external resize | Discovery picks it up; agent adopts observed value as current |
@@ -818,6 +858,11 @@ these records, not from reasoning.
 ### 7.3 Health and alerting
 
 `/healthz` (process alive) and `/readyz` (config valid, discovery succeeded, ≥1 source reachable).
+`source_reachable` is driven solely by the Sampler's own `Tick()` result, not by Compute API discovery
+succeeding (issue #15) — even in `local` mode these are different dependencies: the guest source reads
+`/proc/diskstats`, which can fail (permissions, a missing disk) independent of whether the Compute API
+is reachable. Conflating the two previously meant a metrics-collection outage never showed up in
+`/readyz` as long as discovery kept succeeding.
 
 Alert-worthy: metric staleness beyond 3 publication intervals; write failure rate above threshold;
 change budget exhausted; `VM_IOPS_CAP_REACHED` sustained (actionable — add vCPU); any disk pinned at

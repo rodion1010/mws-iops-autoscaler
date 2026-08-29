@@ -28,6 +28,24 @@ type EvaluationPolicy struct {
 	UtilizationThreshold      float64
 	QueueDepthThreshold       float64
 	LatencyBaselineMultiplier float64
+
+	// MaxSampleAge bounds how old the newest buffered sample may be before
+	// Analysis.Fresh goes false (issue #15). Sampling that has silently
+	// stopped leaves a buffer that is internally consistent forever — span
+	// and count alone can never reveal that, only a comparison against wall
+	// clock can (see Analyze's own doc comment). Calibration-pending, same
+	// as the constants in analyzer.go; main.go derives it from
+	// runtime.collection_interval rather than hardcoding it here.
+	MaxSampleAge time.Duration
+
+	// MaxSampleGap bounds the largest allowed gap between two consecutive
+	// samples inside a window before that window stops counting as full
+	// (issue #15, issue #7's "gap-aware window coverage"). Without this, a
+	// window whose span happens to cover ScaleUpWindow/ScaleDownWindow but
+	// contains one enormous silent gap (a missed collection cycle, a
+	// temporary source outage that later recovers) reads as "full" even
+	// though most of it carries no real information.
+	MaxSampleGap time.Duration
 }
 
 // LatencyStatKind names how a latency percentile was derived — carried on
@@ -63,6 +81,15 @@ type Analysis struct {
 	// Latest-sample snapshot, for the journal — not what Saturated/
 	// Underutilized are computed from (each re-evaluates its own signal
 	// against every sample in its own window, not just this one).
+	// Fresh is false when the newest buffered sample is older than
+	// MaxSampleAge — sampling has stopped or fallen badly behind (issue
+	// #15). Saturated and Underutilized are both unconditionally false
+	// whenever Fresh is false: stale evidence must never drive a decision,
+	// scale-up included. SampleAge is exposed alongside it for the journal
+	// and for telemetry.RecordStaleness, not just as an internal gate.
+	Fresh     bool
+	SampleAge time.Duration
+
 	Source               metrics.SourceKind
 	IOPSUtilization      float64
 	BandwidthUtilization float64
@@ -118,5 +145,7 @@ type Analyzer interface {
 	// needed for utilization and throttling_detected's "served ≈
 	// provisioned_limit" comparison. It is live disk state, not a policy
 	// value, so it is not part of EvaluationPolicy.
-	Analyze(diskID string, samples []metrics.Sample, p EvaluationPolicy, specIOPS int64) Analysis
+	// now is wall clock, explicit for the same testability reason
+	// decider.Decide takes it — see Analyze's own doc comment (issue #15).
+	Analyze(diskID string, samples []metrics.Sample, p EvaluationPolicy, specIOPS int64, now time.Time) Analysis
 }

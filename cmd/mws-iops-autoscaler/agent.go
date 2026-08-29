@@ -44,6 +44,26 @@ type Agent struct {
 	// maintained copies of it.
 	allowScaleDown bool
 
+	// maxDiscoveryAge bounds how old the last successful discover() may be
+	// before reconcile refuses to act on it (issue #15's "fail closed on
+	// stale... discovery snapshots"). Unlike sample staleness, a failed
+	// discover() call is immediately visible (readiness.SetDiscoverySucceeded
+	// goes false the same cycle) — this guard exists for the case that
+	// matters anyway: reconcile keeps running against the last known-good
+	// a.managed snapshot while discovery has been failing, potentially for
+	// a long time, and a disk's Current value or its very presence on the
+	// VM may no longer be accurate.
+	maxDiscoveryAge time.Duration
+
+	// maxSampleAge/maxSampleGap are the same issue #15 freshness bounds as
+	// maxDiscoveryAge, but for the metrics path — derived once in main.go
+	// from runtime.collection_interval and threaded into every disk's
+	// EvaluationPolicy each reconcile cycle, rather than being a per-disk
+	// policy field: freshness is a property of the sampling pipeline, not
+	// something a user tunes per disk.
+	maxSampleAge time.Duration
+	maxSampleGap time.Duration
+
 	client    compute.Client
 	sampler   *metrics.Sampler
 	analyzer  *analyzer.WindowAnalyzer
@@ -54,9 +74,10 @@ type Agent struct {
 	journal   *journal.Writer
 	readiness *health.Readiness
 
-	mu       sync.Mutex
-	managed  []registry.ManagedDisk
-	iopsPool int64
+	mu                   sync.Mutex
+	managed              []registry.ManagedDisk
+	iopsPool             int64
+	lastDiscoverySuccess time.Time
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -69,6 +90,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	// way — Analyze needs a full window, not just one sample).
 	if err := a.sampler.Tick(ctx); err != nil {
 		log.Printf("sampler: initial tick: %v", err)
+		a.readiness.SetSourceReachable(false)
+	} else {
+		a.readiness.SetSourceReachable(true)
 	}
 
 	discoveryTicker := time.NewTicker(a.resolved.Runtime.DiscoveryInterval)
@@ -89,6 +113,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-collectionTicker.C:
 			if err := a.sampler.Tick(ctx); err != nil {
 				log.Printf("sampler: %v", err)
+				a.readiness.SetSourceReachable(false)
+			} else {
+				a.readiness.SetSourceReachable(true)
 			}
 		case <-reconcileTicker.C:
 			a.reconcile(ctx)
@@ -130,10 +157,16 @@ func (a *Agent) discover(ctx context.Context) error {
 	a.mu.Lock()
 	a.managed = managed
 	a.iopsPool = compute.VMIOPSPool(vm)
+	a.lastDiscoverySuccess = time.Now()
 	a.mu.Unlock()
 
 	a.readiness.SetDiscoverySucceeded(true)
-	a.readiness.SetSourceReachable(true) // the same call that just proved the Compute API reachable also proves the metrics path exists in `local` mode (guest source needs no network)
+	// SourceReachable is deliberately not touched here (issue #15): the
+	// Compute API and the metrics source are different dependencies even
+	// in `local` mode (the guest source reads /proc/diskstats, which can
+	// fail — permissions, a missing disk — independent of Compute API
+	// reachability). It is driven solely by sampler.Tick()'s own success,
+	// in Run().
 	return nil
 }
 
@@ -145,16 +178,32 @@ func (a *Agent) reconcile(ctx context.Context) {
 	a.mu.Lock()
 	managed := append([]registry.ManagedDisk(nil), a.managed...)
 	iopsPool := a.iopsPool
+	lastDiscovery := a.lastDiscoverySuccess
 	a.mu.Unlock()
 
 	now := time.Now()
+
+	// Fail closed on a stale discovery snapshot (issue #15): a.managed
+	// keeps whatever discover() last populated even while discovery has
+	// since started failing (readiness.SetDiscoverySucceeded already
+	// reports that), so reconcile must not keep acting on it indefinitely.
+	// lastDiscovery.IsZero() (never discovered) is deliberately included —
+	// Run() always discovers once before the first reconcile, so reaching
+	// here with a zero value can only mean that first discover() itself
+	// failed and this cycle's managed list is empty/stale anyway.
+	if age := now.Sub(lastDiscovery); lastDiscovery.IsZero() || age > a.maxDiscoveryAge {
+		log.Printf("reconcile: discovery snapshot stale (age=%s, max=%s) — skipping this cycle (issue #15)", age, a.maxDiscoveryAge)
+		return
+	}
 
 	analyses := make(map[string]analyzer.Analysis, len(managed))
 	for _, m := range managed {
 		diskID := m.Disk.DiskName
 		samples := a.sampler.Samples(diskID)
-		ep := toEvaluationPolicy(m.Policy.Advanced)
-		analyses[diskID] = a.analyzer.Analyze(diskID, samples, ep, m.Disk.IOPS)
+		ep := toEvaluationPolicy(m.Policy.Advanced, a.maxSampleAge, a.maxSampleGap)
+		an := a.analyzer.Analyze(diskID, samples, ep, m.Disk.IOPS, now)
+		analyses[diskID] = an
+		a.telemetry.RecordStaleness(diskID, an.SampleAge.Seconds())
 	}
 
 	for _, m := range managed {
@@ -234,13 +283,15 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	log.Printf("%s %s: %d -> %d (%s)", d.Action, m.Disk.DeviceName, d.Current, applied.IOPS, d.Reason)
 }
 
-func toEvaluationPolicy(a config.ResolvedAdvanced) analyzer.EvaluationPolicy {
+func toEvaluationPolicy(a config.ResolvedAdvanced, maxSampleAge, maxSampleGap time.Duration) analyzer.EvaluationPolicy {
 	return analyzer.EvaluationPolicy{
 		ScaleUpWindow:             a.ScaleUpWindow,
 		ScaleDownWindow:           a.ScaleDownWindow,
 		UtilizationThreshold:      a.UtilizationThreshold,
 		QueueDepthThreshold:       a.QueueDepthThreshold,
 		LatencyBaselineMultiplier: a.LatencyBaselineMultiplier,
+		MaxSampleAge:              maxSampleAge,
+		MaxSampleGap:              maxSampleGap,
 	}
 }
 

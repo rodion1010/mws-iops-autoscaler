@@ -54,8 +54,14 @@ func NewWindowAnalyzer() *WindowAnalyzer {
 }
 
 // Analyze implements Analyzer. samples must be chronological ascending
-// (Sampler's own documented contract) and belong to one disk.
-func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p EvaluationPolicy, specIOPS int64) Analysis {
+// (Sampler's own documented contract) and belong to one disk. now is wall
+// clock, explicit for the same reason decider.Decide takes it — freshness
+// (out.Fresh, below) is a comparison against real time passing, not
+// against anything derivable from the samples themselves (issue #15): a
+// disk whose sampling has silently stopped keeps a fixed, internally
+// consistent buffer forever, so nothing inside that buffer alone can ever
+// reveal that it has gone stale.
+func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p EvaluationPolicy, specIOPS int64, now time.Time) Analysis {
 	out := Analysis{DiskID: diskID}
 	if len(samples) == 0 {
 		return out
@@ -65,8 +71,11 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 	upWindow := trailingWindow(samples, p.ScaleUpWindow)
 	downWindow := trailingWindow(samples, p.ScaleDownWindow)
 
-	out.WindowFullUp = windowFull(samples, p.ScaleUpWindow)
-	out.WindowFullDown = windowFull(samples, p.ScaleDownWindow)
+	out.SampleAge = now.Sub(newest.Timestamp)
+	out.Fresh = out.SampleAge <= p.MaxSampleAge
+
+	out.WindowFullUp = windowFull(upWindow, p.ScaleUpWindow, p.MaxSampleGap)
+	out.WindowFullDown = windowFull(downWindow, p.ScaleDownWindow, p.MaxSampleGap)
 	out.WindowFillUpRatio = fillRatio(samples, p.ScaleUpWindow)
 	out.WindowFillDownRatio = fillRatio(samples, p.ScaleDownWindow)
 
@@ -89,7 +98,7 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 	latencyElevated := established && (out.ReadLatency.P95 > scaledDuration(baseline.P95, p.LatencyBaselineMultiplier) ||
 		out.WriteLatency.P95 > scaledDuration(baseline.P95, p.LatencyBaselineMultiplier))
 
-	out.Saturated = out.WindowFullUp &&
+	out.Saturated = out.Fresh && out.WindowFullUp &&
 		sustainedResourceGate(upWindow, specIOPS, p.UtilizationThreshold) &&
 		(sustainedQueueAtOrAbove(upWindow, p.QueueDepthThreshold) ||
 			latencyElevated ||
@@ -101,7 +110,7 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 		(downReadP95 <= scaledDuration(baseline.P95, p.LatencyBaselineMultiplier) &&
 			downWriteP95 <= scaledDuration(baseline.P95, p.LatencyBaselineMultiplier))
 
-	out.Underutilized = out.WindowFullDown &&
+	out.Underutilized = out.Fresh && out.WindowFullDown &&
 		sustainedQueueBelow(downWindow, p.QueueDepthThreshold) &&
 		latencyAtBaseline &&
 		!sustainedThrottle(downWindow, specIOPS)
@@ -138,26 +147,56 @@ func (a *WindowAnalyzer) currentBaseline(diskID string, samples []metrics.Sample
 	if !windowFullUp {
 		return LatencyStat{}, false
 	}
-	stat := computeBaseline(samples)
+	stat, ok := computeBaseline(samples)
+	if !ok {
+		// Full window, but every sample in it was idle in both directions
+		// (issue #9) — there is still nothing honest to establish from.
+		// Leave established false and retry next cycle, rather than
+		// freezing a bogus 0 baseline in place forever (ADR-012's "seeds
+		// from the disk's first full window" assumes that window has real
+		// latency data to seed from).
+		return LatencyStat{}, false
+	}
 	a.baselines[diskID] = stat
 	a.established[diskID] = true
 	return stat, true
 }
 
 // updateBaseline recomputes and stores diskID's baseline from the current
-// samples. Only called when the disk is not currently saturated.
+// samples. Only called when the disk is not currently saturated. Skips the
+// write entirely when computeBaseline finds no qualifying sample (issue
+// #9) — an idle window must not overwrite a real, previously-established
+// baseline with a bogus 0.
 func (a *WindowAnalyzer) updateBaseline(diskID string, samples []metrics.Sample) {
+	stat, ok := computeBaseline(samples)
+	if !ok {
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.baselines[diskID] = computeBaseline(samples)
+	a.baselines[diskID] = stat
 }
 
-func computeBaseline(samples []metrics.Sample) LatencyStat {
+// computeBaseline excludes an idle direction's phantom zero the same way
+// readLatencies/writeLatencies do (issue #9). Its second return is false
+// when neither direction had any qualifying sample in the window (a
+// totally idle window) — establishing or overwriting the baseline with a
+// bogus 0 in that case would make every future latency reading look
+// "elevated" by comparison, the opposite of what a baseline is for.
+func computeBaseline(samples []metrics.Sample) (LatencyStat, bool) {
 	all := make([]time.Duration, 0, len(samples)*2)
 	for _, s := range samples {
-		all = append(all, s.ReadLatAvg, s.WriteLatAvg)
+		if s.ReadOps > 0 {
+			all = append(all, s.ReadLatAvg)
+		}
+		if s.WriteOps > 0 {
+			all = append(all, s.WriteLatAvg)
+		}
 	}
-	return LatencyStat{P95: percentile(all, baselinePercentile), Kind: LatencyWindowedAvg}
+	if len(all) == 0 {
+		return LatencyStat{}, false
+	}
+	return LatencyStat{P95: percentile(all, baselinePercentile), Kind: LatencyWindowedAvg}, true
 }
 
 // trailingWindow returns the suffix of samples (chronological ascending)
@@ -177,13 +216,26 @@ func trailingWindow(samples []metrics.Sample, window time.Duration) []metrics.Sa
 }
 
 // windowFull is timestamp-span based, not a sample count, beyond the
-// minSamplesForWindow floor (ADR-010; design.md §4.3).
-func windowFull(samples []metrics.Sample, window time.Duration) bool {
+// minSamplesForWindow floor (ADR-010; design.md §4.3) — and, per issue #15
+// / issue #7, also requires that no gap between consecutive samples inside
+// the window exceeds maxGap. A window whose overall span covers `window`
+// but contains one large silent gap (a missed collection cycle, a source
+// outage that later recovered) is not the sustained, gap-free evidence
+// design.md §4.4 means by "full".
+func windowFull(samples []metrics.Sample, window time.Duration, maxGap time.Duration) bool {
 	if len(samples) < minSamplesForWindow {
 		return false
 	}
 	span := samples[len(samples)-1].Timestamp.Sub(samples[0].Timestamp)
-	return span >= window
+	if span < window {
+		return false
+	}
+	for i := 1; i < len(samples); i++ {
+		if samples[i].Timestamp.Sub(samples[i-1].Timestamp) > maxGap {
+			return false
+		}
+	}
+	return true
 }
 
 // fillRatio is windowFull's fraction form, for observability
@@ -277,18 +329,29 @@ func sustainedThrottle(window []metrics.Sample, specIOPS int64) bool {
 	return true
 }
 
+// readLatencies/writeLatencies only include samples where that direction
+// actually served ops that interval (issue #9). metrics.computeSample only
+// sets ReadLatAvg/WriteLatAvg when the corresponding op-delta was >0 —
+// otherwise the field is the Go zero value, not a real "0ns latency"
+// observation. Treating an idle direction's zero as real data pollutes
+// both the p95 for that direction and, through computeBaseline below, the
+// shared latency baseline every direction is compared against.
 func readLatencies(window []metrics.Sample) []time.Duration {
-	out := make([]time.Duration, len(window))
-	for i, s := range window {
-		out[i] = s.ReadLatAvg
+	out := make([]time.Duration, 0, len(window))
+	for _, s := range window {
+		if s.ReadOps > 0 {
+			out = append(out, s.ReadLatAvg)
+		}
 	}
 	return out
 }
 
 func writeLatencies(window []metrics.Sample) []time.Duration {
-	out := make([]time.Duration, len(window))
-	for i, s := range window {
-		out[i] = s.WriteLatAvg
+	out := make([]time.Duration, 0, len(window))
+	for _, s := range window {
+		if s.WriteOps > 0 {
+			out = append(out, s.WriteLatAvg)
+		}
 	}
 	return out
 }

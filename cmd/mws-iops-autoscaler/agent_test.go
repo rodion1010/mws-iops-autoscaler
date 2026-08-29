@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"github.com/rodion1010/mws-iops-autoscaler/internal/actuator"
+	"github.com/rodion1010/mws-iops-autoscaler/internal/analyzer"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/compute"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/decider"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/journal"
+	"github.com/rodion1010/mws-iops-autoscaler/internal/metrics"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/registry"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/state"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/telemetry"
@@ -99,5 +101,79 @@ func TestActuate_allowScaleDownTrueReachesActuator(t *testing.T) {
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 	if len(act.calls) != 1 {
 		t.Errorf("Actuator.Apply called %d times, want 1 when scale-down is explicitly allowed", len(act.calls))
+	}
+}
+
+// fixedDecider always returns the same Decision regardless of Analysis —
+// used to prove reconcile's discovery-staleness gate (issue #15) blocks
+// the whole pipeline before the Decider (and therefore the Actuator) is
+// ever reached, not just that this cycle happened to decide NoAction.
+type fixedDecider struct {
+	action decider.Action
+	target int64
+}
+
+func (f fixedDecider) Decide(diskID string, current int64, _ analyzer.Analysis, _ decider.VMState, _ decider.EffectivePolicy, _ decider.GuardrailState, _ time.Time) decider.Decision {
+	return decider.Decision{DiskID: diskID, Action: f.action, Current: current, Target: f.target}
+}
+
+// emptySource is a metrics.MetricSource stub that always succeeds with no
+// samples — reconcile's staleness gate must be checked before the sampler
+// or Analyzer are even consulted, so what they'd return doesn't matter.
+type emptySource struct{}
+
+func (emptySource) Sample(_ context.Context, _ []metrics.DiskRef) ([]metrics.Sample, error) {
+	return nil, nil
+}
+func (emptySource) Kind() metrics.SourceKind { return metrics.SourceGuest }
+
+func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent, *recordingActuator) {
+	t.Helper()
+	act := &recordingActuator{}
+	budget, err := state.LoadBudget(t.TempDir() + "/budget.jsonl")
+	if err != nil {
+		t.Fatalf("LoadBudget: %v", err)
+	}
+	sampler, err := metrics.NewSampler(emptySource{}, 10)
+	if err != nil {
+		t.Fatalf("NewSampler: %v", err)
+	}
+	return &Agent{
+		vmName:               "vm-1",
+		allowScaleDown:       true,
+		maxDiscoveryAge:      time.Minute,
+		lastDiscoverySuccess: lastDiscoverySuccess,
+		managed:              []registry.ManagedDisk{independentDisk()},
+		sampler:              sampler,
+		analyzer:             analyzer.NewWindowAnalyzer(),
+		decider:              fixedDecider{action: decider.ActionScaleUp, target: 2000},
+		actuator:             act,
+		tracker:              state.NewTracker(budget),
+		telemetry:            telemetry.NewRegistry(),
+		journal:              journal.NewWriter(discard{}),
+	}, act
+}
+
+func TestReconcile_skipsWhenDiscoveryStale(t *testing.T) {
+	a, act := newReconcileTestAgent(t, time.Now().Add(-time.Hour)) // far past maxDiscoveryAge
+	a.reconcile(context.Background())
+	if len(act.calls) != 0 {
+		t.Errorf("Actuator.Apply called %d times, want 0 — a stale discovery snapshot must never reach the Decider (issue #15)", len(act.calls))
+	}
+}
+
+func TestReconcile_skipsWhenNeverDiscovered(t *testing.T) {
+	a, act := newReconcileTestAgent(t, time.Time{}) // zero value: discover() never succeeded
+	a.reconcile(context.Background())
+	if len(act.calls) != 0 {
+		t.Errorf("Actuator.Apply called %d times, want 0 — a zero-value lastDiscoverySuccess must fail closed, not be treated as fresh", len(act.calls))
+	}
+}
+
+func TestReconcile_proceedsWhenDiscoveryFresh(t *testing.T) {
+	a, act := newReconcileTestAgent(t, time.Now())
+	a.reconcile(context.Background())
+	if len(act.calls) != 1 {
+		t.Errorf("Actuator.Apply called %d times, want 1 — a fresh discovery snapshot must not be blocked", len(act.calls))
 	}
 }

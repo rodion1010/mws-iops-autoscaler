@@ -117,7 +117,20 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		return withReason(base, ActionScaleDown, "underutilized")
 
 	default:
-		return withReason(base, ActionNoAction, "no_signal")
+		// Distinguish *why* neither verdict fired (issue #15) — "no_signal"
+		// alone conflated three very different situations in the journal:
+		// data that's too old to trust, a window that hasn't accumulated
+		// enough history yet, and a genuinely quiet-but-fresh-and-full disk
+		// with nothing to do. The first two are transient/operational; only
+		// the third is the disk actually behaving.
+		switch {
+		case !a.Fresh:
+			return withReason(base, ActionNoAction, "metrics_stale")
+		case !a.WindowFullUp && !a.WindowFullDown:
+			return withReason(base, ActionNoAction, "window_not_full")
+		default:
+			return withReason(base, ActionNoAction, "no_signal")
+		}
 	}
 }
 
