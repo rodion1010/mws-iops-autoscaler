@@ -95,9 +95,32 @@ func validateAdvancedGate(path string, a *AdvancedSpec) []error {
 	return nil
 }
 
-// validateDiskSelection checks device_name form (ADR-004) and duplicates.
+// validateDiskSelection checks disks.mode is one of the two documented
+// strategies (docs/configuration.md §4.2) and that only the fields that
+// strategy actually uses are set, then checks device_name form (ADR-004)
+// and duplicates within whichever list applies.
 func validateDiskSelection(d *DisksSpec) []error {
 	var errs []error
+
+	switch d.Mode {
+	case "auto-discovery":
+		if len(d.Selected) > 0 {
+			errs = append(errs, fmt.Errorf(
+				"disks: mode is %q but disks.selected is set — selected only applies to mode: selected", d.Mode))
+		}
+	case "selected":
+		if len(d.Exclude) > 0 {
+			errs = append(errs, fmt.Errorf(
+				"disks: mode is %q but disks.exclude is set — exclude only applies to mode: auto-discovery", d.Mode))
+		}
+		if len(d.Selected) == 0 {
+			errs = append(errs, fmt.Errorf("disks.selected: mode is \"selected\" but the list is empty"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf(
+			"disks.mode: %q is neither \"auto-discovery\" nor \"selected\"", d.Mode))
+	}
+
 	seen := make(map[string]bool)
 
 	check := func(path, name string) {

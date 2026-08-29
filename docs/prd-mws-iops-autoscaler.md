@@ -113,7 +113,9 @@ opt in broadly or narrowly.
       silently land on the wrong disk). Written unprefixed; `(instance, device_name)` is the key in
       fleet mode, where selectors nest under their instance. See ADR-004
 - [ ] `--validate-config` rejects a kernel device path, a prefixed `mws-` name, a duplicate
-      `device_name` within one VM's list, and a `device_name` matching no discovered disk
+      `device_name` within one VM's list, a `device_name` matching no discovered disk, an unrecognized
+      strategy name, and the exclusion/selection list belonging to the wrong strategy (e.g. `explicit`
+      with an `all_except`-style exclusion list set)
 - [ ] Strategy is settable globally and overridable per VM
 - [ ] Continuous rediscovery interval is configurable; new disks enter management without restart
 - [ ] Typecheck/lint passes

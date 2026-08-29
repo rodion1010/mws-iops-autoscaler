@@ -323,6 +323,10 @@ value, and maintenance windows.
 
 `--validate-config` must reject, with a message naming the field:
 
+- `disks.mode` anything other than `auto-discovery` or `selected`
+- `mode: auto-discovery` with `disks.selected` set, or `mode: selected` with `disks.exclude` set —
+  each field belongs to exactly one strategy (§4.2)
+- `mode: selected` with an empty `disks.selected` list
 - `min_iops < 1000` or `max_iops > 10000`
 - `min_iops > max_iops`
 - any IOPS value not a multiple of 100

@@ -164,6 +164,40 @@ func TestValidate_rules(t *testing.T) {
 			mutate:  func(c *Config) { c.Mode = "fleet" },
 			wantSub: "not supported in this build",
 		},
+		{
+			name:    "bogus disks.mode",
+			mutate:  func(c *Config) { c.Disks.Mode = "all-of-them" },
+			wantSub: "neither \"auto-discovery\" nor \"selected\"",
+		},
+		{
+			name:    "empty disks.mode",
+			mutate:  func(c *Config) { c.Disks.Mode = "" },
+			wantSub: "neither \"auto-discovery\" nor \"selected\"",
+		},
+		{
+			name: "mode: auto-discovery with selected populated",
+			mutate: func(c *Config) {
+				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}}
+			},
+			wantSub: "selected only applies to mode: selected",
+		},
+		{
+			name: "mode: selected with exclude set",
+			mutate: func(c *Config) {
+				c.Disks.Mode = "selected"
+				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}}
+				// c.Disks.Exclude is already ["bootdisk"] from validConfig.
+			},
+			wantSub: "exclude only applies to mode: auto-discovery",
+		},
+		{
+			name: "mode: selected with an empty selected list",
+			mutate: func(c *Config) {
+				c.Disks.Mode = "selected"
+				c.Disks.Exclude = nil
+			},
+			wantSub: "mode is \"selected\" but the list is empty",
+		},
 	}
 
 	for _, tc := range cases {
