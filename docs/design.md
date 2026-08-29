@@ -232,8 +232,8 @@ resource_gate :=
 
 saturated :=
       resource_gate
-  AND ( queue_depth      >= policy.saturation.queue_depth_threshold
-     OR p95_latency      >  baseline_p95 × policy.saturation.latency.baseline_multiplier
+  AND ( queue_depth        >= policy.saturation.queue_depth_threshold
+     OR latency.P95        >  baseline.P95 × policy.saturation.latency.baseline_multiplier
      OR throttling_detected )
   AND sustained over policy.evaluation.scale_up_window
 ```
@@ -251,6 +251,15 @@ count; gating on IOPS alone would silently miss it — the whole reason ADR-008 
 **Latency is baseline-relative, never absolute.** `p95 > 10 ms` is wrong for everyone; acceptable
 latency is workload-specific. The baseline is a long rolling low-percentile of the disk's own
 observed latency, frozen while the disk is saturated so a throttled period cannot poison it.
+
+**How the p95 is derived is not uniform across `Source`, and is recorded, not assumed** (ADR-011).
+`guest` always uses `LatencyWindowedAvg` — a percentile estimated from a window of per-interval
+averages, the only method `/proc/diskstats` supports. `platform` uses `LatencyHistogram` — a real
+quantile computed directly from the exported bucket histogram — whenever a fresh one is available,
+falling back to `LatencyWindowedAvg` otherwise (the same present-and-fresh fallback pattern US-005a
+already uses for utilization and queue depth). `latency.P95` and `baseline.P95` above are each a
+`LatencyStat`, so the `Kind` that produced them travels into `Analysis` and the decision journal —
+"why did it scale" can distinguish a histogram-backed verdict from a windowed-average one.
 
 ### 4.5 Throttling detection and demand estimation
 
@@ -276,15 +285,18 @@ the service rate is pinned, so the excess appears as queueing. Two regimes:
 | Regime | Signature | Estimate |
 |---|---|---|
 | Open workload (arrivals independent) | queue **growing** | `demand ≈ served + dL/dt` |
-| Closed workload (bounded concurrency) | queue **stable and deep** | `demand ≈ served × (p95_latency / baseline_p95)` |
+| Closed workload (bounded concurrency) | queue **stable and deep** | `demand ≈ served × (latency.P95 / baseline.P95)` |
 
 The closed-workload form is the workhorse: if latency is 3× baseline, the workload is receiving
 roughly a third of the service it wants. Both forms are clamped to
 `max_scale_up_ratio` so a pathological reading cannot request a 10× jump.
 
 **Platform-side (fleet mode).** No queue-in-operations and no read queue, so only the
-latency-ratio form is available, computed from the exported histograms. Coarser, and one more reason
-`local` prefers the guest (ADR-001).
+latency-ratio form is available — but that ratio itself can use `LatencyHistogram`, the more accurate
+of the two `LatencyStatKind`s (ADR-011), when a fresh histogram is present. The form being unavailable
+without a queue signal is what makes this coarser than guest's throttling detection, and one more
+reason `local` prefers the guest (ADR-001) — it is not a statement about the latency figure's own
+accuracy.
 
 **Honesty note.** These estimators are unvalidated. They are the reason the rollout starts
 observe-only: the first stage exists specifically to check whether the estimate matches what actually
@@ -396,15 +408,13 @@ type MetricSource interface {
 }
 
 // Sample is one interval's observation — an average, not a percentile.
-// Neither source can honestly give a within-interval p95 at the single-
-// sample level: the guest has only diskstats' cumulative ticks/ops (an
-// average), and the platform's histogram would need a different read (its
-// own bucket approximation) than the guest ever could, which would make
-// this field mean two different things depending on Source — exactly the
-// silent-mix bug QueueDepth's explicit unit exists to prevent, just for
-// latency instead of queue units. The Analyzer (§4.4, US-007) computes the
-// actual p95 from a window of these per-interval averages, uniformly for
-// both sources.
+// Neither source can honestly give a within-interval percentile at the
+// single-sample level: guest has only diskstats' cumulative ticks/ops (an
+// average is all it can ever produce), and platform's real distribution
+// lives in its exported histogram, not in any one Sample. The Analyzer
+// (§4.4, US-007) turns these into a percentile over a window — see
+// LatencyStat below for why that computation is not uniform across
+// Source (ADR-011).
 type Sample struct {
     DiskID       string
     Timestamp    time.Time     // metric timestamp, not wall clock
@@ -416,6 +426,47 @@ type Sample struct {
     ReadLatAvg   time.Duration // average latency this interval, not a percentile
     WriteLatAvg  time.Duration
     Source       SourceKind
+}
+
+// LatencyStatKind names how a latency percentile was derived — carried on
+// the value itself, the same move QueueDepth makes for its unit, so a
+// windowed estimate and a histogram-derived quantile are never silently
+// compared as if they meant the same thing (ADR-011).
+type LatencyStatKind string
+
+const (
+    // LatencyWindowedAvg: a percentile estimated from a window of
+    // per-interval Sample averages. The only method guest can ever
+    // produce; platform's fallback when no histogram is available.
+    LatencyWindowedAvg LatencyStatKind = "windowed_avg"
+    // LatencyHistogram: a real quantile computed directly from platform's
+    // exported bucket histogram (CLAUDE.md) for a single scrape — no
+    // windowing needed for accuracy. platform only.
+    LatencyHistogram LatencyStatKind = "histogram"
+)
+
+type LatencyStat struct {
+    P95  time.Duration
+    Kind LatencyStatKind
+}
+
+// Analysis is the Analyzer's output: everything the Decider and the
+// journal need, computed once per disk per cycle. ReadLatency/WriteLatency
+// carry LatencyWindowedAvg for guest always, and for platform whenever no
+// fresh histogram is available; LatencyHistogram for platform when one is
+// (ADR-011). Baseline is frozen while the disk is saturated (§4.4) and
+// carries whichever Kind produced it.
+type Analysis struct {
+    DiskID               string
+    IOPSUtilization      float64
+    BandwidthUtilization float64
+    QueueDepth           QueueDepth
+    ReadLatency          LatencyStat
+    WriteLatency         LatencyStat
+    Baseline             LatencyStat
+    ThrottleDetected     bool
+    Demand               float64
+    WindowFull           bool // timestamp-span based, not a count (ADR-010)
 }
 
 type Analyzer interface {

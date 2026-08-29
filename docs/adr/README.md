@@ -12,6 +12,7 @@
 | [008](ADR-008-bandwidth-bound-saturation-gate.md) | Saturation gate opens on IOPS or bandwidth utilization, not IOPS alone | Accepted |
 | [009](ADR-009-minimal-dependent-disk-write.md) | Dependent-disk writes send a minimal partial body, never a full-spec resend | Accepted |
 | [010](ADR-010-single-canonical-collection-interval.md) | One canonical sampling cadence (`runtime.metrics.collection_interval`); window readiness is timestamp-based | Accepted |
+| [011](ADR-011-latency-statistic-capability-explicit.md) | Latency statistics carry their own derivation (windowed average vs. platform histogram), never forced uniform across sources | Accepted |
 
 ADRs are **derived from the PRD**, which is the primary document: it states the requirement, an ADR
 records how the requirement is met and why that way. An ADR never introduces or drops a requirement

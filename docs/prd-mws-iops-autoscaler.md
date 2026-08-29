@@ -195,6 +195,11 @@ single noisy sample cannot trigger a change.
 **Acceptance Criteria:**
 - [ ] Maintains a rolling window of samples per disk; window length configurable per direction
 - [ ] Computes configurable percentiles over the window, not just means
+- [ ] Latency percentile computation is not uniform across metric source: `guest` always windows
+      per-interval averages (its only capability); `platform` computes a real quantile from its
+      exported latency histogram when one is fresh, falling back to the same windowed-average method
+      otherwise — the same present-and-fresh fallback pattern US-005a uses for utilization and queue
+      depth. Which method produced a given verdict is recorded, not silently uniform (ADR-011)
 - [ ] Refuses to emit a verdict until the window holds a minimum sample count
 - [ ] Window state survives nothing — a restart starts a fresh window and scales nothing until full
 - [ ] Typecheck/lint passes

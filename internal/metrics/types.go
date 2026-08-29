@@ -58,14 +58,19 @@ func (d DiskRef) MetricLabel() string {
 }
 
 // Sample is one interval's observation — an average, not a percentile.
-// Neither source can honestly give a within-interval p95 at the
-// single-sample level (guest has only diskstats' cumulative ticks/ops, an
-// average; giving the platform's histogram a different meaning here than
-// the guest's average would silently mix two different things depending on
-// Source, the latency equivalent of the QueueDepth unit-mixing bug this
-// package already guards against). The Analyzer (M3, US-007) computes the
-// actual p95 from a window of these per-interval averages, uniformly for
-// both sources.
+// Neither source can honestly give a within-interval percentile at the
+// single-sample level: guest has only diskstats' cumulative ticks/ops, so
+// an average is all it can ever produce; platform's real distribution
+// lives in its exported histogram, not in any one Sample. The Analyzer
+// (M3, US-007) turns these into a percentile over a window — the
+// computation is deliberately *not* uniform across Source: guest always
+// windows these averages, but platform prefers a real quantile computed
+// directly from its histogram when one is available, falling back to the
+// same windowed-average method otherwise. Which method backed a given
+// percentile travels with the value (LatencyStatKind, design.md §5.2),
+// the same move this package already makes for QueueDepth's unit — see
+// ADR-011 for why forcing both sources through one uniform, coarser
+// method was the wrong fix for that risk.
 type Sample struct {
 	DiskID      string
 	Timestamp   time.Time // metric timestamp, not wall clock
