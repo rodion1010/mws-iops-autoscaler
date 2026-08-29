@@ -17,6 +17,7 @@
 | [013](ADR-013-budget-persisted-cooldowns-stay-in-memory.md) | The 24h change budget must be persisted; cooldowns may safely stay in-memory | Accepted |
 | [014](ADR-014-fail-closed-on-stale-evidence.md) | Fail closed on stale metrics and stale discovery snapshots — freshness/gap checks at the Analyzer, Decider, and Agent layers | Accepted |
 | [015](ADR-015-conditional-direction-preserving-writes.md) | Both write paths re-read live state and abort on conflict before writing — never an unconditional absolute-value write | Accepted |
+| [016](ADR-016-bandwidth-aware-scale-down-sizing.md) | Scale-down sizing uses the aligned per-sample max of IOPS and bandwidth demand, not `IOPSP95Down` alone | Accepted |
 
 ADRs are **derived from the PRD**, which is the primary document: it states the requirement, an ADR
 records how the requirement is met and why that way. An ADR never introduces or drops a requirement

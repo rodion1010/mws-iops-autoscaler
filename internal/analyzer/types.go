@@ -118,7 +118,35 @@ type Analysis struct {
 	Saturated     bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
 	Underutilized bool // every signal quiet AND sustained over ScaleDownWindow (US-010); false if !WindowFullDown
 
-	IOPSP95Down float64 // p95 served ops/s over ScaleDownWindow — the Decider's p95_iops(m) input
+	IOPSP95Down float64 // p95 served ops/s over ScaleDownWindow — observability, and one of EffectiveDemandP95Down's two inputs
+
+	// BandwidthP95DownIOPSEquiv is the p95, over ScaleDownWindow, of served
+	// bandwidth converted to IOPS-equivalent units (bytes/s ÷ bytesPerIOPS)
+	// — the other input to EffectiveDemandP95Down (issue #17). NBS-PL2
+	// ties provisioned IOPS and bandwidth at the same fixed ratio
+	// (CLAUDE.md, already used for BandwidthUtilization/ADR-008's
+	// saturation gate) — a scale-down target sized from ops alone can
+	// undersize the bandwidth ceiling a large-block, low-ops/s workload
+	// still needs.
+	BandwidthP95DownIOPSEquiv float64
+
+	// EffectiveDemandP95Down is the p95, over ScaleDownWindow, of each
+	// sample's own max(ops, bandwidth-equivalent) — not
+	// max(IOPSP95Down, BandwidthP95DownIOPSEquiv), which would combine two
+	// independently-computed percentiles that may come from different
+	// samples entirely (issue #17's own warning: "must preserve aligned
+	// per-sample totals rather than combining unrelated percentiles").
+	// This is what the Decider's scale-down target is actually sized
+	// from; IOPSP95Down and BandwidthP95DownIOPSEquiv above stay as
+	// separate, independently-meaningful figures for the journal.
+	EffectiveDemandP95Down float64
+
+	// LimitingResourceDown names whichever resource IOPSP95Down/
+	// BandwidthP95DownIOPSEquiv suggests is currently binding for this
+	// disk's down-window — "iops" or "bandwidth" — for the journal
+	// (issue #17: "records... the limiting resource"). Informational only,
+	// not part of the guardrail math itself.
+	LimitingResourceDown string
 
 	// demand()'s (design.md §4.5) two remaining inputs beyond what's above
 	// — both measured over ScaleUpWindow, since demand() is only ever

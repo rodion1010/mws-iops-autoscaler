@@ -98,14 +98,21 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		// surfaced (issue #14: "optionally retaining the candidate
 		// recommendation for observability") so the journal/metrics show
 		// what *would* have happened, without it ever becoming a target.
-		base.Demand = a.IOPSP95Down
+		// Demand is the effective (IOPS-or-bandwidth, whichever binds)
+		// figure, not IOPSP95Down alone (issue #17) — NBS-PL2 ties
+		// provisioned IOPS and bandwidth at a fixed ratio, so a target
+		// sized from served ops/s alone can undersize the bandwidth
+		// ceiling a large-block, low-ops/s workload still needs.
+		// a.EffectiveDemandP95Down is already the properly-aligned
+		// per-sample max, not a max of two separately-computed percentiles.
+		base.Demand = a.EffectiveDemandP95Down
 		if !pd.allowScaleDown {
 			return withReason(base, ActionNoAction, "scale_down_disabled")
 		}
 		if now.Sub(state.LastChangeDown) < p.CooldownScaleDown {
 			return withReason(base, ActionNoAction, "cooldown_scale_down")
 		}
-		raw := a.IOPSP95Down / p.ScaleDownUtilization
+		raw := a.EffectiveDemandP95Down / p.ScaleDownUtilization
 		target, changed := guardrails(raw, current, ceiling, p.MinIOPS, p.MaxScaleDownRatio, p.MinChangeIOPS)
 		if !changed || target >= current {
 			return withReason(base, ActionNoAction, "target_not_below_current")

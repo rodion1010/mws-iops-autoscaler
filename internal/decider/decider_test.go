@@ -68,7 +68,7 @@ func TestDecide_cooldownScaleUpBlocks(t *testing.T) {
 
 func TestDecide_cooldownScaleDownBlocks(t *testing.T) {
 	d := NewPolicyDecider(true)
-	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100}
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
 	state := GuardrailState{LastChangeDown: epoch.Add(-1 * time.Minute)} // cooldown is 30m
 	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, testPolicy, state, epoch)
 	if got.Action != ActionNoAction || got.Reason != "cooldown_scale_down" {
@@ -151,7 +151,7 @@ func TestDecide_scaleDown(t *testing.T) {
 	d := NewPolicyDecider(true)
 	// raw = 300/0.70 = 428.6 -> 500, but MaxScaleDownRatio(0.5) floors it
 	// at current(2000)*0.5 = 1000.
-	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300}
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300, EffectiveDemandP95Down: 300}
 	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionScaleDown {
 		t.Fatalf("Action = %v, want ActionScaleDown (got %+v)", got.Action, got)
@@ -166,7 +166,7 @@ func TestDecide_scaleDownNeverBelowMinIOPS(t *testing.T) {
 	// current far enough above MinIOPS that the floor-driven delta still
 	// clears MinChangeIOPS (200) — otherwise the change is suppressed
 	// before the MinIOPS floor is even the interesting part of the story.
-	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 50}
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 50, EffectiveDemandP95Down: 50}
 	got := d.Decide("disk1", 1500, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionScaleDown {
 		t.Fatalf("Action = %v, want ActionScaleDown (got %+v)", got.Action, got)
@@ -176,12 +176,49 @@ func TestDecide_scaleDownNeverBelowMinIOPS(t *testing.T) {
 	}
 }
 
+func TestDecide_scaleDownTargetRetainsHeadroomForBothIOPSAndBandwidth(t *testing.T) {
+	d := NewPolicyDecider(true)
+	// issue #17's own worked example: 900 ops/s at 64 KiB/op is ~59 MB/s,
+	// whose IOPS-equivalent (÷32768, ADR-008's own ratio) is 1800 — well
+	// above the 900 ops/s figure alone. A target sized from IOPSP95Down
+	// alone would undersize the disk's actual bandwidth need; Decide must
+	// size from EffectiveDemandP95Down (the aligned per-sample max)
+	// instead, so the target's IOPS-equivalent ceiling still covers the
+	// observed bandwidth, not just the observed op count.
+	a := analyzer.Analysis{
+		Underutilized:             true,
+		IOPSP95Down:               900,
+		BandwidthP95DownIOPSEquiv: 1800,
+		EffectiveDemandP95Down:    1800,
+		LimitingResourceDown:      "bandwidth",
+	}
+	got := d.Decide("disk1", 5000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionScaleDown {
+		t.Fatalf("Action = %v, want ActionScaleDown (got %+v)", got.Action, got)
+	}
+	// raw = 1800/0.70 = 2571.4 -> ceiled to 2600 on the 100-grid.
+	if got.Target != 2600 {
+		t.Errorf("Target = %d, want 2600 (sized from EffectiveDemandP95Down=1800, not IOPSP95Down=900)", got.Target)
+	}
+	if got.Demand != 1800 {
+		t.Errorf("Demand = %v, want 1800 (EffectiveDemandP95Down, the bandwidth-dominated figure)", got.Demand)
+	}
+	// Had Decide sized from IOPSP95Down alone, raw = 900/0.70 = 1285.7 ->
+	// 1300 — well below the actual bandwidth need. Assert the real target
+	// clears that undersized figure, proving bandwidth (not ops alone)
+	// drove the result.
+	const undersizedFromOpsAlone = 1300
+	if got.Target <= undersizedFromOpsAlone {
+		t.Errorf("Target = %d does not exceed %d — bandwidth demand was not retained", got.Target, undersizedFromOpsAlone)
+	}
+}
+
 func TestDecide_scaleDownDisabledNeverWrites(t *testing.T) {
 	// issue #14: Phase 1 is scale-up only. With allowScaleDown=false, a
 	// quiet full down-window must never reach a write path, checked before
 	// cooldown/guardrails, not merely clamped by them.
 	d := NewPolicyDecider(false)
-	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300}
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300, EffectiveDemandP95Down: 300}
 	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionNoAction {
 		t.Fatalf("Action = %v, want ActionNoAction (got %+v)", got.Action, got)
@@ -202,7 +239,7 @@ func TestDecide_scaleDownDisabledIgnoresCooldownAndBudget(t *testing.T) {
 	// allowed the change — it is not implemented as "just another
 	// guardrail" that a sufficiently permissive state could bypass.
 	d := NewPolicyDecider(false)
-	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300}
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300, EffectiveDemandP95Down: 300}
 	state := GuardrailState{} // no cooldown active, full budget
 	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, testPolicy, state, epoch)
 	if got.Action != ActionNoAction || got.Reason != "scale_down_disabled" {

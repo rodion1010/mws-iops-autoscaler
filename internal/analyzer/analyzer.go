@@ -115,7 +115,8 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 		latencyAtBaseline &&
 		!sustainedThrottle(downWindow, specIOPS)
 
-	out.IOPSP95Down = percentile95TotalOps(downWindow)
+	out.IOPSP95Down, out.BandwidthP95DownIOPSEquiv, out.EffectiveDemandP95Down, out.LimitingResourceDown =
+		demandP95Down(downWindow)
 
 	out.ServedIOPS = newest.ReadOps + newest.WriteOps
 	out.QueueGrowthRate = queueGrowthRate(upWindow)
@@ -376,15 +377,48 @@ func queueGrowthRate(window []metrics.Sample) float64 {
 	return (last.QueueDepth.Value - first.QueueDepth.Value) / elapsed
 }
 
-func percentile95TotalOps(window []metrics.Sample) float64 {
+// demandP95Down computes the three down-window demand figures issue #17
+// requires: IOPS p95, bandwidth-equivalent p95, and the properly-aligned
+// effective-demand p95 those two must not be confused with.
+//
+// effectiveDemand is deliberately p95(per-sample max(ops, bandwidth-
+// equivalent)), not max(p95(ops), p95(bandwidth-equivalent)) — the latter
+// would combine two independently-computed percentiles that can come from
+// entirely different samples, which is not a value any single moment of
+// the workload ever actually produced. Computing the max first, per
+// sample, then taking one percentile of that combined series is what
+// keeps the demand figure aligned to something the disk was actually
+// asked to do at one point in time.
+//
+// iopsP95/bwP95 are still computed (and returned) independently, purely
+// for the journal's own "IOPS demand, bandwidth-equivalent demand"
+// figures (issue #17) — decider.Decide's actual scale-down target is
+// sized from effectiveDemand alone, never from these two directly.
+func demandP95Down(window []metrics.Sample) (iopsP95, bwP95, effectiveDemand float64, limitingResource string) {
 	if len(window) == 0 {
-		return 0
+		return 0, 0, 0, ""
 	}
 	ops := make([]float64, len(window))
+	bw := make([]float64, len(window))
+	eff := make([]float64, len(window))
 	for i, s := range window {
 		ops[i] = s.ReadOps + s.WriteOps
+		bw[i] = (s.ReadBytes + s.WriteBytes) / bytesPerIOPS
+		if bw[i] > ops[i] {
+			eff[i] = bw[i]
+		} else {
+			eff[i] = ops[i]
+		}
 	}
-	return percentileFloat(ops, 0.95)
+
+	iopsP95 = percentileFloat(ops, 0.95)
+	bwP95 = percentileFloat(bw, 0.95)
+	effectiveDemand = percentileFloat(eff, 0.95)
+	limitingResource = "iops"
+	if bwP95 > iopsP95 {
+		limitingResource = "bandwidth"
+	}
+	return iopsP95, bwP95, effectiveDemand, limitingResource
 }
 
 func scaledDuration(d time.Duration, mult float64) time.Duration {

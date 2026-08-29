@@ -242,7 +242,7 @@ actually be honored (ADR-010).
        if in_cooldown(disk, down):
            no_action("cooldown_scale_down")
        else:
-           target = guardrails(m.IOPSP95Down / policy.target.scale_down_utilization, disk, vm, down)
+           target = guardrails(m.EffectiveDemandP95Down / policy.target.scale_down_utilization, disk, vm, down)
            if target < current: actuate(disk, target); start_cooldown(down)
            else: no_action("target_not_below_current")
    else:
@@ -250,11 +250,22 @@ actually be honored (ADR-010).
 ```
 
 `demand()` is the Decider's job (§3.2 — "Demand estimate → raw target"), not the Analyzer's: it takes
-`Analysis` plus policy and produces a number to clamp, same as `m.IOPSP95Down` already is for
-scale-down. `Analysis` carries the *evidence* (queue depth, latency, throttle detection, window/
+`Analysis` plus policy and produces a number to clamp, same as `m.EffectiveDemandP95Down` already is
+for scale-down. `Analysis` carries the *evidence* (queue depth, latency, throttle detection, window/
 baseline state, and the two verdict booleans); it does not carry a precomputed demand figure —
 keeping that split is what makes `demand()`'s two regimes (§4.5) unit-testable against a fixed
 `Analysis` without needing a real window of samples for every case.
+
+`m.EffectiveDemandP95Down`, not `m.IOPSP95Down` alone, sizes the scale-down target (issue #17). NBS-PL2
+ties provisioned IOPS and bandwidth at one fixed ratio (`bytesPerIOPS`, ADR-008) — a large-block,
+low-ops/s workload can be well below its IOPS ceiling while still saturating the bandwidth that same
+IOPS number buys. Sizing the target from served ops/s alone would undersize that bandwidth need on the
+next cycle. `EffectiveDemandP95Down` is the p95, over `scale_down_window`, of each *sample's own*
+`max(ops, bandwidth ÷ bytesPerIOPS)` — not `max(p95(ops), p95(bandwidth))`, which can miss an outlier
+that shows up in only one of the two series at any given sample (§4.5 below has the worked example).
+`m.IOPSP95Down` and `m.BandwidthP95DownIOPSEquiv` still exist on `Analysis` and are journaled
+alongside `m.LimitingResourceDown` (`"iops"`/`"bandwidth"`) so a scale-down decision's journal entry
+shows which resource actually drove the target, not just the final number.
 
 `guardrails()` is the last line before any write (§3.2): clamp to `[policy.limits.min_iops,
 min(10000, policy.limits.max_iops, vm_headroom)]` (NFR-5, §4.6), round to a 100-IOPS multiple,
@@ -388,6 +399,22 @@ of the two `LatencyStatKind`s (ADR-011), when a fresh histogram is present. The 
 without a queue signal is what makes this coarser than guest's throttling detection, and one more
 reason `local` prefers the guest (ADR-001) — it is not a statement about the latency figure's own
 accuracy.
+
+**Scale-down sizing is bandwidth-aware too (issue #17).** The scale-up estimators above size a target
+from *served* activity when the disk is pinned at its own limit; scale-down sizing (§4.3) is simpler —
+`EffectiveDemandP95Down` is already an unthrottled p95 read straight off the down-window, no
+regime-detection needed — but it shares the same NBS-PL2 fact: provisioned IOPS and bandwidth move
+together at a fixed ratio (`bytesPerIOPS`, ADR-008), so a target sized from ops/s alone can undersize
+the bandwidth a large-block workload needs. The Analyzer computes, per sample in the down-window, both
+`ops = read_ops + write_ops` and `bandwidth_iops_equiv = (read_bytes + write_bytes) / bytesPerIOPS`,
+takes `max(ops, bandwidth_iops_equiv)` **per sample**, then takes the p95 of *that* series —
+`EffectiveDemandP95Down`. This is deliberately not `max(p95(ops), p95(bandwidth_iops_equiv))`: two
+percentiles computed independently can each land on a different sample, so their max can miss an
+outlier that only ever appears in one series at a time (e.g. one sample with an ops spike and a
+different sample with a bandwidth spike, neither reaching p95 on its own but each mattering when it
+occurs). Aligning the max per sample before taking the percentile is what makes the outlier visible.
+`IOPSP95Down` and `BandwidthP95DownIOPSEquiv` are still computed and carried on `Analysis` — and
+journaled, with `LimitingResourceDown` — purely for observability into which resource actually bound.
 
 **Honesty note.** These estimators are unvalidated. They are why `--dry-run` (US-013) is run against
 the live test environment as a validation step inside M6 before actuation is flipped on — not a
@@ -628,7 +655,18 @@ type Analysis struct {
     Saturated     bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
     Underutilized bool // every signal quiet AND sustained over scale_down_window (US-010); false if !WindowFullDown
 
-    IOPSP95Down float64 // p95 served ops/s over scale_down_window — the Decider's p95_iops(m) input (§4.3)
+    // IOPSP95Down/BandwidthP95DownIOPSEquiv/LimitingResourceDown are the
+    // down-window demand breakdown, for the journal (issue #17).
+    // EffectiveDemandP95Down — not IOPSP95Down alone — is the Decider's
+    // §4.3 scale-down sizing input: the p95, over scale_down_window, of
+    // each sample's own max(ops, bandwidth ÷ bytesPerIOPS), not
+    // max(p95(ops), p95(bandwidth)) (§4.5 explains why that distinction
+    // matters). LimitingResourceDown is "iops" or "bandwidth", whichever
+    // of the first two is larger.
+    IOPSP95Down                float64
+    BandwidthP95DownIOPSEquiv  float64
+    EffectiveDemandP95Down     float64
+    LimitingResourceDown       string
 
     // demand()'s (§4.5) two remaining inputs beyond what's above — both
     // measured over ScaleUpWindow, since demand() is only ever called from
@@ -905,6 +943,7 @@ Every reconcile emits one structured record per disk, including no-action:
   "p95_read_latency_ms": 1.2, "p95_write_latency_ms": 0.9, "latency_baseline_ms": 1.1,
   "vm_headroom_iops": 4200, "budget_remaining": 47,
   "window_fill_up": 1.0, "window_fill_down": 1.0,
+  "iops_demand_down": 0, "bandwidth_demand_down_iops_equiv": 0, "limiting_resource_down": "",
   "source": "guest"
 }
 ```
@@ -915,6 +954,13 @@ one casing convention across the whole record, not `Action` in one case and `Rea
 why the original draft of this example omitted them; a `scale_up`/`scale_down` record needs both
 visible. `window_fill_up`/`window_fill_down` are separate because they're independent windows
 (ADR-010) — a disk can be full on one and not the other.
+
+`iops_demand_down`/`bandwidth_demand_down_iops_equiv`/`limiting_resource_down` (issue #17) are the
+down-window demand breakdown behind `demand_iops` on a `scale_down` record — `demand_iops` there
+equals `EffectiveDemandP95Down`, whichever of the other two is larger; `limiting_resource_down` names
+which one. They read `0`/`""` here, as in this example, whenever the record isn't an underutilized
+verdict at all (the down-window figures are still computed and journaled on every cycle, per §4.5, but
+only a `scale_down` or `Underutilized`-but-suppressed record makes them meaningful).
 
 This is the primary calibration input for the `--dry-run` harness (§8.5) — thresholds are tuned from
 these records, not from reasoning.

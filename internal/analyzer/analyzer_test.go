@@ -586,3 +586,104 @@ func TestAnalyze_baselineNotEstablishedFromIdleWindow(t *testing.T) {
 		t.Error("BaselineEstablished = true, want false — an idle window has nothing honest to seed a baseline from")
 	}
 }
+
+// --- issue #17: bandwidth-aware scale-down sizing ---
+
+// blockSample builds one down-window sample of a workload doing opsPerSec
+// operations of blockSize bytes each, purely for demandP95Down's
+// ops-vs-bandwidth comparison — queue/latency/timestamps don't matter for
+// these tests.
+func blockSample(minute int, opsPerSec float64, blockSize int64) metrics.Sample {
+	return sampleAt(minute, opsPerSec, 0, opsPerSec*float64(blockSize), 0, 0, time.Millisecond, time.Millisecond)
+}
+
+func TestDemandP95Down_64KiBWorkloadIsBandwidthLimited(t *testing.T) {
+	// issue #17's own worked example: 900 ops/s at 64 KiB/op ≈ 59 MB/s,
+	// whose IOPS-equivalent (÷32768, ADR-008's own ratio) is 1800 — well
+	// above the 900 ops/s figure alone. Sizing from ops/s alone (900)
+	// would derive a target whose bandwidth ceiling sits below what this
+	// workload already sustains.
+	window := make([]metrics.Sample, 6)
+	for i := range window {
+		window[i] = blockSample(i, 900, 64*1024)
+	}
+	iopsP95, bwP95, effective, limiting := demandP95Down(window)
+
+	if iopsP95 != 900 {
+		t.Errorf("iopsP95 = %v, want 900", iopsP95)
+	}
+	wantBW := 900.0 * 64 * 1024 / bytesPerIOPS // 1800
+	if bwP95 != wantBW {
+		t.Errorf("bwP95 = %v, want %v (IOPS-equivalent of 900 ops/s at 64KiB)", bwP95, wantBW)
+	}
+	if effective != wantBW {
+		t.Errorf("effective demand = %v, want %v — bandwidth must determine it here, not the lower ops/s figure", effective, wantBW)
+	}
+	if limiting != "bandwidth" {
+		t.Errorf("limiting resource = %q, want %q", limiting, "bandwidth")
+	}
+}
+
+func TestDemandP95Down_4KiBWorkloadIsIOPSLimited(t *testing.T) {
+	// The opposite shape: small blocks, high ops/s, low bandwidth — IOPS
+	// must determine the target, not the much smaller bandwidth-equivalent
+	// figure.
+	window := make([]metrics.Sample, 6)
+	for i := range window {
+		window[i] = blockSample(i, 900, 4*1024)
+	}
+	iopsP95, bwP95, effective, limiting := demandP95Down(window)
+
+	if iopsP95 != 900 {
+		t.Errorf("iopsP95 = %v, want 900", iopsP95)
+	}
+	wantBW := 900.0 * 4 * 1024 / bytesPerIOPS // 112.5
+	if bwP95 != wantBW {
+		t.Errorf("bwP95 = %v, want %v", bwP95, wantBW)
+	}
+	if effective != 900 {
+		t.Errorf("effective demand = %v, want 900 — IOPS must determine it here", effective)
+	}
+	if limiting != "iops" {
+		t.Errorf("limiting resource = %q, want %q", limiting, "iops")
+	}
+}
+
+func TestDemandP95Down_alignedPerSampleMaxNotCombinedPercentiles(t *testing.T) {
+	// The exact failure mode issue #17 warns against: max(p95(ops),
+	// p95(bandwidth)) can silently understate demand, because the two
+	// percentiles can be driven by *different* samples — no single moment
+	// of the workload the disk actually served. 18 "background" samples
+	// have ops==bandwidth-equivalent==100 (nothing to disambiguate); one
+	// outlier sample spikes ops to 5000 while bandwidth stays low, and a
+	// different outlier sample spikes bandwidth-equivalent to 5000 while
+	// ops stays low. Neither individual percentile series (computed
+	// independently) ever climbs high enough to surface either spike at
+	// p95 — but the properly-aligned per-sample-max series does, because
+	// each sample's own max(ops, bandwidth) is 5000 for both outliers.
+	window := make([]metrics.Sample, 0, 20)
+	for i := 0; i < 18; i++ {
+		window = append(window, sampleAt(i, 100, 0, 100*bytesPerIOPS, 0, 0, time.Millisecond, time.Millisecond))
+	}
+	window = append(window, sampleAt(18, 5000, 0, 50*bytesPerIOPS, 0, 0, time.Millisecond, time.Millisecond)) // ops outlier
+	window = append(window, sampleAt(19, 50, 0, 5000*bytesPerIOPS, 0, 0, time.Millisecond, time.Millisecond)) // bandwidth outlier
+
+	iopsP95, bwP95, effective, _ := demandP95Down(window)
+
+	if iopsP95 != 100 {
+		t.Fatalf("test setup: iopsP95 = %v, want 100 (the ops outlier must not surface at p95 on its own)", iopsP95)
+	}
+	if bwP95 != 100 {
+		t.Fatalf("test setup: bwP95 = %v, want 100 (the bandwidth outlier must not surface at p95 on its own)", bwP95)
+	}
+	wrongCombined := iopsP95
+	if bwP95 > wrongCombined {
+		wrongCombined = bwP95
+	}
+	if wrongCombined != 100 {
+		t.Fatalf("test setup: max(iopsP95, bwP95) = %v, want 100 — the whole point is that this naive combination misses both outliers", wrongCombined)
+	}
+	if effective != 5000 {
+		t.Errorf("effective demand = %v, want 5000 — the aligned per-sample max must surface an outlier that either independent percentile alone misses", effective)
+	}
+}

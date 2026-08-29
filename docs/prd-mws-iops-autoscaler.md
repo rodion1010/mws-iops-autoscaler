@@ -265,6 +265,11 @@ unused headroom.
       queue low, latency at baseline, no throttling
 - [ ] Target is computed as `p95_demand / target.scale_down_utilization`, deliberately leaving
       headroom so the new limit does not sit flush against current demand
+- [ ] `p95_demand` is bandwidth-aware (issue #17): the p95, over `scale_down_window`, of each
+      sample's own `max(ops, bandwidth ÷ bytesPerIOPS)` — not the max of two independently-computed
+      percentiles — so a large-block, low-ops/s workload's target still retains headroom against its
+      actual bandwidth need, not just its op count (ADR-008's fixed IOPS-to-bandwidth ratio applies to
+      scale-down sizing exactly as it already does to the saturation gate)
 - [ ] Rounded to a 100-IOPS multiple and clamped by `max_scale_down_ratio`
 - [ ] Never goes below 1000 IOPS
 - [ ] Down-step and down-cooldown are independently configurable from up
