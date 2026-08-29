@@ -3,6 +3,7 @@ module github.com/rodion1010/mws-iops-autoscaler
 go 1.26.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.24.1
 	go.mws.cloud/go-sdk v0.19.0
 	go.mws.cloud/util-toolset v0.15.1
@@ -20,7 +21,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect

@@ -894,6 +894,26 @@ is needed — not a separate observe-only release phase of its own (ADR-005). **
 
 ## 9. Implementation plan
 
+### 9.0 CLI flags
+
+`cmd/mws-iops-autoscaler` (the orchestrator wiring every package above together — §3.1's whole
+pipeline, minus systemd/`.deb` packaging and live validation, both deliberately left for a human step,
+not this binary's own job):
+
+| Flag | Meaning |
+|---|---|
+| `-config <path>` | Required. |
+| `-validate-config` | Parse and validate, then exit (§9.1's M0). |
+| `-dry-run` | US-013 — discover, sample, decide; apply no change. |
+| `-state-dir <path>` | Where the durable 24h change budget lives (ADR-013). Default `/var/lib/mws-iops-autoscaler`. |
+| `-journal <path>` | Decision-journal (§7.2) output file. Default stdout. |
+| `-listen <addr>` | `/metrics`, `/healthz`, `/readyz` (§7.1/§7.3). Default `:9435`. |
+
+Project comes from `MWS_PROJECT` (the SDK's own env var, `go.mws.cloud/go-sdk`'s table above) — not a
+flag, since it's a credential-adjacent value, not a run-mode choice. `runtime.metrics.source: platform`
+in the config is rejected with a clear "not implemented yet" rather than silently falling back to
+guest — `PlatformSource` is M7.
+
 ### 9.1 Milestones
 
 Product-facing phasing — what ships, in what order, and why — lives in the PRD, §6 "Release Phases".
