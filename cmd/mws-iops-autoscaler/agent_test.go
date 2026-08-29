@@ -110,21 +110,27 @@ func TestActuate_allowScaleDownTrueReachesActuator(t *testing.T) {
 
 // stubClient is a minimal compute.Client for exercising discover() end to
 // end in a test — it only needs to satisfy whatever a trivial
-// auto-discovery VM with no disks touches.
+// auto-discovery VM touches. disks, when set, backs GetDisk for whichever
+// resource names the VM's own Disks entries name.
 type stubClient struct {
 	getVMCalls int
 	vm         *compute.VirtualMachine
+	disks      map[string]*compute.Disk
 }
 
 func (s *stubClient) GetVirtualMachine(_ context.Context, _ string) (*compute.VirtualMachine, error) {
 	s.getVMCalls++
 	cp := *s.vm
+	cp.Disks = append([]compute.StorageDisk(nil), s.vm.Disks...)
 	return &cp, nil
 }
 func (s *stubClient) GetVmType(_ context.Context, _ string) (*compute.VmType, error) {
 	return &compute.VmType{VCPUCount: 2}, nil
 }
-func (s *stubClient) GetDisk(_ context.Context, _ string) (*compute.Disk, error) {
+func (s *stubClient) GetDisk(_ context.Context, name string) (*compute.Disk, error) {
+	if d, ok := s.disks[name]; ok {
+		return d, nil
+	}
 	return nil, errors.New("stub: unused")
 }
 func (s *stubClient) UpdateIndependentDisk(_ context.Context, _ compute.IndependentUpdateRequest) (*compute.Disk, error) {
@@ -301,5 +307,78 @@ func TestReconcile_proceedsWhenDiscoveryFresh(t *testing.T) {
 	a.reconcile(context.Background())
 	if len(act.calls) != 1 {
 		t.Errorf("Actuator.Apply called %d times, want 1 — a fresh discovery snapshot must not be blocked", len(act.calls))
+	}
+}
+
+// --- issue #4 (reopened): exclude disks that are not safely manageable ---
+
+func vmWithTwoIndependentDisks() *compute.VirtualMachine {
+	return &compute.VirtualMachine{
+		Name:   "vm-1",
+		VMType: "t1",
+		Disks: []compute.StorageDisk{
+			{Alias: "good", DeviceName: "good", Class: compute.ClassIndependent, DiskName: "vm-1-good"},
+			{Alias: "bad", DeviceName: "bad", Class: compute.ClassIndependent, DiskName: "vm-1-bad"},
+		},
+	}
+}
+
+func TestDiscover_excludesDiskFailingGuestPathVerification(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	a.guestPathVerifier = func(ref metrics.DiskRef) error {
+		if ref.DeviceName == "bad" {
+			return errors.New("simulated: unresolvable guest path")
+		}
+		return nil
+	}
+
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+
+	if len(a.managed) != 1 || a.managed[0].Disk.DeviceName != "good" {
+		t.Fatalf("managed = %+v, want only the disk that passed guest-path verification", a.managed)
+	}
+}
+
+func TestDiscover_allDisksFailingVerificationLeavesEmptyManagedSet(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	a.guestPathVerifier = func(metrics.DiskRef) error {
+		return errors.New("simulated: nothing verifies")
+	}
+
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(a.managed) != 0 {
+		t.Fatalf("managed = %+v, want empty", a.managed)
+	}
+	if a.hasManagedDisks() {
+		t.Error("hasManagedDisks() = true, want false — readiness must not report a usable metrics path when nothing can produce a sample")
+	}
+}
+
+func TestHasManagedDisks(t *testing.T) {
+	a, _ := newTestAgent(t, true, &recordingActuator{})
+	if a.hasManagedDisks() {
+		t.Error("hasManagedDisks() = true on a freshly built Agent with no managed disks yet")
+	}
+	a.managed = []registry.ManagedDisk{independentDisk()}
+	if !a.hasManagedDisks() {
+		t.Error("hasManagedDisks() = false with a non-empty managed set")
 	}
 }

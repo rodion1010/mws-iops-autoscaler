@@ -65,6 +65,15 @@ type Agent struct {
 	maxSampleAge time.Duration
 	maxSampleGap time.Duration
 
+	// guestPathVerifier confirms a disk's guest device is resolvable and
+	// present in /proc/diskstats before discover() admits it to the
+	// managed set (issue #4) — a narrow function type, not a dependency on
+	// *metrics.GuestSource's concrete type, so this stays swappable the
+	// same way every other pipeline stage here is. Wired from
+	// (*metrics.GuestSource).VerifyPath in main.go; nil is a valid value
+	// used by tests that don't exercise discover() at all.
+	guestPathVerifier func(metrics.DiskRef) error
+
 	client    compute.Client
 	sampler   *metrics.Sampler
 	analyzer  *analyzer.WindowAnalyzer
@@ -93,7 +102,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		log.Printf("sampler: initial tick: %v", err)
 		a.readiness.SetSourceReachable(false)
 	} else {
-		a.readiness.SetSourceReachable(true)
+		a.readiness.SetSourceReachable(a.hasManagedDisks())
 	}
 
 	discoveryTicker := time.NewTicker(a.resolved.Runtime.DiscoveryInterval)
@@ -116,7 +125,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				log.Printf("sampler: %v", err)
 				a.readiness.SetSourceReachable(false)
 			} else {
-				a.readiness.SetSourceReachable(true)
+				a.readiness.SetSourceReachable(a.hasManagedDisks())
 			}
 		case <-reconcileTicker.C:
 			a.reconcile(ctx)
@@ -138,6 +147,7 @@ func (a *Agent) discover(ctx context.Context) error {
 	}
 	for _, s := range skipped {
 		log.Printf("discover: skipped disk %s (%s): %v", s.Alias, s.DiskName, s.Reason)
+		a.telemetry.RecordDiscoverySkipped(s.Alias, s.Category)
 	}
 
 	managed, missing, err := registry.Select(vm, a.cfg.Disks, a.resolved)
@@ -147,6 +157,29 @@ func (a *Agent) discover(ctx context.Context) error {
 	}
 	for _, name := range missing {
 		log.Printf("discover: disks.selected device_name %q not found on the VM", name)
+	}
+
+	// Local mode's guest-path verification (issue #4): a disk that passed
+	// every Compute-API-side check in compute.Discover can still be
+	// unmanageable if its /dev/disk/by-id/mws-<deviceName> symlink doesn't
+	// resolve, or its kernel device has no /proc/diskstats entry —
+	// GuestSource.Sample would otherwise silently emit no sample for it,
+	// forever, with no diagnosis beyond an ever-growing
+	// metric_staleness_seconds. Verified once here, up front, with a
+	// specific reason, instead of left to manifest later as an
+	// indistinguishable "no data" stream.
+	if a.guestPathVerifier != nil {
+		verified := managed[:0]
+		for _, m := range managed {
+			ref := metrics.DiskRef{DiskID: m.Disk.DiskName, VMName: a.vmName, DeviceName: m.Disk.DeviceName}
+			if err := a.guestPathVerifier(ref); err != nil {
+				log.Printf("discover: disk %s (%s) failed guest-path verification: %v", m.Disk.Alias, m.Disk.DeviceName, err)
+				a.telemetry.RecordDiscoverySkipped(m.Disk.Alias, skipReasonGuestPathUnresolvable)
+				continue
+			}
+			verified = append(verified, m)
+		}
+		managed = verified
 	}
 
 	disks := make([]metrics.DiskRef, len(managed))
@@ -169,6 +202,23 @@ func (a *Agent) discover(ctx context.Context) error {
 	// reachability). It is driven solely by sampler.Tick()'s own success,
 	// in Run().
 	return nil
+}
+
+// skipReasonGuestPathUnresolvable mirrors the compute package's
+// SkipReason* constants (a stable, low-cardinality telemetry label) for
+// the one skip category that originates here rather than in
+// compute.Discover — the compute package has no concept of a guest
+// filesystem to check.
+const skipReasonGuestPathUnresolvable = "guest_path_unresolvable"
+
+// hasManagedDisks reports whether any disk currently passed every
+// eligibility check (issue #4's "readiness must not report a usable
+// metrics path when no managed disk can produce a sample") — read under
+// the same lock discover()/reconcile() use for a.managed.
+func (a *Agent) hasManagedDisks() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.managed) > 0
 }
 
 // reconcile is design.md §4.3, run once per disk per cycle. Every disk is

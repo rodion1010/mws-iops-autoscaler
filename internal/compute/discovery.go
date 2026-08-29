@@ -2,18 +2,36 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
-// SkippedDisk records a disk entry Discover could not resolve — its GetDisk
-// call failed, so its IOPS/status are unknown. It is excluded from the
-// returned VirtualMachine.Disks entirely (US-002: "skipped with a warning,
-// not a crash" means excluded from the managed set, not kept with a IOPS==0
-// that would misrepresent it as pinned at the platform minimum). Discover
-// itself does not log; the caller decides how to surface these.
+// Skip reason categories (issue #4) — stable, low-cardinality codes for
+// telemetry labels. Reason (below) carries the free-text detail (disk
+// names, VM names, the underlying GetDisk error) for logs; Category is
+// what's safe to put on a Prometheus label, since Reason's text is
+// unbounded and would blow up label cardinality if used directly.
+const (
+	SkipReasonAmbiguousClass    = "ambiguous_class"
+	SkipReasonEmptyIdentity     = "empty_identity"
+	SkipReasonDuplicateDiskName = "duplicate_disk_name"
+	SkipReasonDuplicateDevice   = "duplicate_device_name"
+	SkipReasonGetDiskFailed     = "get_disk_failed"
+	SkipReasonInvalidIOPS       = "invalid_iops"
+)
+
+// SkippedDisk records a disk entry Discover could not resolve as safely
+// manageable — an ambiguous or missing class, an empty or duplicate
+// identity, a failed GetDisk read, or an invalid current IOPS value. It is
+// excluded from the returned VirtualMachine.Disks entirely (US-002:
+// "skipped with a warning, not a crash" means excluded from the managed
+// set, not kept with a IOPS==0 that would misrepresent it as pinned at the
+// platform minimum). Discover itself does not log; the caller decides how
+// to surface these.
 type SkippedDisk struct {
 	Alias    string
 	DiskName string
+	Category string
 	Reason   error
 }
 
@@ -34,14 +52,61 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 	}
 	vm.VCPUCount = vmType.VCPUCount
 
+	// Duplicate-identity detection (issue #4): a second attachment sharing
+	// either the cloud resource name (DiskName, the GetDisk/UpdateDisk
+	// target) or the device_name (DeviceName, registry.Select's join key
+	// per ADR-004) makes both entries ambiguous — registry.Select's
+	// by-device-name map would otherwise silently let the second one win,
+	// with no diagnostic that the first was ever dropped. Neither should
+	// ever happen on a real VM; treated as an eligibility failure, not
+	// guessed at, if it does. Empty DeviceName is common and expected
+	// (platform hasn't assigned one yet) and is deliberately excluded from
+	// this check — it's not an identity collision, and local mode's guest-
+	// path verification (agent.go) independently excludes an unresolvable
+	// empty-device disk on its own.
+	diskNameCount := make(map[string]int, len(vm.Disks))
+	deviceNameCount := make(map[string]int, len(vm.Disks))
+	for _, sd := range vm.Disks {
+		diskNameCount[sd.DiskName]++
+		if sd.DeviceName != "" {
+			deviceNameCount[sd.DeviceName]++
+		}
+	}
+
 	resolved := make([]StorageDisk, 0, len(vm.Disks))
 	var skipped []SkippedDisk
 	for _, sd := range vm.Disks {
+		if sd.Class != ClassIndependent && sd.Class != ClassDependent {
+			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonAmbiguousClass,
+				Reason: fmt.Errorf("ambiguous or unknown disk class %q — neither disk.ref nor disk.spec resolved", sd.Class)})
+			continue
+		}
+		if sd.DiskName == "" {
+			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonEmptyIdentity,
+				Reason: errors.New("empty disk resource identity")})
+			continue
+		}
+		if diskNameCount[sd.DiskName] > 1 {
+			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonDuplicateDiskName,
+				Reason: fmt.Errorf("disk resource identity %q attached more than once on VM %q", sd.DiskName, vmName)})
+			continue
+		}
+		if sd.DeviceName != "" && deviceNameCount[sd.DeviceName] > 1 {
+			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonDuplicateDevice,
+				Reason: fmt.Errorf("device_name %q attached more than once on VM %q", sd.DeviceName, vmName)})
+			continue
+		}
+
 		disk, err := c.GetDisk(ctx, sd.DiskName)
 		if err != nil {
 			// Excluded from the managed set, not fatal to discovery as a
 			// whole (US-002) — but excluded, not left in with IOPS==0.
-			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Reason: err})
+			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonGetDiskFailed, Reason: err})
+			continue
+		}
+		if disk.SpecIOPS <= 0 {
+			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonInvalidIOPS,
+				Reason: fmt.Errorf("invalid current IOPS %d", disk.SpecIOPS)})
 			continue
 		}
 		sd.IOPS = disk.SpecIOPS

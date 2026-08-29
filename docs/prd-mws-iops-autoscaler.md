@@ -100,6 +100,15 @@ its VM cannot be modified through the disk API at all.
 - [ ] The class determines only the write path, never whether a disk is in scope
 - [ ] The classification appears in logs, the dry-run report, and the exported metrics
 - [ ] A disk that changes class between discovery cycles is reclassified, not cached forever
+- [ ] A disk whose class resolves to neither independent nor dependent (`disk.ref`/`disk.spec` both
+      absent or both present), whose disk resource identity is empty, or whose live attachment shares
+      a resource identity or `device_name` with another attachment on the same VM, is excluded from
+      the managed set with a reason — never guessed at or defaulted to one class arbitrarily (issue
+      #4). This is a live-discovery-time check, distinct from `--validate-config`'s own
+      duplicate-`device_name` rejection in US-004 below, which only catches a duplicate already present
+      in the config file itself
+- [ ] A disk whose current provisioned IOPS reads as `<= 0` is excluded from the managed set — an
+      impossible value is never treated as a real current limit (issue #4)
 - [ ] Typecheck/lint passes
 
 ### US-004: Disk selection strategies

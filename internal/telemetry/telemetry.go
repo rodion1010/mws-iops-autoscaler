@@ -36,6 +36,7 @@ type Registry struct {
 	metricStaleness       *prometheus.GaugeVec
 	windowFillRatio       *prometheus.GaugeVec
 	changeBudgetRemaining *prometheus.GaugeVec
+	discoverySkippedTotal *prometheus.CounterVec
 }
 
 func NewRegistry() *Registry {
@@ -54,6 +55,7 @@ func NewRegistry() *Registry {
 	r.metricStaleness = r.gauge("iops_autoscaler_metric_staleness_seconds", "Age of the sample this decision was based on.", "disk")
 	r.windowFillRatio = r.gauge("iops_autoscaler_window_fill_ratio", "Fraction of the configured window currently buffered.", "disk", "direction")
 	r.changeBudgetRemaining = r.gauge("iops_autoscaler_change_budget_remaining", "Changes remaining in the trailing 24h budget.", "disk")
+	r.discoverySkippedTotal = r.counter("iops_autoscaler_disk_discovery_skipped_total", "Disk attachments excluded from the managed set, by reason.", "alias", "reason")
 
 	return r
 }
@@ -110,6 +112,17 @@ func (r *Registry) RecordDecision(vmName, class string, d decider.Decision) {
 // cycle (a disk marked "no data") can still report it.
 func (r *Registry) RecordStaleness(diskID string, seconds float64) {
 	r.metricStaleness.WithLabelValues(diskID).Set(seconds)
+}
+
+// RecordDiscoverySkipped increments disk_discovery_skipped_total for one
+// excluded attachment (issue #4) — alias, not DiskID/DiskName, since a
+// disk skipped for an empty or duplicate resource identity may not have a
+// usable DiskName to label with; alias is always present (it's the VM
+// spec's own collection key). reason must be one of the compute package's
+// SkipReason* constants, not free text — see that package's own comment on
+// why Category exists separately from the free-text Reason.
+func (r *Registry) RecordDiscoverySkipped(alias, reason string) {
+	r.discoverySkippedTotal.WithLabelValues(alias, reason).Inc()
 }
 
 func boolFloat(b bool) float64 {

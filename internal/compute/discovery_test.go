@@ -83,6 +83,171 @@ func TestDiscover_unresolvableDiskExcludedNotFatal(t *testing.T) {
 	if len(skipped) != 1 || skipped[0].Alias != "gone" || skipped[0].DiskName != "does-not-exist" || skipped[0].Reason == nil {
 		t.Fatalf("skipped = %+v, want one entry naming the gone disk and a reason", skipped)
 	}
+	if skipped[0].Category != SkipReasonGetDiskFailed {
+		t.Errorf("Category = %q, want %q", skipped[0].Category, SkipReasonGetDiskFailed)
+	}
+}
+
+func TestDiscover_ambiguousClassSkipped(t *testing.T) {
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{
+		Name:   "vm-1",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			// Neither ref nor spec resolved (translateVMResponse's zero
+			// value) — Class stays the empty string.
+			{Alias: "weird", DeviceName: "weird", Class: "", DiskName: "vm-1-weird"},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["vm-1-weird"] = &Disk{Name: "vm-1-weird", SpecIOPS: 1000}
+
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(vm.Disks) != 0 {
+		t.Fatalf("Disks = %+v, want none — an ambiguous class must never enter the managed set", vm.Disks)
+	}
+	if len(skipped) != 1 || skipped[0].Category != SkipReasonAmbiguousClass {
+		t.Fatalf("skipped = %+v, want one entry categorized %q", skipped, SkipReasonAmbiguousClass)
+	}
+}
+
+func TestDiscover_emptyDiskNameSkipped(t *testing.T) {
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{
+		Name:   "vm-1",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			{Alias: "nameless", DeviceName: "nameless", Class: ClassIndependent, DiskName: ""},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(vm.Disks) != 0 {
+		t.Fatalf("Disks = %+v, want none — an empty resource identity must never enter the managed set", vm.Disks)
+	}
+	if len(skipped) != 1 || skipped[0].Category != SkipReasonEmptyIdentity {
+		t.Fatalf("skipped = %+v, want one entry categorized %q", skipped, SkipReasonEmptyIdentity)
+	}
+}
+
+func TestDiscover_duplicateDiskNameBothSkipped(t *testing.T) {
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{
+		Name:   "vm-1",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			{Alias: "a", DeviceName: "a", Class: ClassIndependent, DiskName: "shared-res"},
+			{Alias: "b", DeviceName: "b", Class: ClassIndependent, DiskName: "shared-res"},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["shared-res"] = &Disk{Name: "shared-res", SpecIOPS: 1000}
+
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(vm.Disks) != 0 {
+		t.Fatalf("Disks = %+v, want none — an ambiguous shared identity must exclude both attachments, not pick one", vm.Disks)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("skipped = %+v, want both entries excluded", skipped)
+	}
+	for _, s := range skipped {
+		if s.Category != SkipReasonDuplicateDiskName {
+			t.Errorf("skipped[%s].Category = %q, want %q", s.Alias, s.Category, SkipReasonDuplicateDiskName)
+		}
+	}
+}
+
+func TestDiscover_duplicateDeviceNameBothSkipped(t *testing.T) {
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{
+		Name:   "vm-1",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			{Alias: "a", DeviceName: "shared-dev", Class: ClassIndependent, DiskName: "res-a"},
+			{Alias: "b", DeviceName: "shared-dev", Class: ClassIndependent, DiskName: "res-b"},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["res-a"] = &Disk{Name: "res-a", SpecIOPS: 1000}
+	c.disks["res-b"] = &Disk{Name: "res-b", SpecIOPS: 1000}
+
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(vm.Disks) != 0 {
+		t.Fatalf("Disks = %+v, want none — registry.Select joins by device_name (ADR-004); a collision must exclude both, not let one silently win", vm.Disks)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("skipped = %+v, want both entries excluded", skipped)
+	}
+	for _, s := range skipped {
+		if s.Category != SkipReasonDuplicateDevice {
+			t.Errorf("skipped[%s].Category = %q, want %q", s.Alias, s.Category, SkipReasonDuplicateDevice)
+		}
+	}
+}
+
+func TestDiscover_emptyDeviceNamesAreNotTreatedAsDuplicates(t *testing.T) {
+	// An empty device_name is expected (not yet assigned by the platform)
+	// — two such disks must not be flagged as colliding with each other.
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{
+		Name:   "vm-1",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			{Alias: "a", DeviceName: "", Class: ClassIndependent, DiskName: "res-a"},
+			{Alias: "b", DeviceName: "", Class: ClassIndependent, DiskName: "res-b"},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["res-a"] = &Disk{Name: "res-a", SpecIOPS: 1000}
+	c.disks["res-b"] = &Disk{Name: "res-b", SpecIOPS: 1000}
+
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %+v, want none — an empty device_name is not itself a duplicate-identity signal", skipped)
+	}
+	if len(vm.Disks) != 2 {
+		t.Fatalf("Disks = %+v, want both", vm.Disks)
+	}
+}
+
+func TestDiscover_invalidIOPSSkipped(t *testing.T) {
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{
+		Name:   "vm-1",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			{Alias: "zero", DeviceName: "zero", Class: ClassIndependent, DiskName: "res-zero"},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["res-zero"] = &Disk{Name: "res-zero", SpecIOPS: 0}
+
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(vm.Disks) != 0 {
+		t.Fatalf("Disks = %+v, want none — a disk with IOPS<=0 must never enter the managed set with an impossible current limit", vm.Disks)
+	}
+	if len(skipped) != 1 || skipped[0].Category != SkipReasonInvalidIOPS {
+		t.Fatalf("skipped = %+v, want one entry categorized %q", skipped, SkipReasonInvalidIOPS)
+	}
 }
 
 func TestDiscover_missingVMErrors(t *testing.T) {

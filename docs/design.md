@@ -142,16 +142,23 @@ product risk lives.
    ├─ read spec.storage.disks[]
    │    disk.spec present → DEPENDENT   (write via VM path)
    │    disk.ref  present → INDEPENDENT (write via disk path)
+   │    neither/both resolved → ambiguous class, excluded (issue #4)
    ├─ read status.storage.disks[].deviceName → "mws-<name>"
    │    strip the "mws-" prefix → the config identifier (ADR-004)
-   │    local mode: resolve /dev/disk/by-id/mws-<name>, verify it exists
+   ├─ reject a duplicate disk resource identity or device_name shared by two attachments —
+   │    both excluded, neither guessed at as "the real one" (issue #4)
    └─ GET /compute/v1/vmTypes/{vmType}
         vm_iops_limit = 3000 × spec.cpu.vcpuCount
         (spec.disks.totalIops is null on every type — do not use)
 
- for each disk:
+ for each disk not already excluded above:
    GET /compute/v1/projects/{p}/disks/{d}
    └─ spec.iops (current provisioned), status.iops {base, extra, total}
+      spec.iops <= 0 → invalid current IOPS, excluded (issue #4)
+
+ local mode only, for each disk that reached this point:
+   resolve /dev/disk/by-id/mws-<name>, verify its kernel device has a /proc/diskstats entry
+   (cmd/mws-iops-autoscaler/agent.go's guestPathVerifier — issue #4) — otherwise excluded
 
  apply selection strategy → managed set
    match config selectors against DeviceName (unprefixed) — never a kernel device path,
@@ -162,6 +169,20 @@ product risk lives.
 
 Discovery is idempotent and rebuilds the registry wholesale. A disk that changed class, was detached,
 or was resized externally is picked up here.
+
+Every exclusion above returns a `compute.SkippedDisk{Alias, DiskName, Category, Reason}` rather than
+silently dropping the disk (US-002) — `Category` is one of a small set of stable codes
+(`ambiguous_class`, `empty_identity`, `duplicate_disk_name`, `duplicate_device_name`,
+`get_disk_failed`, `invalid_iops`, plus `guest_path_unresolvable` from the local-mode step) suitable as
+a Prometheus label; `Reason` carries the free-text detail (disk names, the underlying API error) for
+the log line only — `Category` exists separately from `Reason` specifically because `Reason`'s text is
+unbounded and would blow up label cardinality if used directly. `telemetry.RecordDiscoverySkipped`
+increments `iops_autoscaler_disk_discovery_skipped_total{alias,reason}` for each one (§7.1).
+
+`health.Readiness`'s `source_reachable` (§7.3) additionally requires at least one disk to have survived
+every check above: a successful `sampler.Tick()` alone no longer reports the metrics path as usable if
+the managed set is empty, since there is nothing left that Tick could possibly have produced a sample
+for.
 
 ### 4.2 Sampling (fast path, default 10 s)
 
@@ -839,6 +860,7 @@ iops_autoscaler_metric_staleness_seconds{disk}                gauge
 iops_autoscaler_window_fill_ratio{disk,direction}             gauge
 iops_autoscaler_change_budget_remaining{disk}                 gauge
 iops_autoscaler_cost_delta_iops_hours{disk}                   counter
+iops_autoscaler_disk_discovery_skipped_total{alias,reason}    counter
 ```
 
 `disk_latency_baseline_seconds` has no `{op}` label, unlike `disk_observed_iops` — the baseline (§4.4) is
@@ -891,11 +913,13 @@ these records, not from reasoning.
 ### 7.3 Health and alerting
 
 `/healthz` (process alive) and `/readyz` (config valid, discovery succeeded, ≥1 source reachable).
-`source_reachable` is driven solely by the Sampler's own `Tick()` result, not by Compute API discovery
+`source_reachable` is driven by the Sampler's own `Tick()` result, not by Compute API discovery
 succeeding (issue #15) — even in `local` mode these are different dependencies: the guest source reads
 `/proc/diskstats`, which can fail (permissions, a missing disk) independent of whether the Compute API
 is reachable. Conflating the two previously meant a metrics-collection outage never showed up in
-`/readyz` as long as discovery kept succeeding.
+`/readyz` as long as discovery kept succeeding. A successful `Tick()` alone is not sufficient, though
+(issue #4): it also requires the managed set to be non-empty, since a `Tick()` over zero disks trivially
+"succeeds" without having verified anything is actually reachable.
 
 Alert-worthy: metric staleness beyond 3 publication intervals; write failure rate above threshold;
 change budget exhausted; `VM_IOPS_CAP_REACHED` sustained (actionable — add vCPU); any disk pinned at
