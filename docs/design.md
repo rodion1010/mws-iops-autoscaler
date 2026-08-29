@@ -178,6 +178,11 @@ faster than the platform's 30 s publication interval yields duplicates — the s
 `metric_ts` rather than wall clock. The `device_name` label carries the `mws-` prefix, so indexing
 uses `DiskRef.MetricLabel()` rather than the config form.
 
+The collection interval is process-wide — one Sampler, one source, one tick — set once by
+`runtime.metrics.collection_interval`. There is no per-policy or per-disk override: a single call
+already returns every managed disk's sample for that tick, so a disk-level cadence could never
+actually be honored (ADR-010).
+
 ### 4.3 Reconcile (default 30 s)
 
 ```
@@ -186,6 +191,12 @@ uses `DiskRef.MetricLabel()` rather than the config form.
    if in_cooldown(disk):               skip
    if window_not_full(disk):           skip   ← cold start never acts
    if baseline_not_established(disk):  skip   ← latency baseline warm-up
+
+   # window_not_full is timestamp-based, not a sample count (ADR-010):
+   #   newest_sample.Timestamp - oldest_sample.Timestamp < policy.evaluation.scale_up_window
+   # (scale_down_window for the down-check). A count derived from an assumed
+   # collection_interval would silently misjudge readiness under tick jitter
+   # or a missed sample — the timestamp span is what "full" actually means.
 
    m  = analyze(samples, policy.evaluation)
    vm = analyze_vm(sibling disks)

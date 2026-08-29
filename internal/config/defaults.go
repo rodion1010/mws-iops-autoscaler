@@ -21,11 +21,12 @@ const (
 	DefaultMaxIOPS = PlatformMaxIOPS
 )
 
-// ResolvedAdvanced is the advanced parameter set with nothing left to inherit.
+// ResolvedAdvanced is the advanced parameter set with nothing left to
+// inherit. It has no CollectionInterval — that's ResolvedRuntime's alone
+// (ADR-010): sampling cadence is process-wide, never per-policy.
 type ResolvedAdvanced struct {
-	CollectionInterval time.Duration
-	ScaleUpWindow      time.Duration
-	ScaleDownWindow    time.Duration
+	ScaleUpWindow   time.Duration
+	ScaleDownWindow time.Duration
 
 	UtilizationThreshold      float64 // gates on IOPS or bandwidth, whichever is higher (ADR-008)
 	QueueDepthThreshold       float64
@@ -70,7 +71,6 @@ const DefaultPresetName = PresetBalanced
 // Phase 5 exposes a way to select them.
 var presets = map[PresetName]ResolvedAdvanced{
 	PresetBalanced: {
-		CollectionInterval:        10 * time.Second,
 		ScaleUpWindow:             5 * time.Minute,
 		ScaleDownWindow:           30 * time.Minute,
 		UtilizationThreshold:      0.98,
@@ -87,7 +87,6 @@ var presets = map[PresetName]ResolvedAdvanced{
 		MaxChangesPer24h:          48,
 	},
 	PresetPerformance: {
-		CollectionInterval:        10 * time.Second,
 		ScaleUpWindow:             3 * time.Minute, // ADR-006: first draft had 2m, violated §8's cooldown rule
 		ScaleDownWindow:           60 * time.Minute,
 		UtilizationThreshold:      0.95,
@@ -104,7 +103,6 @@ var presets = map[PresetName]ResolvedAdvanced{
 		MaxChangesPer24h:          48,
 	},
 	PresetCost: {
-		CollectionInterval:        10 * time.Second,
 		ScaleUpWindow:             10 * time.Minute,
 		ScaleDownWindow:           20 * time.Minute,
 		UtilizationThreshold:      1.00,

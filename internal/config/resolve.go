@@ -10,6 +10,9 @@ type ResolvedPolicy struct {
 }
 
 // ResolvedRuntime is the runtime block with defaults filled in.
+// CollectionInterval here is the single canonical sampling cadence (ADR-010)
+// — one Sampler ticks one source for every managed disk in a single call,
+// so there is no per-policy equivalent to keep in sync with this one.
 type ResolvedRuntime struct {
 	MetricsSource      string
 	CollectionInterval time.Duration
@@ -80,9 +83,6 @@ func resolvePolicy(parent ResolvedPolicy, child *PolicySpec) ResolvedPolicy {
 
 func applyAdvancedOverride(dst *ResolvedAdvanced, src *AdvancedSpec) {
 	if e := src.Evaluation; e != nil {
-		if e.CollectionInterval != nil {
-			dst.CollectionInterval = time.Duration(*e.CollectionInterval)
-		}
 		if e.ScaleUpWindow != nil {
 			dst.ScaleUpWindow = time.Duration(*e.ScaleUpWindow)
 		}

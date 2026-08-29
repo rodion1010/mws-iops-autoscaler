@@ -51,10 +51,15 @@ type AdvancedSpec struct {
 	Budget     *BudgetSpec     `yaml:"budget"`
 }
 
+// EvaluationSpec has no collection_interval of its own (ADR-010) — sampling
+// cadence is process-wide (runtime.metrics.collection_interval), since one
+// Sampler ticks one source for every managed disk in a single call; a
+// per-policy override could never actually be honored. Window readiness is
+// computed from each Sample's own Timestamp, not a count derived from an
+// assumed interval, so nothing here depends on knowing the cadence anyway.
 type EvaluationSpec struct {
-	CollectionInterval *Duration `yaml:"collection_interval"`
-	ScaleUpWindow      *Duration `yaml:"scale_up_window"`
-	ScaleDownWindow    *Duration `yaml:"scale_down_window"`
+	ScaleUpWindow   *Duration `yaml:"scale_up_window"`
+	ScaleDownWindow *Duration `yaml:"scale_down_window"`
 }
 
 type SaturationSpec struct {
@@ -109,6 +114,8 @@ type RuntimeSpec struct {
 	Controller ControllerSpec `yaml:"controller"`
 }
 
+// MetricsSpec.CollectionInterval is the single canonical sampling cadence
+// (ADR-010) — there is no policy-level equivalent to conflict with.
 type MetricsSpec struct {
 	Source             string    `yaml:"source"` // guest | platform
 	CollectionInterval *Duration `yaml:"collection_interval"`

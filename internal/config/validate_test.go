@@ -199,16 +199,6 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "mode is \"selected\" but the list is empty",
 		},
 		{
-			name: "zero collection_interval",
-			mutate: func(c *Config) {
-				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
-					Evaluation: &EvaluationSpec{CollectionInterval: durationPtr("0s")},
-				}
-			},
-			wantSub: "evaluation.collection_interval",
-		},
-		{
 			name: "negative scale_up_window",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{

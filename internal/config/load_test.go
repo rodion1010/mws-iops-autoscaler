@@ -59,6 +59,30 @@ totally_unknown_field: true
 	}
 }
 
+func TestLoad_evaluationCollectionIntervalRejected(t *testing.T) {
+	// ADR-010: policy.advanced.evaluation.collection_interval was removed —
+	// sampling cadence is process-wide (runtime.metrics.collection_interval)
+	// and cannot vary per policy, so it is rejected as an unknown key like
+	// any other superseded field, not silently accepted and ignored.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeFile(t, path, `
+apiVersion: autoscaling.mws.cloud/v1alpha1
+kind: IOPSAutoScaler
+mode: local
+policy:
+  limits: {min_iops: 1000, max_iops: 10000}
+  advanced:
+    enabled: true
+    evaluation: {collection_interval: 10s, scale_up_window: 5m, scale_down_window: 30m}
+disks: {mode: auto-discovery}
+runtime: {}
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with evaluation.collection_interval set — it must be rejected as an unknown key (ADR-010)")
+	}
+}
+
 func TestLoad_supersededDeviceSelector(t *testing.T) {
 	// ADR-004: the `device:` and `disk_id:` selectors from the first
 	// configuration.md draft must stay rejected — as unknown keys, not as a

@@ -46,7 +46,8 @@ policy:
     enabled: false           # opt-in; unsupported unless set
 
     evaluation:
-      collection_interval: 10s
+      # No collection_interval here — sampling cadence is process-wide,
+      # set once by runtime.metrics.collection_interval below (ADR-010).
       scale_up_window: 5m
       scale_down_window: 30m
 
@@ -340,7 +341,9 @@ value, and maintenance windows.
 - `mode: fleet` with `metrics.source: guest` (impossible — no guest access)
 - `scale_down_window < scale_up_window` (a scale-down faster than scale-up invites flapping)
 - `cooldown.scale_up > scale_up_window` (the agent could never act)
-- any `advanced.evaluation` interval ≤ 0, or a `cooldown` duration < 0
+- `advanced.evaluation.scale_up_window` or `scale_down_window` ≤ 0, or a `cooldown` duration < 0
+- `advanced.evaluation.collection_interval` — removed from the schema (ADR-010); rejected as an
+  unknown key like any other superseded field
 - `saturation.utilization_threshold`, `target.scale_up_utilization`, or `target.scale_down_utilization`
   outside `(0, 1]`
 - `saturation.queue_depth_threshold` < 0

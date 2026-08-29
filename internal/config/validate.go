@@ -97,7 +97,6 @@ func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 			errs = append(errs, fmt.Errorf("%s.advanced.%s: %s must be greater than zero", path, field, d))
 		}
 	}
-	positive("evaluation.collection_interval", a.CollectionInterval)
 	positive("evaluation.scale_up_window", a.ScaleUpWindow)
 	positive("evaluation.scale_down_window", a.ScaleDownWindow)
 
