@@ -360,6 +360,16 @@ type MetricSource interface {
     Kind() SourceKind // guest | platform
 }
 
+// Sample is one interval's observation — an average, not a percentile.
+// Neither source can honestly give a within-interval p95 at the single-
+// sample level: the guest has only diskstats' cumulative ticks/ops (an
+// average), and the platform's histogram would need a different read (its
+// own bucket approximation) than the guest ever could, which would make
+// this field mean two different things depending on Source — exactly the
+// silent-mix bug QueueDepth's explicit unit exists to prevent, just for
+// latency instead of queue units. The Analyzer (§4.4, US-007) computes the
+// actual p95 from a window of these per-interval averages, uniformly for
+// both sources.
 type Sample struct {
     DiskID       string
     Timestamp    time.Time     // metric timestamp, not wall clock
@@ -368,8 +378,8 @@ type Sample struct {
     ReadBytes    float64       // bytes/s
     WriteBytes   float64       // bytes/s
     QueueDepth   QueueDepth    // value + unit (ops | bytes) — never bare
-    ReadLatP95   time.Duration
-    WriteLatP95  time.Duration
+    ReadLatAvg   time.Duration // average latency this interval, not a percentile
+    WriteLatAvg  time.Duration
     Source       SourceKind
 }
 

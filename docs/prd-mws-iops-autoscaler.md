@@ -175,8 +175,11 @@ because they need no metrics credential, cross no network, and carry signals the
 **Acceptance Criteria:**
 - [ ] Guest is the **default** source in `local` mode; the platform source is opt-in (ADR-001)
 - [ ] Reads `/proc/diskstats` at a configurable interval
-- [ ] Derives ops/s, throughput, queue depth **in operations for both reads and writes**, and
-      service time per device — none of which the platform exposes
+- [ ] Derives ops/s and throughput **split by read and write**, plus queue depth in operations (a
+      single combined value — `/proc/diskstats`' time-in-queue field is not split by direction at
+      the kernel level, so this is one number covering both, still an improvement over the
+      platform's byte-denominated one) and average service time per device — none of which the
+      platform exposes
 - [ ] Detects throttling directly: served ≈ provisioned limit **and** queue sustained above zero
 - [ ] Values are attributed to the correct cloud disk via the US-002 mapping
 - [ ] Requires **no** monitoring API key and no `monitoring.metricExporter` role
