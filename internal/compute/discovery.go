@@ -18,6 +18,8 @@ const (
 	SkipReasonDuplicateDevice   = "duplicate_device_name"
 	SkipReasonGetDiskFailed     = "get_disk_failed"
 	SkipReasonInvalidIOPS       = "invalid_iops"
+	SkipReasonEmptyAlias        = "empty_alias"
+	SkipReasonDuplicateAlias    = "duplicate_alias"
 )
 
 // SkippedDisk records a disk entry Discover could not resolve as safely
@@ -64,12 +66,25 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 	// this check — it's not an identity collision, and local mode's guest-
 	// path verification (agent.go) independently excludes an unresolvable
 	// empty-device disk on its own.
+	// Alias uniqueness (issue #20): unlike DeviceName, an empty Alias is
+	// never expected — every attachment is created with one — so it is
+	// checked unconditionally, not only when non-empty. Aliases are the
+	// dependent write path's own join key (write.go's
+	// validateDependentWriteTarget); a disk whose alias collides with
+	// another's is unsafe to offer as a management target even before any
+	// write is attempted, since UpdateDependentDiskIOPS would refuse it
+	// anyway on its own fresh read — better to never select it in the
+	// first place than to discover the write path always aborts.
 	diskNameCount := make(map[string]int, len(vm.Disks))
 	deviceNameCount := make(map[string]int, len(vm.Disks))
+	aliasCount := make(map[string]int, len(vm.Disks))
 	for _, sd := range vm.Disks {
 		diskNameCount[sd.DiskName]++
 		if sd.DeviceName != "" {
 			deviceNameCount[sd.DeviceName]++
+		}
+		if sd.Alias != "" {
+			aliasCount[sd.Alias]++
 		}
 	}
 
@@ -94,6 +109,16 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 		if sd.DeviceName != "" && deviceNameCount[sd.DeviceName] > 1 {
 			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonDuplicateDevice,
 				Reason: fmt.Errorf("device_name %q attached more than once on VM %q", sd.DeviceName, vmName)})
+			continue
+		}
+		if sd.Alias == "" {
+			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonEmptyAlias,
+				Reason: fmt.Errorf("empty alias on VM %q (device_name %q)", vmName, sd.DeviceName)})
+			continue
+		}
+		if aliasCount[sd.Alias] > 1 {
+			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonDuplicateAlias,
+				Reason: fmt.Errorf("alias %q attached more than once on VM %q", sd.Alias, vmName)})
 			continue
 		}
 

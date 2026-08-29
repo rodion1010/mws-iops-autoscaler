@@ -198,6 +198,65 @@ func TestDiscover_duplicateDeviceNameBothSkipped(t *testing.T) {
 	}
 }
 
+func TestDiscover_duplicateAliasBothSkipped(t *testing.T) {
+	// issue #20: alias is write.go's own join key for the dependent write
+	// path (validateDependentWriteTarget) — a colliding alias must never
+	// enter the managed set, the same treatment duplicate DiskName/
+	// DeviceName already get.
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{
+		Name:   "vm-1",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			{Alias: "shared-alias", DeviceName: "a", Class: ClassIndependent, DiskName: "res-a"},
+			{Alias: "shared-alias", DeviceName: "b", Class: ClassIndependent, DiskName: "res-b"},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["res-a"] = &Disk{Name: "res-a", SpecIOPS: 1000}
+	c.disks["res-b"] = &Disk{Name: "res-b", SpecIOPS: 1000}
+
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(vm.Disks) != 0 {
+		t.Fatalf("Disks = %+v, want none — a colliding alias must exclude both attachments, not pick one", vm.Disks)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("skipped = %+v, want both entries excluded", skipped)
+	}
+	for _, s := range skipped {
+		if s.Category != SkipReasonDuplicateAlias {
+			t.Errorf("skipped[%s].Category = %q, want %q", s.DiskName, s.Category, SkipReasonDuplicateAlias)
+		}
+	}
+}
+
+func TestDiscover_emptyAliasSkipped(t *testing.T) {
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{
+		Name:   "vm-1",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			{Alias: "", DeviceName: "a", Class: ClassIndependent, DiskName: "res-a"},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["res-a"] = &Disk{Name: "res-a", SpecIOPS: 1000}
+
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(vm.Disks) != 0 {
+		t.Fatalf("Disks = %+v, want none — an empty alias must never enter the managed set", vm.Disks)
+	}
+	if len(skipped) != 1 || skipped[0].Category != SkipReasonEmptyAlias {
+		t.Fatalf("skipped = %+v, want one entry categorized %q", skipped, SkipReasonEmptyAlias)
+	}
+}
+
 func TestDiscover_emptyDeviceNamesAreNotTreatedAsDuplicates(t *testing.T) {
 	// An empty device_name is expected (not yet assigned by the platform)
 	// — two such disks must not be flagged as colliding with each other.

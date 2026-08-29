@@ -147,6 +147,8 @@ product risk lives.
    │    strip the "mws-" prefix → the config identifier (ADR-004)
    ├─ reject a duplicate disk resource identity or device_name shared by two attachments —
    │    both excluded, neither guessed at as "the real one" (issue #4)
+   ├─ reject an empty or duplicate alias — the dependent write path's own join key
+   │    (write.go's validateDependentWriteTarget); both excluded on a collision (issue #20)
    └─ GET /compute/v1/vmTypes/{vmType}
         vm_iops_limit = 3000 × spec.cpu.vcpuCount
         (spec.disks.totalIops is null on every type — do not use)
@@ -172,9 +174,10 @@ or was resized externally is picked up here.
 
 Every exclusion above returns a `compute.SkippedDisk{Alias, DiskName, Category, Reason}` rather than
 silently dropping the disk (US-002) — `Category` is one of a small set of stable codes
-(`ambiguous_class`, `empty_identity`, `duplicate_disk_name`, `duplicate_device_name`,
-`get_disk_failed`, `invalid_iops`, plus `guest_path_unresolvable` from the local-mode step) suitable as
-a Prometheus label; `Reason` carries the free-text detail (disk names, the underlying API error) for
+(`ambiguous_class`, `empty_identity`, `duplicate_disk_name`, `duplicate_device_name`, `empty_alias`,
+`duplicate_alias`, `get_disk_failed`, `invalid_iops`, plus `guest_path_unresolvable` from the
+local-mode step) suitable as a Prometheus label; `Reason` carries the free-text detail (disk names, the
+underlying API error) for
 the log line only — `Category` exists separately from `Reason` specifically because `Reason`'s text is
 unbounded and would blow up label cardinality if used directly. `telemetry.RecordDiscoverySkipped`
 increments `iops_autoscaler_disk_discovery_skipped_total{alias,reason}` for each one (§7.1).
@@ -500,6 +503,18 @@ GET  .../virtualMachines/{vm}                   capture etag, every disk's alias
   except the target alias, which additionally carries spec.iops
 POST .../virtualMachines/{vm}                   send etag, Idempotency-Key
 ```
+
+Before any of the above, `validateDependentWriteTarget` (issue #20) proves the fresh read is safe to
+act on at all: every alias non-empty and unique across the whole VM, and exactly one attachment
+matching the requested `device_name` — a descriptive error aborts before `UpdateDependentDisk` is ever
+called if either fails. The platform should already guarantee both, but this write path does not trust
+that blindly: `Upsert`'s delete-on-omission semantics (next paragraph) make an empty or duplicated
+alias a malformed collection, not a harmless duplicate, and more than one attachment sharing
+`device_name` previously let the target-selection loop silently pick whichever it saw last — an
+arbitrary attachment, not necessarily the intended one. Discovery applies the same alias checks
+(§4.1) so a colliding disk is excluded from the managed set before it is ever offered as a target, but
+the write path's own check is what actually protects the write — Discovery's snapshot can be stale by
+up to `discovery_interval`; this check runs against the same fresh read the write itself uses.
 
 Every alias must still be present, because Upsert treats an existing `storage.disks[]` element
 missing from the request as a delete — dropping an entry to "only touch the target" would detach

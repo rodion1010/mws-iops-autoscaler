@@ -197,6 +197,104 @@ func TestUpdateDependentDiskIOPS_deviceNotFound(t *testing.T) {
 	}
 }
 
+// --- issue #20: reject ambiguous attachment identities before writing ---
+
+func TestUpdateDependentDiskIOPS_duplicateAliasRefusedWithoutWriting(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = &VirtualMachine{
+		Name: "iops-test-vm",
+		Etag: "etag-1",
+		Disks: []StorageDisk{
+			{Alias: "disk", DeviceName: "bootdisk", Class: ClassDependent, DiskType: "nbs-pl2", SizeRaw: "20GB", IOPS: 1000},
+			{Alias: "disk", DeviceName: "datadisk", Class: ClassDependent, DiskType: "nbs-pl2", SizeRaw: "10GB", IOPS: 1000},
+		},
+	}
+	c.dependentWriteErr = errors.New("must never be reached")
+
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "")
+	if err == nil {
+		t.Fatal("UpdateDependentDiskIOPS succeeded despite two attachments sharing one alias")
+	}
+	if !strings.Contains(err.Error(), "sharing alias") {
+		t.Errorf("error = %v, want it to name the duplicate alias", err)
+	}
+	if errors.Is(err, c.dependentWriteErr) {
+		t.Error("UpdateDependentDisk was called — validation must refuse before ever reaching the write")
+	}
+}
+
+func TestUpdateDependentDiskIOPS_duplicateTargetDeviceNameRefusedWithoutWriting(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = &VirtualMachine{
+		Name: "iops-test-vm",
+		Etag: "etag-1",
+		Disks: []StorageDisk{
+			{Alias: "boot1", DeviceName: "bootdisk", Class: ClassDependent, DiskType: "nbs-pl2", SizeRaw: "20GB", IOPS: 1000},
+			{Alias: "boot2", DeviceName: "bootdisk", Class: ClassDependent, DiskType: "nbs-pl2", SizeRaw: "20GB", IOPS: 2000},
+		},
+	}
+	c.dependentWriteErr = errors.New("must never be reached")
+
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "")
+	if err == nil {
+		t.Fatal("UpdateDependentDiskIOPS succeeded despite two attachments sharing the target device_name")
+	}
+	if !strings.Contains(err.Error(), "attached 2 times") {
+		t.Errorf("error = %v, want it to name the ambiguous device_name count", err)
+	}
+	if errors.Is(err, c.dependentWriteErr) {
+		t.Error("UpdateDependentDisk was called — validation must refuse before ever reaching the write")
+	}
+}
+
+func TestUpdateDependentDiskIOPS_emptyTargetAliasRefusedWithoutWriting(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = &VirtualMachine{
+		Name: "iops-test-vm",
+		Etag: "etag-1",
+		Disks: []StorageDisk{
+			{Alias: "", DeviceName: "bootdisk", Class: ClassDependent, DiskType: "nbs-pl2", SizeRaw: "20GB", IOPS: 1000},
+		},
+	}
+	c.dependentWriteErr = errors.New("must never be reached")
+
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "")
+	if err == nil {
+		t.Fatal("UpdateDependentDiskIOPS succeeded despite the target attachment having an empty alias")
+	}
+	if !strings.Contains(err.Error(), "empty alias") {
+		t.Errorf("error = %v, want it to name the empty alias", err)
+	}
+	if errors.Is(err, c.dependentWriteErr) {
+		t.Error("UpdateDependentDisk was called — validation must refuse before ever reaching the write")
+	}
+}
+
+func TestUpdateDependentDiskIOPS_validMultiDiskVMSucceeds(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = &VirtualMachine{
+		Name: "iops-test-vm",
+		Etag: "etag-1",
+		Disks: []StorageDisk{
+			{Alias: "boot", DeviceName: "bootdisk", Class: ClassDependent, DiskType: "nbs-pl2", SizeRaw: "20GB", IOPS: 1000},
+			{Alias: "data1", DeviceName: "datadisk1", Class: ClassDependent, DiskType: "nbs-pl2", SizeRaw: "10GB", IOPS: 2000},
+			{Alias: "data2", DeviceName: "datadisk2", Class: ClassIndependent, DiskName: "iops-test-vm-data2"},
+		},
+	}
+
+	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "idem-1")
+	if err != nil {
+		t.Fatalf("UpdateDependentDiskIOPS on a valid multi-disk VM: %v", err)
+	}
+	if got != 3000 {
+		t.Errorf("applied = %d, want 3000", got)
+	}
+	updated := c.vms["iops-test-vm"].Disks
+	if len(updated) != 3 {
+		t.Fatalf("disk count after write = %d, want 3 — every attachment must survive the round trip", len(updated))
+	}
+}
+
 func TestUpdateDependentDiskIOPS_refusesIndependentDisk(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDisk()

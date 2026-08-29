@@ -107,6 +107,10 @@ its VM cannot be modified through the disk API at all.
       #4). This is a live-discovery-time check, distinct from `--validate-config`'s own
       duplicate-`device_name` rejection in US-004 below, which only catches a duplicate already present
       in the config file itself
+- [ ] A disk whose alias is empty, or shares an alias with another attachment on the same VM, is
+      excluded from the managed set the same way (issue #20) — alias is the dependent write path's own
+      join key (FR-15e), so a colliding one is unsafe to offer as a management target even before any
+      write is attempted
 - [ ] A disk whose current provisioned IOPS reads as `<= 0` is excluded from the managed set — an
       impossible value is never treated as a real current limit (issue #4)
 - [ ] Typecheck/lint passes
@@ -460,6 +464,10 @@ needs, per mode, so that I do not have to grant it broad rights.
   minimal partial body — every current alias present (an omitted collection element is deleted by
   Upsert), carrying nothing but `name` except the target alias's new `iops` — with `etag` and an
   idempotency key (ADR-009). Independent disks use the single-field disk path (FR-15).
+- FR-15e: Before that write, the agent must validate the fresh attachment list itself (issue #20) —
+  every alias non-empty and unique, and exactly one attachment matching the requested `device_name` —
+  and return a descriptive error without calling the write at all if either fails, rather than
+  resending an ambiguous or malformed collection.
 - FR-15b: A disk **owned** by its VM (created inside the VM spec; `metadata.usages` contains `own`)
   cannot be modified through the disk API — the platform returns `403` naming the VM resource. This
   is an ownership constraint, not a permissions one: an independent disk attached by `ref` to the

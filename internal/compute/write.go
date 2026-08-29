@@ -91,6 +91,67 @@ func UpdateIndependentDiskIOPS(ctx context.Context, c Client, diskName string, e
 // report intent without calling UpdateDependentDisk at all" — the closest
 // analogue this write path has to the independent path's server-confirmed
 // dry run.
+// validateDependentWriteTarget proves disks — a VM's full attachment list,
+// exactly as UpdateDependentDiskIOPS is about to resend it unchanged — is
+// safe to write from, and selects the single attachment matching
+// deviceName (issue #20). Two invariants the platform should already
+// guarantee but this write path must not simply trust:
+//
+//  1. Every alias in disks is non-empty and unique. Upsert treats a
+//     collection element missing from the request as a delete (the
+//     comment at this function's call site), so resending an empty or
+//     duplicated alias is not a no-op mistake — it is a malformed
+//     collection sent to a safety-sensitive write.
+//  2. Exactly one attachment carries deviceName. The original
+//     implementation kept overwriting targetAlias on every match, so a
+//     second attachment sharing deviceName would silently become "the"
+//     target — whichever the loop happened to see last, not necessarily
+//     the one the caller meant.
+//
+// Both are checked before any attachment is selected, so an ambiguous
+// inventory returns a descriptive error without ever reaching
+// UpdateDependentDisk (issue #20's own acceptance criterion).
+func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string) (targetAlias string, liveCurrent int64, err error) {
+	aliasCount := make(map[string]int, len(disks))
+	for _, d := range disks {
+		if d.Alias == "" {
+			return "", 0, fmt.Errorf("update dependent disk: VM %q has an attachment (device_name %q) with an empty alias — refusing to write an ambiguous collection", vmName, d.DeviceName)
+		}
+		aliasCount[d.Alias]++
+	}
+	for alias, count := range aliasCount {
+		if count > 1 {
+			return "", 0, fmt.Errorf("update dependent disk: VM %q has %d attachments sharing alias %q — refusing to write an ambiguous collection", vmName, count, alias)
+		}
+	}
+
+	var matches []StorageDisk
+	for _, d := range disks {
+		if d.DeviceName == deviceName {
+			matches = append(matches, d)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", 0, fmt.Errorf("update dependent disk: device_name %q not found on VM %q", deviceName, vmName)
+	case 1:
+		target := matches[0]
+		if target.Class != ClassDependent {
+			return "", 0, fmt.Errorf("update dependent disk: device_name %q on VM %q is independent, not dependent", deviceName, vmName)
+		}
+		// target.Alias is already known non-empty from the pass above —
+		// re-asserted here, explicitly, as its own named precondition
+		// (issue #20's acceptance criteria list it separately from
+		// uniqueness) rather than only ever implied by it.
+		if target.Alias == "" {
+			return "", 0, fmt.Errorf("update dependent disk: device_name %q on VM %q has an empty alias", deviceName, vmName)
+		}
+		return target.Alias, target.IOPS, nil
+	default:
+		return "", 0, fmt.Errorf("update dependent disk: device_name %q attached %d times on VM %q — refusing an ambiguous target", deviceName, len(matches), vmName)
+	}
+}
+
 func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName string, expectedCurrent, target int64, dryRun bool, idempotencyKey string) (int64, error) {
 	vm, err := c.GetVirtualMachine(ctx, vmName)
 	if err != nil {
@@ -104,22 +165,21 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 	// an existing collection element missing from the request as a delete,
 	// so dropping one to "only touch the target" would detach every other
 	// disk on the VM. Only the target's alias carries a change.
+	//
+	// Before any of that: prove the alias list is actually safe to resend
+	// unchanged, and that deviceName picks out exactly one attachment
+	// (issue #20). The platform should already guarantee both — but an
+	// empty or duplicate alias here would resend a malformed collection,
+	// and more than one attachment sharing deviceName would let
+	// targetAlias silently pick whichever the loop below saw last,
+	// mutating an arbitrary attachment instead of the intended one.
+	targetAlias, liveCurrent, err := validateDependentWriteTarget(vm.Disks, deviceName, vmName)
+	if err != nil {
+		return 0, err
+	}
 	aliases := make([]string, len(vm.Disks))
-	targetAlias := ""
-	liveCurrent := int64(0)
 	for i, d := range vm.Disks {
 		aliases[i] = d.Alias
-		if d.DeviceName != deviceName {
-			continue
-		}
-		if d.Class != ClassDependent {
-			return 0, fmt.Errorf("update dependent disk: device_name %q on VM %q is independent, not dependent", deviceName, vmName)
-		}
-		targetAlias = d.Alias
-		liveCurrent = d.IOPS
-	}
-	if targetAlias == "" {
-		return 0, fmt.Errorf("update dependent disk: device_name %q not found on VM %q", deviceName, vmName)
 	}
 
 	if liveCurrent != expectedCurrent {
