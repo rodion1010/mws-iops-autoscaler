@@ -320,6 +320,10 @@ unused headroom.
 - [ ] A conflict on either disk class forces an immediate rediscovery rather than waiting for the next
       scheduled cycle, and a successful write's verified value is adopted into the agent's own
       current-value snapshot immediately (issue #16)
+- [ ] That forced rediscovery ends the entire in-progress reconcile cycle, not just the one disk's
+      write — every other disk's decision this cycle was computed from the same managed/pool snapshot
+      the rediscovery just replaced, so none of them may still be acted on once it has (pre-merge
+      review)
 - [ ] Covered by a concurrent-modification test
 - [ ] Typecheck/lint passes
 
@@ -435,6 +439,11 @@ needs, per mode, so that I do not have to grant it broad rights.
   `explicit <list>`.
 - FR-5: Discovery must run continuously on an interval, so disks attached after startup enter
   management without a restart.
+- FR-5a: The agent must never decide or write against a managed snapshot a fatal discovery error has
+  invalidated (including an unmatched `disks.selected` device_name) — invalidated the instant the error
+  happens, not only once the snapshot's age exceeds `max_discovery_age` (issue #15's time-based bound
+  remains as an independent, complementary guard for discovery having simply stopped running at all;
+  pre-merge review).
 
 **Metrics**
 - FR-6: In `local` mode the agent must prefer `/proc/diskstats` over the monitoring API.

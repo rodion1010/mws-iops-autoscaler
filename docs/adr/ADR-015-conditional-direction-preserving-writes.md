@@ -149,3 +149,24 @@ the wrong direction") that the issue calls out on its own terms.
        tests; Agent-level tests proving a conflict forces rediscovery and never adopts an unverified
        value, and that a success adopts its value immediately.
 8. [x] `docs/design.md` §4.7 synced.
+
+> **Refined (2026-08-29, pre-merge review): the forced rediscovery must end the whole cycle, not just
+> the one disk's write.** `Agent.actuate`'s forced `discover()` on `ErrConcurrentModification` replaces
+> `a.managed`/`a.iopsPool` — but `reconcile()` had already snapshotted both once at the top of the
+> cycle, and every disk not yet processed (sibling p95s, VM headroom, its own `Decision`) was computed
+> from that now-superseded snapshot. The loop kept going regardless, deciding and potentially writing
+> for every remaining disk against data the platform had already moved past.
+>
+> `Agent.generation` (an integer bumped only alongside a successful discovery, in the same critical
+> section as `managed`/`iopsPool`) closes this: `reconcile()` snapshots it at the top exactly like
+> `managed`/`iopsPool`, and re-checks it after every `actuate()` call — the only place it can change
+> mid-cycle. A mismatch aborts the rest of the cycle immediately; the next reconcile tick decides fresh
+> from the new snapshot instead. `vm_cap_reached` is not published for an aborted cycle, since an
+> `anyVMCapReached` aggregated from only part of the managed set could be a false negative — worse than
+> not publishing at all. This generation counter is the same mechanism ADR-014's own refinement uses for
+> `managedValid`; both are set together in `discover()`'s single success critical section.
+
+9. [x] `cmd/mws-iops-autoscaler/agent.go`: `Agent.generation`; `reconcile()` snapshots it and aborts the
+       remaining loop iterations (skipping `RecordVMCapReached`) the moment it changes.
+10. [x] Tests: a two-disk cycle where the first disk's conflict forces a rediscovery proves the second
+        disk's `Actuator.Apply` is never reached.

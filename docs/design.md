@@ -480,6 +480,18 @@ target. A successful write's verified applied value is adopted into the Agent's 
 snapshot immediately, for the same reason: waiting for the next discovery would leave it stale for up
 to `DiscoveryInterval`, the exact class of gap this issue exists to close. See ADR-015.
 
+**The forced rediscovery also ends the current reconcile cycle, not just the current disk's write
+(pre-merge review).** `Agent.reconcile` snapshots `managed`/`iopsPool` once at the top of the cycle —
+every sibling p95, VM headroom, and Decision for every disk not yet processed is computed from that one
+snapshot. A rediscovery mid-cycle replaces it, which means every one of those not-yet-processed
+decisions was computed from data the platform has already moved on from. `Agent.generation` (bumped
+only alongside a successful discovery, in the same critical section as `managed`/`iopsPool`) is
+snapshotted the same way at the top of `reconcile`; the per-disk loop compares it again after every
+`actuate()` call and returns immediately if it has changed, leaving every remaining disk for the next
+reconcile tick to decide fresh. `vm_cap_reached` is not published for an aborted cycle either — an
+`anyVMCapReached` computed from only part of the managed set would be a possible false negative, no
+better than not publishing it at all.
+
 **Independent disk** — a pre-write `GetDisk` for the fresh etag/live-current check above, then a
 single-field partial update, still no read-modify-write of the write body itself:
 
@@ -906,10 +918,13 @@ exposing them.
 |---|---|
 | Metrics unavailable | Mark disks "no data" (`Analysis.Fresh = false`, reason `metrics_stale`, issue #15), take no action, alert after `n` cycles |
 | Compute API unavailable | Retry with backoff; decisions queue but never stack up (latest wins). Once the last successful discovery exceeds `max_discovery_age` (3× `discovery_interval`), reconcile skips every disk for that cycle rather than keep acting on a snapshot that may no longer reflect reality (issue #15) |
+| Discovery fails outright (Compute API error, or an unmatched `disks.selected` device_name, issue #5 reopened) | The managed snapshot is invalidated the instant the failure happens (`Agent.managedValid`), not merely once `max_discovery_age` eventually elapses — a fatal error and staleness-by-age are two independent, both-checked gates (pre-merge review) |
 | Write returns non-2xx | Log with full request context, back off, do not update state |
 | Write succeeds but value differs | Treat as failure, re-read, reconcile on next cycle |
+| Write call itself errors (network) | Reservation resolved from a fresh live read, never released on the error alone — the platform may have applied it before the response arrived (pre-merge review; see §9.4's budget crash-safety note) |
 | Concurrent external resize | Discovery picks it up; agent adopts observed value as current |
 | VM etag conflict (dependent path) | Abort write, re-read, retry next cycle — never force |
+| Concurrent-modification conflict mid-cycle | The forced rediscovery it triggers (below) supersedes every decision this reconcile cycle already made from the old snapshot — the rest of the cycle aborts rather than acting on them (pre-merge review) |
 | Agent dies after scale-up | **Disk stays at the raised limit.** No dead-man's switch is possible from outside the platform — documented limitation, must be in the README |
 
 ---

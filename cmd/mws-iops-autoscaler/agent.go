@@ -88,6 +88,28 @@ type Agent struct {
 	managed              []registry.ManagedDisk
 	iopsPool             int64
 	lastDiscoverySuccess time.Time
+
+	// managedValid is false the instant any discover() call fails, and
+	// true only once one has since succeeded — a fatal discovery error
+	// (including an unmatched disks.selected device_name, issue #5
+	// reopened) must stop reconcile from acting on the previous managed
+	// set immediately, not merely once maxDiscoveryAge eventually elapses.
+	// maxDiscoveryAge still matters independently: it catches the case
+	// this flag cannot (discovery having simply stopped being called at
+	// all), so reconcile checks both.
+	managedValid bool
+
+	// generation counts successful discover() calls only — bumped
+	// alongside managed/iopsPool/lastDiscoverySuccess, in the same
+	// critical section, so a generation change is always exactly "a).
+	// managed/iopsPool were just replaced." reconcile() snapshots it at
+	// the start of a cycle and checks it again after every actuate() call:
+	// a forced rediscovery from a concurrent-modification conflict
+	// (compute.ErrConcurrentModification) bumps it mid-cycle, and every
+	// decision this cycle already made was computed from data that
+	// generation now supersedes — the rest of the cycle must not act on
+	// it either.
+	generation int64
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -150,6 +172,7 @@ func (a *Agent) discover(ctx context.Context) error {
 	vm, skipped, err := compute.Discover(ctx, a.client, a.vmName)
 	if err != nil {
 		a.readiness.SetDiscoverySucceeded(false)
+		a.invalidateManaged()
 		return err
 	}
 	for _, s := range skipped {
@@ -170,6 +193,7 @@ func (a *Agent) discover(ctx context.Context) error {
 	managed, _, err := registry.Select(vm, a.cfg.Disks, a.resolved)
 	if err != nil {
 		a.readiness.SetDiscoverySucceeded(false)
+		a.invalidateManaged()
 		return err
 	}
 
@@ -206,6 +230,8 @@ func (a *Agent) discover(ctx context.Context) error {
 	a.managed = managed
 	a.iopsPool = compute.VMIOPSPool(vm)
 	a.lastDiscoverySuccess = time.Now()
+	a.managedValid = true
+	a.generation++
 	a.mu.Unlock()
 
 	a.readiness.SetDiscoverySucceeded(true)
@@ -229,6 +255,20 @@ func (a *Agent) discover(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// invalidateManaged marks the currently-cached managed set unusable —
+// called from every discover() failure path so a fatal discovery error
+// (including an unmatched disks.selected device_name) stops reconcile from
+// acting on the stale snapshot immediately, rather than waiting for
+// maxDiscoveryAge to eventually elapse. Deliberately does not touch
+// a.managed/a.iopsPool/a.generation themselves: the previous values stay
+// available for observability (e.g. a log line naming what was last
+// managed), guarded by the validity flag rather than cleared outright.
+func (a *Agent) invalidateManaged() {
+	a.mu.Lock()
+	a.managedValid = false
+	a.mu.Unlock()
 }
 
 // skipReasonGuestPathUnresolvable mirrors the compute package's
@@ -257,6 +297,8 @@ func (a *Agent) reconcile(ctx context.Context) {
 	managed := append([]registry.ManagedDisk(nil), a.managed...)
 	iopsPool := a.iopsPool
 	lastDiscovery := a.lastDiscoverySuccess
+	managedValid := a.managedValid
+	startGeneration := a.generation
 	a.mu.Unlock()
 
 	now := time.Now()
@@ -268,6 +310,18 @@ func (a *Agent) reconcile(ctx context.Context) {
 	a.readiness.SetBudgetHealthy(healthy)
 	a.telemetry.RecordBudgetHealthy(healthy)
 
+	// A fatal discovery error (including an unmatched disks.selected
+	// device_name, issue #5 reopened) must stop reconcile from acting on
+	// the previous managed set immediately — not merely once
+	// maxDiscoveryAge eventually elapses, which could be minutes away.
+	// invalidateManaged() clears this the instant any discover() call
+	// fails; a subsequent successful discover() is what sets it true
+	// again (pre-merge review finding).
+	if !managedValid {
+		log.Printf("reconcile: managed snapshot invalidated by the last discover() call failing — skipping this cycle until the next successful discovery")
+		return
+	}
+
 	// Fail closed on a stale discovery snapshot (issue #15): a.managed
 	// keeps whatever discover() last populated even while discovery has
 	// since started failing (readiness.SetDiscoverySucceeded already
@@ -275,7 +329,11 @@ func (a *Agent) reconcile(ctx context.Context) {
 	// lastDiscovery.IsZero() (never discovered) is deliberately included —
 	// Run() always discovers once before the first reconcile, so reaching
 	// here with a zero value can only mean that first discover() itself
-	// failed and this cycle's managed list is empty/stale anyway.
+	// failed and this cycle's managed list is empty/stale anyway. This is
+	// a distinct, complementary guard from managedValid above: it catches
+	// discovery having simply stopped being *called* at all (a stuck
+	// ticker, a wedged goroutine), which a validity flag alone — set once
+	// and never revisited — could never detect on its own.
 	if age := now.Sub(lastDiscovery); lastDiscovery.IsZero() || age > a.maxDiscoveryAge {
 		log.Printf("reconcile: discovery snapshot stale (age=%s, max=%s) — skipping this cycle (issue #15)", age, a.maxDiscoveryAge)
 		return
@@ -333,6 +391,22 @@ func (a *Agent) reconcile(ctx context.Context) {
 			continue
 		}
 		a.actuate(ctx, m, d, now)
+
+		// actuate() forces a rediscovery on ErrConcurrentModification,
+		// which bumps a.generation the moment it succeeds. Every decision
+		// already made this cycle — including every siblingP95 and vm
+		// value computed above, all derived from the managed/iopsPool
+		// snapshot captured at the top — was computed from data that
+		// rediscovery has just superseded. Abort the rest of this cycle
+		// rather than keep deciding against it; the next reconcile tick
+		// starts fresh from the new snapshot.
+		a.mu.Lock()
+		currentGeneration := a.generation
+		a.mu.Unlock()
+		if currentGeneration != startGeneration {
+			log.Printf("reconcile: managed snapshot changed mid-cycle (forced rediscovery after a concurrent-modification conflict) — aborting the rest of this reconcile cycle rather than act on now-stale data")
+			return
+		}
 	}
 
 	a.telemetry.RecordVMCapReached(a.vmName, anyVMCapReached)

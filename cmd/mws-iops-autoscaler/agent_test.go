@@ -130,10 +130,18 @@ type stubClient struct {
 	getVMCalls int
 	vm         *compute.VirtualMachine
 	disks      map[string]*compute.Disk
+	// getVMErr, if set, is returned by GetVirtualMachine instead of a
+	// value — simulates discover() itself failing (a transient Compute
+	// API error), distinct from every other stub failure mode here which
+	// simulates a write-path problem.
+	getVMErr error
 }
 
 func (s *stubClient) GetVirtualMachine(_ context.Context, _ string) (*compute.VirtualMachine, error) {
 	s.getVMCalls++
+	if s.getVMErr != nil {
+		return nil, s.getVMErr
+	}
 	cp := *s.vm
 	cp.Disks = append([]compute.StorageDisk(nil), s.vm.Disks...)
 	return &cp, nil
@@ -348,15 +356,20 @@ func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent
 		allowScaleDown:       true,
 		maxDiscoveryAge:      time.Minute,
 		lastDiscoverySuccess: lastDiscoverySuccess,
-		managed:              []registry.ManagedDisk{independentDisk()},
-		sampler:              sampler,
-		analyzer:             analyzer.NewWindowAnalyzer(),
-		decider:              fixedDecider{action: decider.ActionScaleUp, target: 2000},
-		actuator:             act,
-		tracker:              state.NewTracker(budget),
-		telemetry:            telemetry.NewRegistry(),
-		journal:              journal.NewWriter(discard{}),
-		readiness:            &health.Readiness{},
+		// managedValid is a separate, complementary gate from the
+		// age-based staleness these tests exercise (pre-merge review
+		// finding) — true here so lastDiscoverySuccess's own age is what
+		// actually decides the outcome, not this flag.
+		managedValid: true,
+		managed:      []registry.ManagedDisk{independentDisk()},
+		sampler:      sampler,
+		analyzer:     analyzer.NewWindowAnalyzer(),
+		decider:      fixedDecider{action: decider.ActionScaleUp, target: 2000},
+		actuator:     act,
+		tracker:      state.NewTracker(budget),
+		telemetry:    telemetry.NewRegistry(),
+		journal:      journal.NewWriter(discard{}),
+		readiness:    &health.Readiness{},
 	}, act
 }
 
@@ -384,6 +397,81 @@ func TestReconcile_proceedsWhenDiscoveryFresh(t *testing.T) {
 	}
 }
 
+// TestReconcile_skipsImmediatelyAfterFatalDiscoveryError is the pre-merge
+// review finding: a fatal discovery error must stop reconcile from acting
+// on the previous managed set the instant it happens, not merely once
+// maxDiscoveryAge eventually elapses. maxDiscoveryAge is set generously
+// large here specifically so the age-based gate (issue #15, tested above)
+// cannot be what blocks this cycle — only managedValid can.
+func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
+	goodClient := &stubClient{
+		vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
+			{Alias: "data", DeviceName: "datadisk", Class: compute.ClassIndependent, DiskName: "vm-1-data"},
+		}},
+		disks: map[string]*compute.Disk{"vm-1-data": {Name: "vm-1-data", SpecIOPS: 1000}},
+	}
+	act := &recordingActuator{}
+	a := newDiscoverableTestAgent(t, act, goodClient)
+	a.maxDiscoveryAge = time.Hour
+	a.decider = fixedDecider{action: decider.ActionScaleUp, target: 2000}
+	a.analyzer = analyzer.NewWindowAnalyzer()
+
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("first discover(): %v", err)
+	}
+	if !a.hasManagedDisks() {
+		t.Fatal("test setup: first discover() did not populate the managed set")
+	}
+
+	// A second, failing discover() — the managed set from the first call
+	// is still sitting in a.managed, well within maxDiscoveryAge.
+	a.client = &stubClient{getVMErr: errors.New("simulated: transient Compute API failure")}
+	if err := a.discover(context.Background()); err == nil {
+		t.Fatal("test setup: second discover() unexpectedly succeeded")
+	}
+
+	a.reconcile(context.Background())
+	if len(act.calls) != 0 {
+		t.Errorf("Actuator.Apply called %d times, want 0 — a fatal discovery error must block reconcile immediately, not wait for maxDiscoveryAge", len(act.calls))
+	}
+}
+
+// TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk is the same
+// finding through the specific scenario the review named: an unmatched
+// disks.selected device_name (issue #5 reopened), which fails inside
+// registry.Select rather than compute.Discover.
+func TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(), // "good" and "bad", not "missing-disk"
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	act := &recordingActuator{}
+	a := newDiscoverableTestAgent(t, act, client)
+	a.maxDiscoveryAge = time.Hour
+	a.decider = fixedDecider{action: decider.ActionScaleUp, target: 2000}
+	a.analyzer = analyzer.NewWindowAnalyzer()
+	a.cfg.Disks = config.DisksSpec{Mode: "auto-discovery"}
+
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("first discover(): %v", err)
+	}
+
+	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
+		{DeviceName: "good"}, {DeviceName: "missing-disk"},
+	}}
+	if err := a.discover(context.Background()); err == nil {
+		t.Fatal("test setup: second discover() with an unmatched selected disk unexpectedly succeeded")
+	}
+
+	a.reconcile(context.Background())
+	if len(act.calls) != 0 {
+		t.Errorf("Actuator.Apply called %d times, want 0 — an unmatched disks.selected device_name must block reconcile immediately", len(act.calls))
+	}
+}
+
 // perDiskDecider returns a fixed Decision per DiskID, looked up by the
 // caller — unlike fixedDecider, which returns the same action for every
 // disk, this lets a reconcile test give different disks different
@@ -395,6 +483,58 @@ type perDiskDecider struct {
 
 func (p perDiskDecider) Decide(diskID string, current int64, _ analyzer.Analysis, _ decider.VMState, _ decider.EffectivePolicy, _ decider.GuardrailState, _ time.Time) decider.Decision {
 	return decider.Decision{DiskID: diskID, Action: p.byDisk[diskID], Current: current}
+}
+
+// conflictOnFirstCallActuator returns a wrapped ErrConcurrentModification
+// on its first Apply call and a plain success on every subsequent one —
+// used to prove reconcile() aborts the rest of its cycle after the first
+// disk's conflict rather than going on to actuate a second one.
+type conflictOnFirstCallActuator struct {
+	calls []decider.Decision
+}
+
+func (a *conflictOnFirstCallActuator) Apply(_ context.Context, d decider.Decision, _ actuator.Target, _ bool, _ string) (actuator.Applied, error) {
+	a.calls = append(a.calls, d)
+	if len(a.calls) == 1 {
+		return actuator.Applied{}, fmt.Errorf("simulated: %w", compute.ErrConcurrentModification)
+	}
+	return actuator.Applied{DiskID: d.DiskID, IOPS: d.Target}, nil
+}
+
+// TestReconcile_abortsRestOfCycleAfterConcurrentModificationRediscovery is
+// the pre-merge review finding: after a concurrent-modification conflict
+// forces a rediscovery inside actuate(), the rest of this reconcile cycle
+// — every disk not yet decided — was computed from a managed/iopsPool
+// snapshot that rediscovery just superseded, and must not be acted on.
+func TestReconcile_abortsRestOfCycleAfterConcurrentModificationRediscovery(t *testing.T) {
+	client := &stubClient{
+		vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
+			{Alias: "first", DeviceName: "first", Class: compute.ClassIndependent, DiskName: "vm-1-first"},
+			{Alias: "second", DeviceName: "second", Class: compute.ClassIndependent, DiskName: "vm-1-second"},
+		}},
+		disks: map[string]*compute.Disk{
+			"vm-1-first":  {Name: "vm-1-first", SpecIOPS: 1000},
+			"vm-1-second": {Name: "vm-1-second", SpecIOPS: 1000},
+		},
+	}
+	act := &conflictOnFirstCallActuator{}
+	a := newDiscoverableTestAgent(t, act, client)
+	a.maxDiscoveryAge = time.Hour
+	a.analyzer = analyzer.NewWindowAnalyzer()
+	a.decider = perDiskDecider{byDisk: map[string]decider.Action{
+		"vm-1-first":  decider.ActionScaleUp,
+		"vm-1-second": decider.ActionScaleUp,
+	}}
+
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+
+	a.reconcile(context.Background())
+
+	if len(act.calls) != 1 {
+		t.Errorf("Actuator.Apply called %d times, want 1 — the cycle must abort after the first disk's conflict-triggered rediscovery, never reaching the second disk", len(act.calls))
+	}
 }
 
 // TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder is issue #19's
@@ -434,6 +574,7 @@ func TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder(t *testing.T) {
 				allowScaleDown:       true,
 				maxDiscoveryAge:      time.Minute,
 				lastDiscoverySuccess: time.Now(),
+				managedValid:         true,
 				managed:              order,
 				sampler:              sampler,
 				analyzer:             analyzer.NewWindowAnalyzer(),

@@ -137,3 +137,26 @@ subsumes the other.
        `runtime.collection_interval`/`runtime.discovery_interval`.
 6. [x] `docs/design.md` synced: `Analysis`/`Analyzer`/`Decider` contracts, §6.1 failure-mode table,
        §7.3 readiness semantics.
+
+> **Refined (2026-08-29, pre-merge review): staleness-by-age is not the only way a snapshot goes bad.**
+> `maxDiscoveryAge` bounds how long reconcile trusts a snapshot that discovery has *stopped refreshing*.
+> It says nothing about a snapshot discovery has just *actively rejected* — a fatal `discover()` failure
+> (a Compute API error, or an unmatched `disks.selected` device_name, issue #5 reopened) left
+> `a.managed` untouched and `lastDiscoverySuccess` unchanged, so reconcile kept acting on the previous,
+> now-unconfirmed snapshot for however long remained before `maxDiscoveryAge` happened to elapse —
+> possibly the better part of `3 × discovery_interval`. `readiness.SetDiscoverySucceeded(false)` already
+> made this visible on `/readyz`, but visibility on a dashboard is not the same guarantee as reconcile
+> itself refusing to act.
+>
+> `Agent.managedValid` closes this: false the instant any `discover()` call fails, true again only once
+> one has since succeeded, checked by `reconcile()` before the age-based gate and independent of it — a
+> fatal error invalidates the snapshot now, `maxDiscoveryAge` remains the fallback for the case
+> `managedValid` cannot see on its own (discovery having simply stopped being *called* at all, e.g. a
+> stuck ticker). See `docs/design.md` §6.1's failure-mode table for the current behavior.
+
+7. [x] `cmd/mws-iops-autoscaler/agent.go`: `Agent.managedValid`, set false on every `discover()` failure
+       path via `invalidateManaged()` and true (alongside `managed`/`lastDiscoverySuccess`) on success;
+       `reconcile()` checks it ahead of the age-based gate.
+8. [x] Tests: a fatal `compute.Discover`-level failure and an unmatched `disks.selected` device_name
+       (`registry.Select`-level failure) each block the very next `reconcile()` call even with a
+       deliberately generous `maxDiscoveryAge`.
