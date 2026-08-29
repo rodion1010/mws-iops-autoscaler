@@ -291,6 +291,13 @@ func (a *Agent) reconcile(ctx context.Context) {
 		a.telemetry.RecordStaleness(diskID, an.SampleAge.Seconds())
 	}
 
+	// Aggregated across every disk decided this cycle and reported once,
+	// after the loop (issue #19) — vm_cap_reached is a VM-wide gauge with
+	// no disk label, so setting it per-disk inside the loop let whichever
+	// disk was processed last silently overwrite every earlier disk's
+	// result.
+	anyVMCapReached := false
+
 	for _, m := range managed {
 		diskID := m.Disk.DiskName
 		an := analyses[diskID]
@@ -312,6 +319,9 @@ func (a *Agent) reconcile(ctx context.Context) {
 		gState := a.tracker.State(diskID, now)
 
 		d := a.decider.Decide(diskID, m.Disk.IOPS, an, vm, ep, gState, now)
+		if d.Action == decider.ActionVMCapReached {
+			anyVMCapReached = true
+		}
 
 		class := string(m.Disk.Class)
 		a.telemetry.RecordDecision(a.vmName, class, d)
@@ -324,6 +334,8 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 		a.actuate(ctx, m, d, now)
 	}
+
+	a.telemetry.RecordVMCapReached(a.vmName, anyVMCapReached)
 }
 
 func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.Decision, now time.Time) {
@@ -429,6 +441,11 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 		}
 	}
 	a.mu.Unlock()
+
+	// disk_provisioned_iops only ever moves on a write verified to have
+	// landed (issue #19) — this is that verification point, the same one
+	// issue #16's comment above just adopted into a.managed.
+	a.telemetry.RecordAppliedIOPS(diskID, a.vmName, string(m.Disk.Class), applied.IOPS)
 
 	if err := a.tracker.ConfirmChange(idempotencyKey); err != nil {
 		// The write landed (verified above) but confirming that fact

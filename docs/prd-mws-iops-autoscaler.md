@@ -364,6 +364,15 @@ unused headroom.
 - [ ] Structured logs for every decision, including the no-change ones and the reason
 - [ ] Exposes its own Prometheus metrics: current/target IOPS per disk, decisions by outcome,
       API errors, window fill state
+- [ ] Current (provisioned) and target (proposed) IOPS are separate metrics (issue #19) — the
+      provisioned gauge reflects only state a write has verified landed, never a decision alone, so a
+      dry run or a failed write never reports a change that did not happen
+- [ ] A VM-wide gauge (e.g. the VM IOPS-cap-reached signal) is set once per reconcile from an
+      aggregate across every disk on that VM, never per-disk inside the per-disk decision loop — the
+      last disk processed must not silently override an earlier disk's result (issue #19)
+- [ ] A metric distinguishing mutually-exclusive states (e.g. which metric source is active) always
+      updates every state's series together, so switching state cannot leave a stale series behind
+      claiming to still be active (issue #19)
 - [ ] Every applied change is logged at info level with before/after values
 - [ ] Typecheck/lint passes
 

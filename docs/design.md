@@ -905,6 +905,7 @@ exposing them.
 
 ```
 iops_autoscaler_disk_provisioned_iops{disk,vm,class}          gauge
+iops_autoscaler_disk_proposed_target_iops{disk,vm,class}      gauge
 iops_autoscaler_disk_observed_iops{disk,vm,op}                gauge
 iops_autoscaler_disk_utilization_ratio{disk,vm}               gauge
 iops_autoscaler_disk_estimated_demand_iops{disk,vm}           gauge
@@ -913,7 +914,7 @@ iops_autoscaler_disk_saturated{disk,vm}                       gauge 0|1
 iops_autoscaler_decisions_total{action,reason}                counter
 iops_autoscaler_writes_total{path,outcome}                    counter   path=disk|vm
 iops_autoscaler_write_duration_seconds{path}                  histogram
-iops_autoscaler_vm_headroom_iops{vm}                          gauge
+iops_autoscaler_vm_headroom_iops{disk,vm}                     gauge
 iops_autoscaler_vm_cap_reached{vm}                            gauge 0|1
 iops_autoscaler_metric_source{disk,source}                    gauge  guest|platform
 iops_autoscaler_metric_staleness_seconds{disk}                gauge
@@ -923,6 +924,35 @@ iops_autoscaler_cost_delta_iops_hours{disk}                   counter
 iops_autoscaler_disk_discovery_skipped_total{alias,reason}    counter
 iops_autoscaler_budget_healthy                                gauge 0|1
 ```
+
+`disk_provisioned_iops` and `disk_proposed_target_iops` are deliberately separate series (issue #19):
+`RecordDecision` sets `disk_provisioned_iops` from `Decision.Current` — the value actually in effect —
+and `disk_proposed_target_iops` from `Decision.Target`, unconditionally, on every cycle including
+`NoAction` (where the two are equal). `disk_provisioned_iops` only ever moves again once a write is
+*verified* to have landed: `RecordAppliedIOPS`, called from `actuate()` after Actuator confirms the
+applied value (never for a dry run or a failed write), is the only other writer of that gauge. Before
+this split, `RecordDecision` set `disk_provisioned_iops` to `Decision.Target` directly — reporting a
+disk as already resized before `actuate()` had even run, and leaving it that way forever on a dry run
+or a failed write.
+
+`vm_headroom_iops` carries a `disk` label — the value (`Decision.VMHeadroomIOPS`, §4.6:
+`vm_iops_limit − p95_aggregate_iops_of_other_disks`) is inherently disk-relative, since "other disks"
+depends on which disk it's computed for; two disks on the same VM generally see different headroom.
+Reporting it under `{vm}` alone (pre-issue-#19) made whichever disk reconcile processed last silently
+overwrite every other disk's own figure.
+
+`vm_cap_reached` stays `{vm}`-only — unlike headroom, this really is one VM-wide fact — but is now set
+exactly once per reconcile cycle, via a separate `RecordVMCapReached(vmName, anyCapped)` call after
+every managed disk on that VM has been decided, where `anyCapped` is the OR across all of them.
+Previously `RecordDecision` set it per disk inside the loop, so whichever disk was decided last would
+silently overwrite an earlier disk's `ActionVMCapReached` — a VM where one disk capped and a
+later-processed disk did not could export `vm_cap_reached=0`.
+
+`metric_source{disk,source}` sets **both** the guest and platform series on every call — the active
+source's to 1, the other to 0 — rather than only ever setting the active one to 1. A `GaugeVec` only
+remembers series someone has `Set()`; setting just the active source left the previously active
+source's series stuck at 1 forever the moment a disk's source changed (relevant once Phase 2
+comparison/source switching, US-005b, exists).
 
 `disk_latency_baseline_seconds` has no `{op}` label, unlike `disk_observed_iops` — the baseline (§4.4) is
 one combined low-percentile over both read and write latencies, not tracked separately per operation

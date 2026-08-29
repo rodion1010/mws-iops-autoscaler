@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -49,6 +50,17 @@ func newTestAgent(t *testing.T, allowScaleDown bool, act actuator.Actuator) (*Ag
 		telemetry:      telemetry.NewRegistry(),
 		journal:        journal.NewWriter(discard{}),
 	}, tracker
+}
+
+// scrapeAgentTelemetry renders a's telemetry registry the same way the
+// real /metrics endpoint would, for tests that need to assert on exported
+// series rather than internal state.
+func scrapeAgentTelemetry(t *testing.T, a *Agent) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	a.telemetry.Handler().ServeHTTP(rec, req)
+	return rec.Body.String()
 }
 
 type discard struct{}
@@ -195,6 +207,62 @@ func TestActuate_successAdoptsAppliedValueImmediately(t *testing.T) {
 	}
 }
 
+// TestActuate_telemetry_successMovesProvisionedIOPS is issue #19's
+// verified-write scenario at the full actuate() level: only a write
+// actuate() itself confirms landed may move disk_provisioned_iops.
+func TestActuate_telemetry_successMovesProvisionedIOPS(t *testing.T) {
+	act := &recordingActuator{}
+	a, _ := newTestAgent(t, true, act)
+	a.managed = []registry.ManagedDisk{independentDisk()}
+
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.telemetry.RecordDecision(a.vmName, string(independentDisk().Disk.Class), d)
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	body := scrapeAgentTelemetry(t, a)
+	if !strings.Contains(body, `iops_autoscaler_disk_provisioned_iops{class="independent",disk="vm-1-data",vm="vm-1"} 2000`) {
+		t.Errorf("provisioned_iops did not move to the verified applied value after a successful write:\n%s", body)
+	}
+}
+
+// TestActuate_telemetry_dryRunNeverMovesProvisionedIOPS covers the dry-run
+// half of the same acceptance criterion — RecordDecision's own Current
+// value must be the only thing on the wire, never Target, and actuate()
+// must add nothing to it for a dry run.
+func TestActuate_telemetry_dryRunNeverMovesProvisionedIOPS(t *testing.T) {
+	act := &recordingActuator{}
+	a, _ := newTestAgent(t, true, act)
+	a.dryRun = true
+
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.telemetry.RecordDecision(a.vmName, string(independentDisk().Disk.Class), d)
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	body := scrapeAgentTelemetry(t, a)
+	if !strings.Contains(body, `iops_autoscaler_disk_provisioned_iops{class="independent",disk="vm-1-data",vm="vm-1"} 1000`) {
+		t.Errorf("provisioned_iops moved off Current for a dry run:\n%s", body)
+	}
+	if strings.Contains(body, `iops_autoscaler_disk_provisioned_iops{class="independent",disk="vm-1-data",vm="vm-1"} 2000`) {
+		t.Error("provisioned_iops reads the proposed target after a dry run — dry-run must never apply anything")
+	}
+}
+
+// TestActuate_telemetry_failedWriteNeverMovesProvisionedIOPS is the same
+// acceptance criterion's failed-write half.
+func TestActuate_telemetry_failedWriteNeverMovesProvisionedIOPS(t *testing.T) {
+	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
+	a, _ := newTestAgent(t, true, act)
+
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.telemetry.RecordDecision(a.vmName, string(independentDisk().Disk.Class), d)
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	body := scrapeAgentTelemetry(t, a)
+	if !strings.Contains(body, `iops_autoscaler_disk_provisioned_iops{class="independent",disk="vm-1-data",vm="vm-1"} 1000`) {
+		t.Errorf("provisioned_iops moved off Current after a failed write:\n%s", body)
+	}
+}
+
 func TestActuate_conflictNeverUpdatesManagedAndForcesRediscovery(t *testing.T) {
 	// issue #16: a concurrent-modification conflict must never write
 	// anything into a.managed (there is nothing verified to adopt), and
@@ -310,6 +378,76 @@ func TestReconcile_proceedsWhenDiscoveryFresh(t *testing.T) {
 	a.reconcile(context.Background())
 	if len(act.calls) != 1 {
 		t.Errorf("Actuator.Apply called %d times, want 1 — a fresh discovery snapshot must not be blocked", len(act.calls))
+	}
+}
+
+// perDiskDecider returns a fixed Decision per DiskID, looked up by the
+// caller — unlike fixedDecider, which returns the same action for every
+// disk, this lets a reconcile test give different disks different
+// verdicts in the same cycle (issue #19: vm_cap_reached must aggregate
+// across disks, not reflect only whichever was decided last).
+type perDiskDecider struct {
+	byDisk map[string]decider.Action
+}
+
+func (p perDiskDecider) Decide(diskID string, current int64, _ analyzer.Analysis, _ decider.VMState, _ decider.EffectivePolicy, _ decider.GuardrailState, _ time.Time) decider.Decision {
+	return decider.Decision{DiskID: diskID, Action: p.byDisk[diskID], Current: current}
+}
+
+// TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder is issue #19's
+// full-pipeline version of the telemetry-package aggregation test: two
+// managed disks, only one of which is VM-cap-blocked, in both possible
+// map/slice iteration orders — vm_cap_reached must read 1 either way, not
+// depend on which disk reconcile happens to process last.
+func TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder(t *testing.T) {
+	capped := registry.ManagedDisk{Disk: compute.StorageDisk{
+		Alias: "capped", DeviceName: "capped", Class: compute.ClassIndependent, DiskName: "vm-1-capped",
+	}}
+	fine := registry.ManagedDisk{Disk: compute.StorageDisk{
+		Alias: "fine", DeviceName: "fine", Class: compute.ClassIndependent, DiskName: "vm-1-fine",
+	}}
+	d := perDiskDecider{byDisk: map[string]decider.Action{
+		"vm-1-capped": decider.ActionVMCapReached,
+		"vm-1-fine":   decider.ActionNoAction,
+	}}
+
+	orders := [][]registry.ManagedDisk{
+		{capped, fine},
+		{fine, capped},
+	}
+	for i, order := range orders {
+		t.Run(fmt.Sprintf("order %d", i), func(t *testing.T) {
+			act := &recordingActuator{}
+			budget, err := state.LoadBudget(t.TempDir() + "/budget.jsonl")
+			if err != nil {
+				t.Fatalf("LoadBudget: %v", err)
+			}
+			sampler, err := metrics.NewSampler(emptySource{}, 10)
+			if err != nil {
+				t.Fatalf("NewSampler: %v", err)
+			}
+			a := &Agent{
+				vmName:               "vm-1",
+				allowScaleDown:       true,
+				maxDiscoveryAge:      time.Minute,
+				lastDiscoverySuccess: time.Now(),
+				managed:              order,
+				sampler:              sampler,
+				analyzer:             analyzer.NewWindowAnalyzer(),
+				decider:              d,
+				actuator:             act,
+				tracker:              state.NewTracker(budget),
+				telemetry:            telemetry.NewRegistry(),
+				journal:              journal.NewWriter(discard{}),
+				readiness:            &health.Readiness{},
+			}
+			a.reconcile(context.Background())
+
+			body := scrapeAgentTelemetry(t, a)
+			if !strings.Contains(body, `iops_autoscaler_vm_cap_reached{vm="vm-1"} 1`) {
+				t.Errorf("vm_cap_reached not aggregated to 1 (order: %v):\n%s", order, body)
+			}
+		})
 	}
 }
 
