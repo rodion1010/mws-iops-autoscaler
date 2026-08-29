@@ -42,6 +42,12 @@ So this is not a scope limitation. It is two write paths for the same logical op
 
 ## Decision
 
+> **Amended by ADR-009 (2026-08-29):** this ADR's "full spec round-trip" / "assert every other field
+> byte-identical" description of the dependent write and its Action Item 4 are superseded. The
+> dependent path sends a minimal partial body instead — every alias present (required, since Upsert
+> deletes an omitted collection element), but carrying nothing beyond its `name` except the target
+> alias's changed `iops`. The classification and routing decision below is unchanged.
+
 Support both. Classify each disk at discovery and route the write accordingly:
 
 | Class | Detection | Write path |
@@ -146,8 +152,9 @@ These are manageable with care; they are not reasons to exclude the majority of 
        cycle.
 2. [ ] Independent path: `UpdateDisk` with `spec.iops` only, plus idempotency key.
 3. [ ] Dependent path: read VM, mutate one disk entry, write back with `etag` and idempotency key.
-4. [ ] Assert on the dependent path that every field other than the target `iops` round-trips
-       unchanged; abort the write if not.
+4. [x] ~~Assert on the dependent path that every field other than the target `iops` round-trips
+       unchanged; abort the write if not.~~ Superseded by ADR-009: those fields are never sent for an
+       untouched entry, so there is nothing to round-trip or assert on.
 5. [ ] Add a concurrent-modification test for the dependent path specifically.
 6. [ ] Surface a *recommendation* to convert dependent disks to independent, with the one-way and
        deletion-semantics caveats stated. Never convert automatically.

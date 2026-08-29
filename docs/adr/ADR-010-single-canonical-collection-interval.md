@@ -1,0 +1,110 @@
+# ADR-010: One canonical sampling cadence; window readiness is timestamp-based
+
+**Status:** Accepted
+**Date:** 2026-08-29
+**Deciders:** Product Lead (NBS)
+**Amends:** the schema shape described in `docs/configuration.md` §2/§3 (an example, not yet a
+shipped field — no released config has used `evaluation.collection_interval`)
+
+## Context
+
+The config schema carried `collection_interval` in two places: `policy.advanced.evaluation`
+(inheritable per VM or per disk) and `runtime.metrics` (one process-wide value). `Resolve` kept both
+as independent values — nothing reconciled them, and nothing could, because the architecture only
+supports one.
+
+`internal/metrics.Sampler` (M2, already built) is constructed once per process and ticks a single
+`MetricSource.Sample(ctx, disks []DiskRef)` call that returns every managed disk's sample for that
+tick in one round — `local` mode reads `/proc/diskstats` once, `fleet` mode makes one Prometheus
+export call per project (design.md §4.2: "`fleet` sampling is per-project, not per-disk: one HTTP
+call yields every disk in the project"). There is no per-disk timer and no path to add one without a
+different collection architecture entirely — sampling one disk on its own schedule would mean either
+one goroutine and one HTTP/file read per disk (defeats the whole point of a project-wide export call)
+or accepting that a "per-disk interval" is actually just a per-disk filter applied to samples still
+collected on the one real cadence, which is a different feature wearing the same field name.
+
+So a `policy.advanced.evaluation.collection_interval` override was never implementable as written —
+setting it on a disk would silently do nothing, since nothing downstream reads that value on a
+per-disk basis. That's a worse failure mode than not offering the field at all: a config that looks
+like it does something and doesn't.
+
+Separately, `internal/metrics.NewSampler(source, capacity)` sizes its ring buffer by a raw sample
+*count* ("capacity is the caller's responsibility to size — typically the longest configured window
+divided by the collection interval"), and the not-yet-built Analyzer's `window_not_full(disk)` check
+(design.md §4.3) was implicitly going to be count-based too. A count-based readiness check is
+correct only as long as every sample was actually collected at the assumed interval — a missed tick,
+a slow scrape, or (had the per-policy field been honored) a genuinely different cadence per disk would
+silently under- or over-count how much real time a "full" window represents. `Sample.Timestamp`
+already carries the metric's own timestamp (design.md §5.2: "metric timestamp, not wall clock"), so
+the information needed for a correct check already exists and was simply unused for this purpose.
+
+## Decision
+
+**`runtime.metrics.collection_interval` is the only sampling-cadence field.**
+`policy.advanced.evaluation.collection_interval` is removed from the schema — not deprecated, not
+defaulted, removed — so setting it is rejected by strict decoding as an unknown key, the same
+treatment every other superseded field gets (`device:`/`disk_id:`, ADR-004).
+`policy.advanced.evaluation` keeps `scale_up_window` and `scale_down_window`, which are genuinely
+per-policy: how much history a decision needs, not how often it's collected.
+
+**Window readiness is computed from `Sample.Timestamp` span, not a sample count.** "Window full" for
+a given check means the buffered samples for that disk span at least the configured window duration,
+measured `newest.Timestamp - oldest.Timestamp`, not `len(samples) >= window / collection_interval`.
+This makes readiness correct regardless of tick jitter, missed samples, or scrape latency, and removes
+the last reason a per-policy cadence might have seemed necessary.
+
+## Options Considered
+
+### Option A: Keep both fields, document that the policy-level one wins
+
+Rejected. There is no mechanism by which it *could* win — the Sampler has no per-disk schedule to
+change. Documenting a field as authoritative when nothing reads it that way is worse than removing it.
+
+### Option B: Make the Sampler actually support per-disk cadence
+
+Rejected for Phase 1. It would mean either abandoning the one-call-per-project efficiency `fleet`
+sampling depends on, or building a per-disk filter that *pretends* to be a different cadence while
+still collecting on the real one — which is Option A's problem again, just moved into the Sampler
+instead of the config layer. Nothing in the PRD (FR-13's tunable list has no per-disk collection
+interval) or the observed platform behavior (30 s publication interval is fixed and shared across a
+whole project) motivates this cost. Revisit only if a future disk genuinely needs a materially
+different scrape cadence than its siblings — not requested anywhere today.
+
+### Option C: One field, count-based window readiness (chosen field, rejected readiness model)
+
+Removing the duplicate field alone would fix the "two sources of truth" problem but leave the
+count-based `window_not_full` check silently wrong whenever real cadence doesn't match the configured
+one — which becomes more likely, not less, once there is exactly one authoritative interval that
+every disk is assumed to hit on the dot. Timestamp-based readiness costs nothing (the field already
+exists on `Sample`) and removes an entire class of "window said full, wasn't really" bugs.
+
+### Option D: One field, timestamp-based readiness (chosen)
+
+## Consequences
+
+**Easier**
+- One config field to reason about (`runtime.metrics.collection_interval`), matching what the Sampler
+  actually does.
+- `window_not_full` is correct under tick jitter, missed samples, or a future scrape source with its
+  own irregular cadence, with no extra bookkeeping.
+- Removes a field that would have silently done nothing if set — a class of config bug design can
+  eliminate for free before it ships.
+
+**Harder**
+- None identified: no code outside this package read the removed field (grepped before removing it),
+  and the not-yet-built Analyzer picks up the timestamp-based rule as its original design instead of
+  needing a later correction.
+
+**Revisit when**
+- A real requirement for per-disk sampling cadence appears (Option B) — with a concrete reason, not a
+  config field carried over from an earlier draft.
+
+## Action Items
+
+1. [x] Remove `EvaluationSpec.CollectionInterval` (`internal/config/types.go`).
+2. [x] Remove `ResolvedAdvanced.CollectionInterval` and its resolution in `applyAdvancedOverride`
+       (`internal/config/defaults.go`, `resolve.go`).
+3. [x] Confirm strict decoding rejects `evaluation.collection_interval` as an unknown key
+       (`internal/config/load_test.go`).
+4. [ ] When the Analyzer (M3) implements `window_not_full`, compute it from `Sample.Timestamp` span
+       against `policy.advanced.evaluation.scale_up_window` / `scale_down_window` — not a count.

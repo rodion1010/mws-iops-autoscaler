@@ -11,15 +11,20 @@ PRD's requirements — it does not define them.
 
 ## 1. Principles
 
-**Presets, not knobs.** The user-facing surface is a preset name plus limits plus disk selection.
-Controller internals stay adjustable without breaking anyone's config.
+**One validated default, not a choice of knobs.** Phase 1 ships a single built-in parameter set
+(§3) — there is no preset name to pick. The user-facing surface is limits plus disk selection.
+Controller internals stay adjustable (`advanced`) without breaking anyone's config.
+
+Named presets (`balanced` / `performance` / `cost`) are deferred past the MVP — see ADR-006. This
+section described three from the first draft; the `performance` one turned out to violate the
+`cooldown.scale_up > scale_up_window` rule in §8 once that rule was actually implemented, and rather
+than keep three tables mutually consistent under every future rule, Phase 1 ships one.
 
 **Inheritance, not repetition.** Policy is declared once and overridden where it differs.
 
 **v1 user-facing fields:**
 
 ```yaml
-preset
 limits.min_iops
 limits.max_iops
 disks (selection)
@@ -33,8 +38,6 @@ Everything under `advanced` is experimental and API-only until telemetry justifi
 
 ```yaml
 policy:
-  preset: balanced           # balanced | performance | cost
-
   limits:
     min_iops: 1000           # never below platform min 1000
     max_iops: 10000          # never above platform max 10000
@@ -43,12 +46,13 @@ policy:
     enabled: false           # opt-in; unsupported unless set
 
     evaluation:
-      collection_interval: 10s
+      # No collection_interval here — sampling cadence is process-wide,
+      # set once by runtime.metrics.collection_interval below (ADR-010).
       scale_up_window: 5m
       scale_down_window: 30m
 
     saturation:
-      iops_utilization_threshold: 0.98   # GATE, not a trigger
+      utilization_threshold: 0.98        # GATE, not a trigger — IOPS or bandwidth, whichever is higher (ADR-008)
       queue_depth_threshold: 1
       latency:
         mode: relative                   # relative | absolute (absolute unimplemented in v1)
@@ -78,7 +82,7 @@ policy:
 |---|---|
 | `limits.min_iops` | Floor. 1000 is included in the disk's base price, so going lower is impossible and would save nothing. |
 | `limits.max_iops` | User ceiling. Clamped to 10000 and further to `3000 × vCPU` at runtime — **the platform does not enforce the VM cap**, the agent does. |
-| `saturation.iops_utilization_threshold` | Precondition only. A disk below it cannot be limit-starved, so signal checks are skipped. Never triggers a change on its own. |
+| `saturation.utilization_threshold` | Precondition only, checked against **whichever of IOPS or bandwidth utilization is higher** (ADR-008) — a disk below it on both cannot be limit-starved, so signal checks are skipped. Never triggers a change on its own. |
 | `saturation.queue_depth_threshold` | Units differ by source: operations in `local`, bytes in `fleet`. The agent will not compare across units. |
 | `saturation.latency.baseline_multiplier` | Relative to the disk's own baseline. An absolute threshold is wrong for everyone; acceptable latency is workload-specific. |
 | `target.scale_up_utilization` | Applied to estimated demand *after* saturation is confirmed: `target = demand / 0.85`. |
@@ -89,37 +93,29 @@ policy:
 
 ---
 
-## 3. Presets
+## 3. Default parameter set
+
+Phase 1's one built-in `advanced` value set — what `policy.advanced` resolves to when nothing
+overrides it (ADR-006):
 
 ```yaml
-presets:
-  balanced:                              # platform default
-    evaluation:  {scale_up_window: 5m,  scale_down_window: 30m}
-    saturation:  {iops_utilization_threshold: 0.98, queue_depth_threshold: 1,
-                  latency: {mode: relative, baseline_multiplier: 1.5}}
-    target:      {scale_up_utilization: 0.85, scale_down_utilization: 0.70}
-    cooldown:    {scale_up: 5m,  scale_down: 30m}
-    step:        {min_change_iops: 200, max_scale_up_ratio: 2.0, max_scale_down_ratio: 0.5}
-
-  performance:                           # earlier up, slower down, more headroom
-    evaluation:  {scale_up_window: 2m,  scale_down_window: 60m}
-    saturation:  {iops_utilization_threshold: 0.95, queue_depth_threshold: 1,
-                  latency: {mode: relative, baseline_multiplier: 1.25}}
-    target:      {scale_up_utilization: 0.75, scale_down_utilization: 0.60}
-    cooldown:    {scale_up: 3m,  scale_down: 60m}
-    step:        {min_change_iops: 200, max_scale_up_ratio: 2.0, max_scale_down_ratio: 0.75}
-
-  cost:                                  # later up, tighter fit, faster down
-    evaluation:  {scale_up_window: 10m, scale_down_window: 20m}
-    saturation:  {iops_utilization_threshold: 1.00, queue_depth_threshold: 2,
-                  latency: {mode: relative, baseline_multiplier: 2.0}}
-    target:      {scale_up_utilization: 0.90, scale_down_utilization: 0.80}
-    cooldown:    {scale_up: 10m, scale_down: 20m}
-    step:        {min_change_iops: 300, max_scale_up_ratio: 1.5, max_scale_down_ratio: 0.5}
+evaluation:  {scale_up_window: 5m,  scale_down_window: 30m}
+saturation:  {utilization_threshold: 0.98, queue_depth_threshold: 1,
+              latency: {mode: relative, baseline_multiplier: 1.5}}
+target:      {scale_up_utilization: 0.85, scale_down_utilization: 0.70}
+cooldown:    {scale_up: 5m,  scale_down: 30m}
+step:        {min_change_iops: 200, max_scale_up_ratio: 2.0, max_scale_down_ratio: 0.5}
+budget:      {max_changes_per_24h: 48}
 ```
 
-Note `cost` uses a `scale_down_window` (20m) shorter than `balanced` (30m) — it reclaims idle capacity
-sooner, accepting more risk of scaling down before a lull ends.
+This is not user-facing syntax — it is never written under a `presets:` key in a config file. An
+operator overrides individual fields through `policy.advanced` (opt-in, `advanced.enabled: true`),
+not by naming a preset.
+
+A `performance`-leaning set (earlier up, slower down, more headroom) and a `cost`-leaning set (later
+up, tighter fit, faster down) were drafted alongside this one and are recorded in ADR-006 for when
+presets are reintroduced — post-MVP, they are not implemented, and the draft `performance` numbers
+were never valid: `cooldown.scale_up: 3m` against `scale_up_window: 2m` violates §8's own rule.
 
 ---
 
@@ -174,7 +170,7 @@ disks:
     - device_name: datadisk
     - device_name: logdisk
       policy:
-        preset: performance
+        limits: {min_iops: 3000, max_iops: 10000}
 ```
 
 `exclude` is a plain list of device names. `selected` entries are mappings, because each one may
@@ -216,7 +212,6 @@ kind: IOPSAutoScaler
 mode: local
 
 policy:
-  preset: balanced
   limits: {min_iops: 1000, max_iops: 10000}
 
 disks:
@@ -230,6 +225,7 @@ runtime:
     collection_interval: 10s
   controller:
     reconcile_interval: 30s
+    discovery_interval: 5m
 ```
 
 ### 6.2 Local, per-disk policies
@@ -240,7 +236,6 @@ kind: IOPSAutoScaler
 mode: local
 
 policy:
-  preset: balanced
   limits: {min_iops: 1000, max_iops: 10000}
 
 disks:
@@ -250,17 +245,18 @@ disks:
 
     - device_name: logdisk
       policy:
-        preset: performance
         limits: {min_iops: 3000, max_iops: 10000}
 
     - device_name: backupdisk
       policy:
-        preset: cost
         limits: {min_iops: 1000, max_iops: 6000}
+        advanced:
+          enabled: true
+          step: {min_change_iops: 300}   # cost-sensitive disk: fewer, larger changes
 
 runtime:
   metrics:   {source: guest, collection_interval: 10s}
-  controller: {reconcile_interval: 30s}
+  controller: {reconcile_interval: 30s, discovery_interval: 5m}
 ```
 
 ### 6.3 Fleet, project → VM → disk
@@ -272,7 +268,6 @@ mode: fleet
 
 project:
   policy:
-    preset: balanced
     limits: {min_iops: 1000, max_iops: 10000}
 
   instances:
@@ -281,14 +276,13 @@ project:
 
     overrides:
       - instance: database-01
-        policy: {preset: performance}
+        policy: {limits: {min_iops: 3000}}
         disks:
           mode: selected
           selected:
             - device_name: db-data
             - device_name: db-wal
               policy:
-                preset: performance
                 limits: {min_iops: 5000, max_iops: 10000}
 
       - instance: worker-01
@@ -298,7 +292,6 @@ project:
 
       - instance: batch-01
         policy:
-          preset: cost
           limits: {max_iops: 5000}
 
 metrics:
@@ -306,13 +299,14 @@ metrics:
   collection_interval: 30s     # matches the platform publication interval
 controller:
   reconcile_interval: 30s
+  discovery_interval: 5m
 ```
 
 ---
 
 ## 7. Guardrails the user cannot override
 
-Regardless of preset or override:
+Regardless of the default parameter set or any override:
 
 - disk IOPS min (1000) and max (10000) — enforced by the platform, and again by the agent
 - **VM aggregate cap `3000 × vCPU`** — *not* enforced by the platform; the agent is the only guard
@@ -330,10 +324,18 @@ value, and maintenance windows.
 
 `--validate-config` must reject, with a message naming the field:
 
+- `apiVersion` anything other than `autoscaling.mws.cloud/v1alpha1`
+- `kind` anything other than `IOPSAutoScaler` for `mode: local` (`IOPSAutoScalerFleet` is §6.3's
+  fleet-mode kind, unreachable here since `mode: local` is required in this build)
+- more than one YAML document in the file (a second `---`-separated document is silently dropped by
+  a naive single-document decode, not merged or rejected)
+- `disks.mode` anything other than `auto-discovery` or `selected`
+- `mode: auto-discovery` with `disks.selected` set, or `mode: selected` with `disks.exclude` set —
+  each field belongs to exactly one strategy (§4.2)
+- `mode: selected` with an empty `disks.selected` list
 - `min_iops < 1000` or `max_iops > 10000`
 - `min_iops > max_iops`
 - any IOPS value not a multiple of 100
-- unknown preset name
 - unknown keys anywhere (typos must fail loudly, not be ignored) — this is what rejects the
   superseded `device:` and `disk_id:` selectors
 - a disk identified by a kernel device path (`/dev/vdb`, `/dev/sdb`) instead of `device_name`
@@ -344,3 +346,19 @@ value, and maintenance windows.
 - `mode: fleet` with `metrics.source: guest` (impossible — no guest access)
 - `scale_down_window < scale_up_window` (a scale-down faster than scale-up invites flapping)
 - `cooldown.scale_up > scale_up_window` (the agent could never act)
+- `cooldown.scale_down > scale_down_window` (same reason, and it's what keeps a restarted agent's
+  in-memory cooldown loss safe — ADR-013)
+- `advanced.evaluation.scale_up_window` or `scale_down_window` ≤ 0, or a `cooldown` duration < 0
+- `advanced.evaluation.collection_interval` — removed from the schema (ADR-010); rejected as an
+  unknown key like any other superseded field
+- `saturation.utilization_threshold`, `target.scale_up_utilization`, or `target.scale_down_utilization`
+  outside `(0, 1]`
+- `saturation.queue_depth_threshold` < 0
+- `saturation.latency.mode` anything other than `relative` or `absolute`
+- `saturation.latency.baseline_multiplier` ≤ 0
+- `step.min_change_iops` ≤ 0 or not a multiple of 100
+- `step.max_scale_up_ratio` ≤ 1 (it would never actually scale up)
+- `step.max_scale_down_ratio` outside `(0, 1)`
+- `budget.max_changes_per_24h` ≤ 0
+- any `runtime.metrics.collection_interval`, `runtime.controller.reconcile_interval`, or
+  `runtime.controller.discovery_interval` ≤ 0

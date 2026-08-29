@@ -171,6 +171,14 @@ Also note `deviceName` differs by location: `spec.storage.disks[].deviceName` = 
 `status.storage.disks[].deviceName` = `mws-datadisk`. The status form matches the metric label and
 the `/dev/disk/by-id/` path.
 
+**The VM update operation has no dry-run.** `UpdateVirtualMachineRequest` in `go.mws.cloud/go-sdk`
+carries no `ValidateOnly` field — grepped the whole generated file, zero hits — unlike
+`UpdateDiskRequest`, which has one. The SDK is generated from MWS's own OpenAPI spec, so this reflects
+an absent query parameter on the operation itself, not an SDK gap. Verified against the generated SDK
+source (`v0.19.0`), not yet against a live response in this project — the dependent-disk write path
+(`vm update --storage-disks`) therefore has no server-confirmed dry run the way the independent path
+does. See ADR-007.
+
 ### The VM ceiling is NOT enforced [V]
 
 On a `base-2-8` (2 vCPU → pool `3000 × 2 = 6000`), an attached independent disk accepted every value

@@ -37,6 +37,14 @@ Scale up only on **confirmed saturation**: utilization near the limit **as a pre
 least one independent saturation signal, sustained over a window. Compute the target from observed
 demand and a target utilization, not by stepping a percentage.
 
+> **Amended by ADR-008.** "Utilization near the limit" here was written, and first implemented in
+> `design.md`, as IOPS utilization alone. A large-block, throughput-heavy workload saturates NBS-PL2's
+> bandwidth ceiling well before it saturates IOPS count, so an IOPS-only precondition misses it
+> entirely — confirmed against this project's own bandwidth-bound E2E scenario, which the IOPS-only
+> gate could never reach. The precondition now checks whichever of IOPS or bandwidth utilization is
+> higher; the principle this ADR is actually about — utilization alone, on any resource, never
+> triggers a change — is unchanged.
+
 The objective is:
 
 ```
@@ -142,6 +150,11 @@ API happily accepts 10000 IOPS on a VM that can deliver 6000, and bills for it.
 `performance`, `cost` — and the underlying values can be recalibrated without breaking anyone.
 Advanced overrides exist but are opt-in.
 
+> **Amended by ADR-006.** Phase 1 ships the `balanced` values as the one built-in default — no preset
+> *choice* until there is a reason to choose between tunings. `performance` and `cost` are deferred,
+> not abandoned: implementing §8's cross-field validation found `performance`'s own numbers violated
+> it, which is what triggered shipping one validated set instead of three.
+
 ## Consequences
 
 **Easier**
@@ -174,6 +187,13 @@ Thresholds cannot be validated by reasoning, so the rollout is staged:
 3. **Bidirectional** — add conservative scale-down.
 4. **Predictive** — only once there is history worth predicting from.
 
+> **Amended by ADR-005.** Steps 1 and 2 above are no longer separate *releases* — scale-up actuation
+> ships in the MVP itself, with observe-only (`--dry-run`) kept as the validation an operator runs
+> before flipping to live, not a release gate. Steps 3 and 4 are unaffected: bidirectional still
+> follows scale-up-only, and predictive is still out of scope for v1 entirely. The calibration
+> purpose of observe-only (this section's whole point) is unchanged — only its packaging as a
+> separate numbered release is revised.
+
 ## Action Items
 
 1. [ ] Implement saturation detection with utilization as a gate, not a trigger.
@@ -182,4 +202,5 @@ Thresholds cannot be validated by reasoning, so the rollout is staged:
 4. [ ] Implement dynamic `vm_headroom` from sibling p95, not provisioned limits.
 5. [ ] Implement the `VM_IOPS_CAP_REACHED` state as a first-class outcome, not an error.
 6. [ ] Ship observe-only first; treat every default as unvalidated until it has run.
-7. [ ] Define `balanced` / `performance` / `cost` presets as the only default-facing surface.
+7. [ ] ~~Define `balanced` / `performance` / `cost` presets as the only default-facing surface.~~
+   Superseded by ADR-006: ship `balanced`'s values as the one default; presets deferred.

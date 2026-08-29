@@ -54,6 +54,8 @@ reproducible and reviewable.
 
 **Acceptance Criteria:**
 - [ ] YAML config with schema validation; unknown keys are an error, not silently ignored
+- [ ] `apiVersion`/`kind` are checked against the values this build supports, and a second
+      `---`-separated document in the same file is rejected rather than silently dropped
 - [ ] Every tunable in FR-13 is settable; omitted values fall back to documented defaults
 - [ ] `--validate-config` exits non-zero with a human-readable message on invalid input
 - [ ] Secrets (IAM token, API key) are read from env or file path, never inline in the config
@@ -113,14 +115,17 @@ opt in broadly or narrowly.
       silently land on the wrong disk). Written unprefixed; `(instance, device_name)` is the key in
       fleet mode, where selectors nest under their instance. See ADR-004
 - [ ] `--validate-config` rejects a kernel device path, a prefixed `mws-` name, a duplicate
-      `device_name` within one VM's list, and a `device_name` matching no discovered disk
+      `device_name` within one VM's list, a `device_name` matching no discovered disk, an unrecognized
+      strategy name, and the exclusion/selection list belonging to the wrong strategy (e.g. `explicit`
+      with an `all_except`-style exclusion list set)
 - [ ] Strategy is settable globally and overridable per VM
 - [ ] Continuous rediscovery interval is configurable; new disks enter management without restart
 - [ ] Typecheck/lint passes
 
 ### US-005: Metric source — platform monitoring API
-**Description:** As the decider, I need disk metrics from the MWS monitoring API so that fleet mode
-works without touching guests.
+**Description:** As the decider, I need disk metrics from the MWS monitoring API. `fleet` mode
+requires this source exclusively (no guest access); `local` mode can opt into it too (ADR-001), which
+is how it gets validated before `fleet` depends on it with no fallback (US-005b).
 
 **Acceptance Criteria:**
 - [ ] Fetches from `monitoring.mwsapis.ru` using the API key and `monitoring.metricExporter` role
@@ -149,6 +154,24 @@ the moment they start working, without a rewrite, because the NBS team has commi
       fix ships, revisit — an idle disk will legitimately report 0
 - [ ] Typecheck/lint passes
 
+### US-005b: Metric source comparison (shadow) mode
+**Description:** As an operator, I want `local` mode to run platform metrics alongside guest metrics,
+with the platform side never driving actuation, so that I can see how much the two sources disagree
+on real load before `fleet` mode has to depend on the platform source with no guest fallback at all.
+
+**Acceptance Criteria:**
+- [ ] `local` mode can enable `GuestSource` and `PlatformSource` concurrently; `GuestSource` remains
+      the only one eligible for actuation regardless of this mode's setting
+- [ ] Each source keeps its own window state and latency baseline — the two are not portable
+      (ADR-001) — and is analyzed and decided independently
+- [ ] Both `Decision`s are recorded in the decision journal every cycle, tagged by source, whether or
+      not actuation is enabled
+- [ ] Divergence — a different `Action`, or a `Target` differing by more than a configurable
+      threshold — is surfaced as its own log line and metric, not left for a human to diff by hand
+- [ ] Comparison mode is the one case where `local` mode needs the `monitoring.metricExporter` role;
+      documented against US-016
+- [ ] Typecheck/lint passes
+
 ### US-006: Metric source — local `/proc/diskstats`
 **Description:** As the decider in `local` mode, I want guest statistics as the **primary** source,
 because they need no metrics credential, cross no network, and carry signals the platform lacks.
@@ -156,8 +179,11 @@ because they need no metrics credential, cross no network, and carry signals the
 **Acceptance Criteria:**
 - [ ] Guest is the **default** source in `local` mode; the platform source is opt-in (ADR-001)
 - [ ] Reads `/proc/diskstats` at a configurable interval
-- [ ] Derives ops/s, throughput, queue depth **in operations for both reads and writes**, and
-      service time per device — none of which the platform exposes
+- [ ] Derives ops/s and throughput **split by read and write**, plus queue depth in operations (a
+      single combined value — `/proc/diskstats`' time-in-queue field is not split by direction at
+      the kernel level, so this is one number covering both, still an improvement over the
+      platform's byte-denominated one) and average service time per device — none of which the
+      platform exposes
 - [ ] Detects throttling directly: served ≈ provisioned limit **and** queue sustained above zero
 - [ ] Values are attributed to the correct cloud disk via the US-002 mapping
 - [ ] Requires **no** monitoring API key and no `monitoring.metricExporter` role
@@ -171,6 +197,11 @@ single noisy sample cannot trigger a change.
 **Acceptance Criteria:**
 - [ ] Maintains a rolling window of samples per disk; window length configurable per direction
 - [ ] Computes configurable percentiles over the window, not just means
+- [ ] Latency percentile computation is not uniform across metric source: `guest` always windows
+      per-interval averages (its only capability); `platform` computes a real quantile from its
+      exported latency histogram when one is fresh, falling back to the same windowed-average method
+      otherwise — the same present-and-fresh fallback pattern US-005a uses for utilization and queue
+      depth. Which method produced a given verdict is recorded, not silently uniform (ADR-011)
 - [ ] Refuses to emit a verdict until the window holds a minimum sample count
 - [ ] Window state survives nothing — a restart starts a fresh window and scales nothing until full
 - [ ] Typecheck/lint passes
@@ -180,11 +211,19 @@ single noisy sample cannot trigger a change.
 spikes do not throttle.
 
 **Acceptance Criteria:**
-- [ ] Utilization is a **gate, not a trigger**: at or above `saturation.iops_utilization_threshold`
-      the disk *may* be starved; below it, it cannot be, and the signal checks are skipped
+- [ ] Utilization is a **gate, not a trigger**: at or above `saturation.utilization_threshold` on
+      **either IOPS or bandwidth utilization** (ADR-008 — NBS-PL2's fixed IOPS-to-bandwidth ratio
+      means a large-block workload saturates bandwidth well before it saturates IOPS count, so
+      gating on IOPS alone would miss it) the disk *may* be starved; below both, it cannot be, and
+      the signal checks are skipped
 - [ ] Triggers only on confirmed saturation — queue depth at/above threshold, **or** p95 latency
       above the disk's own baseline × `baseline_multiplier`, **or** throttling detected — sustained
       over `scale_up_window`
+- [ ] A disk saturated since the agent's first sample still reaches a scale-up decision — the queue
+      depth and throttling signals need no latency baseline, and the baseline itself seeds from the
+      first full window regardless of saturation (only *updates* to an established baseline are
+      frozen during saturation, not its initial establishment); no blanket "wait for baseline" gate
+      may block every signal indefinitely (ADR-012)
 - [ ] A disk at 100% utilization with flat latency and an empty queue is efficient and **must not**
       be scaled up
 - [ ] Target is computed from estimated demand: `demand / target.scale_up_utilization`, not by
@@ -239,10 +278,13 @@ unused headroom.
 **Description:** As the agent, I need to change IOPS on a VM-owned disk, which the disk API refuses.
 
 **Acceptance Criteria:**
-- [ ] Reads the VM, capturing `etag`
-- [ ] Mutates exactly one entry in `spec.storage.disks[]`, resending `diskType` and `size` unchanged
-- [ ] Asserts every other field is byte-identical to what was read; aborts the write if not
-- [ ] Sends `etag` and an idempotency key; an etag conflict aborts and retries next cycle, never forces
+- [ ] Reads the VM, capturing `etag` and every disk's alias
+- [ ] Sends a minimal partial body: every alias present (Upsert deletes an omitted collection element),
+      but carrying nothing beyond `name` except the target alias's new `iops` — immutable fields
+      (`boot`/`deviceName`/`diskType`/`size`) are never resent, since the API accepts them omitted
+      entirely (ADR-009)
+- [ ] Sends `etag` and an idempotency key; refuses to write with an empty etag; an etag conflict
+      aborts and retries next cycle, never forces
 - [ ] Verifies the applied value from the response
 - [ ] Covered by a concurrent-modification test
 - [ ] Typecheck/lint passes
@@ -253,6 +295,11 @@ unused headroom.
 **Acceptance Criteria:**
 - [ ] Per-disk cooldown enforced separately for up and down
 - [ ] Rolling 24 h change budget per disk; exhausting it logs a warning and blocks further changes
+- [ ] The budget is a genuine hard cap: its per-disk change record survives a process restart, so
+      restarting cannot be used — deliberately or by routine redeploys/crash loops — to bypass it.
+      Cooldowns may reset in memory on restart; this is safe because `--validate-config` requires
+      each cooldown ≤ its paired window, so the cold-start wait after a restart is never shorter than
+      the cooldown it forgot (ADR-013)
 - [ ] Budget and cooldowns are configurable
 - [ ] Typecheck/lint passes
 
@@ -261,11 +308,15 @@ unused headroom.
 
 **Acceptance Criteria:**
 - [ ] `--dry-run` performs discovery, metric collection, and decisions but applies no change
-- [ ] Each decision is sent with **`ValidateOnly=true`**, so the platform runs its real validation
-      (bounds, 100-IOPS step, permissions) without mutating — a dry run that catches genuine
-      rejections rather than only printing intent
-- [ ] Prints each decision with the values that drove it, the resulting IOPS delta, and the
-      platform's validation verdict
+- [ ] **Independent disks:** each decision is sent with `ValidateOnly=true` (`UpdateDisk` supports
+      it), so the platform runs its real validation (bounds, 100-IOPS step, permissions) without
+      mutating — a dry run that catches genuine rejections rather than only printing intent
+- [ ] **Dependent disks:** no equivalent exists — `UpdateVirtualMachine` has no `validateOnly` (ADR-007).
+      The report states the computed decision and the agent's own client-side checks (range, step,
+      VM pool guard), and is labelled as such — not presented as a server-confirmed verdict
+- [ ] Prints each decision with the values that drove it, the resulting IOPS delta, and — per disk —
+      either the platform's validation verdict (independent) or "computed, not server-checked"
+      (dependent)
 - [ ] Exits cleanly after a configurable number of evaluation cycles
 - [ ] Typecheck/lint passes
 
@@ -279,15 +330,22 @@ unused headroom.
 - [ ] Every applied change is logged at info level with before/after values
 - [ ] Typecheck/lint passes
 
-### US-015: Packaging
-**Description:** As an operator, I want to install the agent in either mode without fighting
-dependencies.
+### US-015: Packaging — binary
+**Description:** As an operator, I want to install the agent on a VM without fighting dependencies.
 
 **Acceptance Criteria:**
 - [ ] Single statically linked Go binary, no runtime dependencies in the guest
 - [ ] systemd unit file provided
 - [ ] `.deb` package build target
-- [ ] Container image for fleet mode
+- [ ] Typecheck/lint passes
+
+### US-015a: Packaging — container image
+**Description:** As an operator running `fleet` mode, I want a container image, because a central
+controller is naturally run that way rather than installed on a host.
+
+**Acceptance Criteria:**
+- [ ] Container image, built from the same static binary as US-015
+- [ ] Documented deployment example against the test environment (`CLAUDE.md`, "Test environment")
 - [ ] Typecheck/lint passes
 
 ---
@@ -297,7 +355,9 @@ dependencies.
 needs, per mode, so that I do not have to grant it broad rights.
 
 **Acceptance Criteria:**
-- [ ] README documents the minimum role set for `local` mode and for `fleet` mode separately
+- [ ] README documents the minimum role set for `local` mode and for `fleet` mode separately, and
+      notes that `local` mode needs the `monitoring.metricExporter` role only when comparison mode
+      (US-005b) is enabled — otherwise it needs no metrics credential at all
 - [ ] Documents the read-only subset for running with `--dry-run`, so the agent can be evaluated
       before it is trusted to write
 - [ ] Startup performs a permission preflight: verifies it can list disks, read the VM type, and
@@ -337,7 +397,7 @@ needs, per mode, so that I do not have to grant it broad rights.
   the documented `spec.disks.totalIops` is `null` on every type and cannot be used. The disk-level
   half (1000–10000, step 100) is enforced server-side, but the VM-pool half is not (FR-15c), so this
   check cannot be delegated to request validation.
-- FR-13: The following must be configurable, with the defaults in §6: window length, percentile,
+- FR-13: The following must be configurable, with the defaults in §7: window length, percentile,
   utilization threshold, step, and cooldown — each independently for up and down; plus floor,
   ceiling override, discovery interval, and 24 h change budget.
 - FR-14: When a disk is saturated and the VM pool (`3000 × vcpuCount`) is also saturated, the agent must
@@ -350,9 +410,10 @@ needs, per mode, so that I do not have to grant it broad rights.
   with `400`. The agent must still clamp and round locally — to avoid wasting a round trip, and
   because the OpenAPI schema declares no bounds, so this validation is server behaviour rather than
   a contract.
-- FR-15d: Dependent disks are written through `vm update --storage-disks`: read the VM, mutate one
-  entry, resend with `etag` and an idempotency key, and assert every other field round-trips
-  unchanged. Independent disks use the single-field disk path (FR-15).
+- FR-15d: Dependent disks are written through `vm update --storage-disks`: read the VM, then send a
+  minimal partial body — every current alias present (an omitted collection element is deleted by
+  Upsert), carrying nothing but `name` except the target alias's new `iops` — with `etag` and an
+  idempotency key (ADR-009). Independent disks use the single-field disk path (FR-15).
 - FR-15b: A disk **owned** by its VM (created inside the VM spec; `metadata.usages` contains `own`)
   cannot be modified through the disk API — the platform returns `403` naming the VM resource. This
   is an ownership constraint, not a permissions one: an independent disk attached by `ref` to the
@@ -418,25 +479,116 @@ needs, per mode, so that I do not have to grant it broad rights.
 - **Predictive or ML-driven scaling.** The dynamic range is only 10×; a reactive state machine is
   sufficient.
 - **A UI.** Configuration is a file; observation is logs and Prometheus metrics.
-- **Managing dependent disks in MVP.** They require a full read-modify-write through the VM object
-  and are deferred (see OQ-3).
 
 ---
 
-## 6. Default Configuration
+## 6. Release Phases
 
-The user-facing surface is a **preset**, plus limits, plus disk selection. Controller internals are
-`advanced` and opt-in. Full model, preset values and examples: `docs/configuration.md`.
+The User Stories in §3 are not one delivery — they group into five phases. Each phase is shippable
+and independently useful; nothing here is "half a feature." `docs/design.md` §9.1 maps each phase
+onto its engineering milestones (`M`); the ordering rationale — **local mode ships complete before
+fleet mode is built at all** — is recorded in ADR-005.
 
-| Parameter | Default (`balanced`) | Rationale |
+**Rule:** a story moves between phases only by editing this table — not by quietly slipping scope
+into whichever phase is being coded at the time.
+
+### Phase 1 — MVP: local mode, scale-up, binary
+
+**Goal:** a genuinely useful agent on day one — it discovers its own VM's disks and actually raises
+their IOPS limit when they saturate. Scale-up only: it is the direction with bounded blast radius
+(it can only add capacity, and any overspend is visible and reversible on the very next cycle), so
+this phase does not need a separate observe-only release to earn trust — `--dry-run` (US-013) stays
+available as the validation step an operator takes before flipping to live, folded into this phase
+rather than gating a phase of its own.
+
+| Story | What it delivers |
+|---|---|
+| US-001 | Config file, parsed and validated |
+| US-002 | On-VM disk discovery (`local` mode) |
+| US-004a | Classify each disk dependent / independent |
+| US-004 | `all` / `all_except` / `explicit` disk selection |
+| US-006 | Guest metric source (`/proc/diskstats`) |
+| US-007 | Sliding-window evaluator |
+| US-008 | Scale-up decision |
+| US-009 | VM pool saturation guard |
+| US-011 | Apply the change — independent disks |
+| US-011a | Apply the change — dependent disks |
+| US-012 | Rate limiting and change budget |
+| US-013 | Dry-run mode |
+| US-014 | Observability: decision journal, metrics, logs |
+| US-016 | Least-privilege service-account guidance |
+| US-015 | Binary, systemd unit, `.deb` |
+
+**Out:** scale-down, platform metrics, fleet mode, container image.
+
+**Exit criterion:** `local`-mode E2E green with real scale-up writes; soak holds budget/cooldown
+under sustained load; installs from a binary or `.deb`, no source checkout. = design.md M0–M6.
+
+### Phase 2 — Platform metrics, validated in local mode
+
+**Goal:** build the metric source `fleet` mode will later depend on exclusively, and prove it against
+real load while a trusted fallback (guest) is still right there to check it against.
+
+| Story | What it delivers |
+|---|---|
+| US-005 | Platform monitoring metric source |
+| US-005a | Adopt improved platform metrics as the NBS team ships them |
+| US-005b | Comparison (shadow) mode — guest and platform run concurrently, only guest ever actuates, both decisions are journaled, divergence surfaced |
+
+**Exit criterion:** comparison mode running against the live test environment; divergence between
+guest and platform decisions is understood, not just logged. = design.md M7–M8.
+
+### Phase 3 — Bidirectional (local mode)
+
+**Goal:** close the loop in the environment that is cheapest to get right — scale down too.
+Deferred to its own phase because its failure mode is the real one: a wrong scale-down throttles the
+workload, unlike a wrong scale-up which only overspends.
+
+| Story | What it delivers |
+|---|---|
+| US-010 | Scale-down decision |
+| — | The default parameter set's thresholds calibrated from Phase 1–2 telemetry (design.md §8.5 calibration harness) |
+
+**Exit criterion:** soak and chaos tests green with scale-down enabled, `local` mode. = design.md M9.
+
+### Phase 4 — Fleet mode, container
+
+**Goal:** extend the now-proven bidirectional logic and the now-validated platform metric source to
+many VMs from one place. Nothing decision-related is new here — only discovery scope, config
+inheritance, and the deployment shape.
+
+| Story | What it delivers |
+|---|---|
+| US-003 | Fleet disk discovery across named VMs |
+| — | Project → VM → disk policy inheritance (`docs/configuration.md` §5) |
+| US-015a | Container image |
+
+**Exit criterion:** fleet E2E green, bidirectional from day one, deployable as a container.
+= design.md M10.
+
+### Phase 5 — Further fleet capabilities
+
+**Goal:** not yet broken into stories — deliberately left open rather than scheduled, per
+`docs/TODO.md`'s own rule. Likely candidates: fleet-scale soak/chaos, multi-project scheduling,
+cost/budget reporting across a fleet, and reintroducing named presets (ADR-006) once there is a
+reason to choose between tunings rather than one validated default. = design.md M11.
+
+---
+
+## 7. Default Configuration
+
+The user-facing surface is limits plus disk selection. Controller internals are `advanced` and
+opt-in. Phase 1 ships one built-in default parameter set — no preset name to choose (ADR-006). Full
+model, default values and examples: `docs/configuration.md`.
+
+| Parameter | Default | Rationale |
 |---|---|---|
-| `preset` | `balanced` | `performance` and `cost` shift the same knobs together |
 | `limits.min_iops` | 1000 | included in the disk base price; lower is impossible |
 | `limits.max_iops` | 10000 | clamped further to `3000 × vcpuCount` at runtime |
 | `billing_step_iops` | 100 | platform-fixed, not user-settable |
 | `discovery_interval` | 5 min | picks up newly attached disks |
 | **Saturation (gate + signals)** | | |
-| `iops_utilization_threshold` | 0.98 | **gate only** — never triggers a change by itself |
+| `utilization_threshold` | 0.98 | **gate only**, on whichever of IOPS/bandwidth utilization is higher (ADR-008) — never triggers a change by itself |
 | `queue_depth_threshold` | 1 | units differ by source: ops in `local`, bytes in `fleet` |
 | `latency.mode` | `relative` | absolute thresholds are wrong for every workload |
 | `latency.baseline_multiplier` | 1.5 | versus the disk's own observed baseline |
@@ -471,7 +623,7 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
 
 ---
 
-## 7. Technical Considerations
+## 8. Technical Considerations
 
 - **Language and delivery:** single statically linked Go binary; systemd unit, `.deb`, and container
   image from one artifact. This mirrors `gpu-metrics-exporter`, which the MWS team already ships this
@@ -502,7 +654,7 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
 
 ---
 
-## 8. Success Metrics
+## 9. Success Metrics
 
 - **Saturation reduction:** time spent in a confirmed-saturated state (queueing or latency above
   baseline while at the limit) falls by ≥ 50% versus a static limit on the same workload. Measured
@@ -517,21 +669,24 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
 
 ---
 
-## 9. Open Questions
+## 10. Open Questions
 
-**Closed since first draft:** guest device mapping (deterministic via `deviceName`, §7) and the
+**Closed since first draft:** guest device mapping (deterministic via `deviceName`, §8) and the
 `DiskSpecRequest` schema with per-field mutability. `local` mode is no longer blocked.
 
-- **OQ-2 — Metric names and labels in the Prometheus export.** The docs describe metrics in prose;
-  no exported names are published. Also unresolved: the `<service>` path value for Compute, and
-  whether a **read** queue metric exists (only write queue is documented). One request to
-  `monitoring.mwsapis.ru` on a live project settles all three. **Blocks the decider.**
+- **OQ-2 — resolved.** Measured against a live project. `<service>` = `compute`; the full metric
+  name and label set is recorded in `CLAUDE.md` ("Prometheus export — measured"). No read queue
+  metric exists — only `compute_vm_disk_write_queue_length`; read-heavy saturation in `fleet` rests
+  on latency alone (design.md §10, item 4).
 - **OQ-3 — resolved.** Dependent disks are supported via the VM write path (ADR-003, US-011a). They
   are not excluded, and boot disks are therefore in scope. A dependent disk can also be converted to
   independent (`spec-to-ref`), but that is one-way and changes deletion semantics, so the agent only
   ever *recommends* it.
-- **OQ-4 — Metric publication lag and granularity in the API.** The documented 15 s refers to console
-  graphs. This sets the achievable floor on window length and cooldown.
+- **OQ-4 — resolved.** Measured against a live project (`CLAUDE.md`, "Timing, measured"):
+  publication every 30 s, a 60 s trailing averaging window, 62–90 s publication lag (mean 75 s).
+  Worst case detection latency ≈ 135 s — the hard floor on window length; the 15 s figure in the docs
+  is the console refresh, not the API's granularity. All configured windows (§7) already clear this
+  floor.
 - **OQ-5 — Platform rate limits on disk modification.** Undocumented. Determines whether the 24 h
   change budget needs to be lower.
 - **OQ-6 — resolved.** The platform accepts and bills. See FR-15c.

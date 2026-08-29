@@ -43,8 +43,10 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
 **In scope (v1)**
 - Reactive control loop, two modes (`local`, `fleet`).
 - Both disk classes: independent via disk API, dependent via VM spec (ADR-003).
-- Presets (`balanced` / `performance` / `cost`) as the user-facing surface.
-- Observe-only, scale-up-only, and bidirectional rollout stages.
+- One built-in default parameter set as the user-facing surface (limits + opt-in `advanced`);
+  named presets deferred past the MVP (ADR-006).
+- Rollout stages: scale-up-only (with `--dry-run` as the pre-live validation step, not a
+  separate release), then bidirectional (ADR-005 amends ADR-002's original staging).
 
 **Out of scope (v1)**
 - Forecasting, seasonality, predictive pre-scaling.
@@ -64,7 +66,7 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
                      │              Autoscaler                  │
                      │                                          │
   config.yaml ──────▶│  ┌────────────┐                          │
-                     │  │   Config   │  presets, inheritance    │
+                     │  │   Config   │  defaults, inheritance   │
                      │  │  Resolver  │  → EffectivePolicy/disk  │
                      │  └─────┬──────┘                          │
                      │        │                                 │
@@ -118,7 +120,7 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
 | **Decider** | Demand estimate → raw target | Pure; no clamping here |
 | **Guardrails** | Clamp, round, rate-limit, cooldown, budget, VM headroom | Last line before any write |
 | **Actuator** | Apply the change via the correct write path | Only component that mutates anything |
-| **State/Journal** | Last action per disk, cooldowns, 24h budget, decision history | In-memory v1; see §9.4 |
+| **State/Journal** | Last action per disk, cooldowns, 24h budget, decision history | Cooldowns/history in-memory v1; 24h budget persisted (ADR-013) — see §9.4 |
 
 ### 3.3 Why this shape
 
@@ -176,55 +178,154 @@ faster than the platform's 30 s publication interval yields duplicates — the s
 `metric_ts` rather than wall clock. The `device_name` label carries the `mws-` prefix, so indexing
 uses `DiskRef.MetricLabel()` rather than the config form.
 
+The collection interval is process-wide — one Sampler, one source, one tick — set once by
+`runtime.metrics.collection_interval`. There is no per-policy or per-disk override: a single call
+already returns every managed disk's sample for that tick, so a disk-level cadence could never
+actually be honored (ADR-010).
+
 ### 4.3 Reconcile (default 30 s)
 
 ```
  for each managed disk:
-   if resize_in_progress(disk):        skip
-   if in_cooldown(disk):               skip
-   if window_not_full(disk):           skip   ← cold start never acts
-   if baseline_not_established(disk):  skip   ← latency baseline warm-up
+   if resize_in_progress(disk):        skip   ← one in-flight write blocks either direction
 
-   m  = analyze(samples, policy.evaluation)
+   # No blanket top-level "window not full", "baseline not established", or
+   # "in cooldown" gate here — each is a per-direction precondition checked
+   # inside its own branch below, not a single check before both branches.
+   # A blanket gate keyed to one direction's value is wrong for the same
+   # reason in all three cases: cooldown.scale_up and cooldown.scale_down
+   # are independently configurable (US-012) — a disk in scale-up cooldown
+   # only must remain eligible for scale-down, and a blanket skip on either
+   # cooldown being active would block the other direction for no reason.
+   # (Same principle as ADR-010's WindowFullUp/WindowFullDown split and
+   # ADR-012's baseline fix — a two-direction concept never collapses to
+   # one flag.) analyze() reports WindowFullUp/WindowFullDown and
+   # BaselineEstablished alongside its other fields; m.Saturated consumes
+   # WindowFullUp, m.Underutilized consumes WindowFullDown, each as one
+   # AND-term among their own preconditions.
+
+   m  = analyze(disk.id, samples, policy.evaluation, disk.spec_iops)   // m.Saturated / m.Underutilized
+                                                                        // already fold in "sustained" (§4.4)
    vm = analyze_vm(sibling disks)
 
-   if saturated(m, policy):
+   if m.Saturated:
        if vm_headroom_insufficient(vm, disk):
            emit VM_IOPS_CAP_REACHED ; no write
+       elif in_cooldown(disk, up):
+           no_action("cooldown_scale_up")
        else:
-           target = guardrails(demand(m) / policy.target.scale_up_utilization)
+           target = guardrails(demand(m, policy) / policy.target.scale_up_utilization, disk, vm, up)
            if target > current: actuate(disk, target); start_cooldown(up)
-   elif underutilized(m, policy):
-       target = guardrails(p95_iops(m) / policy.target.scale_down_utilization)
-       if target < current: actuate(disk, target); start_cooldown(down)
+           else: no_action("target_not_above_current")
+   elif m.Underutilized:
+       if in_cooldown(disk, down):
+           no_action("cooldown_scale_down")
+       else:
+           target = guardrails(m.IOPSP95Down / policy.target.scale_down_utilization, disk, vm, down)
+           if target < current: actuate(disk, target); start_cooldown(down)
+           else: no_action("target_not_below_current")
    else:
        no_action(reason)
 ```
 
+`demand()` is the Decider's job (§3.2 — "Demand estimate → raw target"), not the Analyzer's: it takes
+`Analysis` plus policy and produces a number to clamp, same as `m.IOPSP95Down` already is for
+scale-down. `Analysis` carries the *evidence* (queue depth, latency, throttle detection, window/
+baseline state, and the two verdict booleans); it does not carry a precomputed demand figure —
+keeping that split is what makes `demand()`'s two regimes (§4.5) unit-testable against a fixed
+`Analysis` without needing a real window of samples for every case.
+
+`guardrails()` is the last line before any write (§3.2): clamp to `[policy.limits.min_iops,
+min(10000, policy.limits.max_iops, vm_headroom)]` (NFR-5, §4.6), round to a 100-IOPS multiple,
+apply `max_scale_up_ratio`/`max_scale_down_ratio` relative to `current`, and suppress a change smaller
+than `min_change_iops`. The 24h change budget (`max_changes_per_24h`, ADR-013) is checked once the
+guardrail-clamped target is known to actually differ from `current` — checking it earlier would count
+budget against a decision that guardrails might clamp back down to `current` anyway, i.e. a decision
+that was never going to write.
+
 Every branch — including `no_action` — emits a structured decision record with its inputs. "Why
 didn't it scale?" must always be answerable from the log alone.
+
+Comparison mode (US-005b) runs this loop twice per disk in `local` mode — once per `MetricSource` —
+producing two independent `Decision`s per cycle. Only the `Guest`-sourced branch ever reaches
+`actuate()`; the `Platform`-sourced branch always ends in `no_action` regardless of what it computed,
+and both are journaled. No new field is needed on `Decision` for this — `Sample.Source` already flows
+through into `Analysis`, so the journal attributes each decision by source from data it already has.
 
 ### 4.4 Saturation detection
 
 ```
+resource_gate :=
+      iops_utilization      >= policy.saturation.utilization_threshold   (default 0.98)
+   OR bandwidth_utilization >= policy.saturation.utilization_threshold
+
 saturated :=
-      utilization >= policy.saturation.iops_utilization_threshold   (gate, default 0.98)
-  AND ( queue_depth      >= policy.saturation.queue_depth_threshold
-     OR p95_latency      >  baseline_p95 × policy.saturation.latency.baseline_multiplier
+      window_full_up
+  AND resource_gate
+  AND ( queue_depth >= policy.saturation.queue_depth_threshold
+     OR (baseline_established AND latency.P95 > baseline.P95 × policy.saturation.latency.baseline_multiplier)
      OR throttling_detected )
   AND sustained over policy.evaluation.scale_up_window
 ```
 
-Utilization is a **gate, not a trigger** (ADR-002). If a disk is not near its limit it cannot be
-limit-starved, so the expensive checks are skipped.
+`window_full_up` is `Analysis.WindowFullUp` — cold start never acts, expressed as one AND-term here
+rather than a separate skip line (this section's own reconcile pseudocode above). The latency
+disjunct is conditional on `baseline_established` — it evaluates false, never blocks, when no
+baseline exists yet. `queue_depth` and `throttling_detected` need no baseline at all and can confirm
+saturation on their own (ADR-012) — this is what actually breaks the cold-start-while-saturated
+deadlock a blanket "skip until baseline exists" gate used to cause.
+
+"Sustained over `scale_up_window`" is not one mechanism — each signal already carries its own notion
+of sustain, and none of them collapse to "check only the newest sample":
+- `resource_gate` and `queue_depth >= threshold` are point-in-time measures on every `Sample`
+  (utilization, `Sample.QueueDepth`) — sustained means every sample whose `Timestamp` falls within the
+  trailing `scale_up_window` independently clears the threshold, not just the newest one.
+- `latency.P95 > baseline.P95 × multiplier` is already a window-aggregate comparison by construction:
+  `latency.P95` is the percentile *over* the trailing `scale_up_window`, so an elevated value already
+  reflects sustained, not momentary, latency — there is no separate per-sample re-check to make.
+- `throttling_detected` (§4.5: `served_iops ≈ provisioned_limit AND queue_depth sustained > 0`)
+  carries sustain in its own definition the same way.
+
+`bandwidth_utilization = (read_bytes/s + write_bytes/s) / (spec.iops × 32768)` — NBS-PL2's fixed
+IOPS-to-bandwidth ratio (CLAUDE.md: `MB/s = IOPS × 32 / 1024`), using the exact measured bytes/IOPS
+figure, not an approximation. `spec.iops` is already read by `Discover` (M1) on the same cycle — no
+extra API call.
+
+**Utilization is a gate, not a trigger** (ADR-002) — **on either resource** (ADR-008). If a disk is
+not near either of its provisioned limits it cannot be limit-starved, so the expensive checks are
+skipped. A large-block, throughput-heavy workload saturates bandwidth long before it saturates IOPS
+count; gating on IOPS alone would silently miss it — the whole reason ADR-008 exists.
 
 **Latency is baseline-relative, never absolute.** `p95 > 10 ms` is wrong for everyone; acceptable
 latency is workload-specific. The baseline is a long rolling low-percentile of the disk's own
-observed latency, frozen while the disk is saturated so a throttled period cannot poison it.
+observed latency, **frozen against updates** while the disk is saturated so a throttled period cannot
+poison an already-established baseline.
+
+**Establishment is not gated by saturation — only updates are** (ADR-012). The baseline seeds from
+the disk's first full window's low-percentile latency regardless of whether that window happened to
+be saturated; the low percentile is exactly the statistic that stays close to true unloaded service
+time even under load, which is why §4.4 chose it over a mean. Only once established does the freeze
+apply, holding it fixed for the rest of an active saturation episode. Without this, a disk saturated
+since the agent started would never get a quiet sample to learn from — the freeze rule would keep a
+never-established baseline unestablished forever, and the latency signal (plus the closed-workload
+demand form below) would be permanently unavailable, not just delayed.
+
+**How the p95 is derived is not uniform across `Source`, and is recorded, not assumed** (ADR-011).
+`guest` always uses `LatencyWindowedAvg` — a percentile estimated from a window of per-interval
+averages, the only method `/proc/diskstats` supports. `platform` uses `LatencyHistogram` — a real
+quantile computed directly from the exported bucket histogram — whenever a fresh one is available,
+falling back to `LatencyWindowedAvg` otherwise (the same present-and-fresh fallback pattern US-005a
+already uses for utilization and queue depth). `latency.P95` and `baseline.P95` above are each a
+`LatencyStat`, so the `Kind` that produced them travels into `Analysis` and the decision journal —
+"why did it scale" can distinguish a histogram-backed verdict from a windowed-average one.
 
 ### 4.5 Throttling detection and demand estimation
 
-This is the crux, and it is where `local` mode earns its keep.
+This is the crux, and it is where `local` mode earns its keep. Throttling detection is the
+Analyzer's job (`Analysis.ThrottleDetected`, M3) — it needs nothing beyond the sample window and
+`specIOPS`. Demand estimation is the Decider's (`demand()`, M4): it consumes `Analysis` (queue depth,
+latency, `ThrottleDetected`) plus policy to produce the figure `§4.3`'s `target = guardrails(demand(m,
+policy) / policy.target.scale_up_utilization)` clamps.
 
 **The problem.** At the limit the IOPS counter pins and stops carrying information. A disk reading
 1000/1000 might want 1100 or 10000. Scaling by a fixed percentage is guesswork.
@@ -246,19 +347,32 @@ the service rate is pinned, so the excess appears as queueing. Two regimes:
 | Regime | Signature | Estimate |
 |---|---|---|
 | Open workload (arrivals independent) | queue **growing** | `demand ≈ served + dL/dt` |
-| Closed workload (bounded concurrency) | queue **stable and deep** | `demand ≈ served × (p95_latency / baseline_p95)` |
+| Closed workload (bounded concurrency) | queue **stable and deep** | `demand ≈ served × (latency.P95 / baseline.P95)` |
 
 The closed-workload form is the workhorse: if latency is 3× baseline, the workload is receiving
 roughly a third of the service it wants. Both forms are clamped to
 `max_scale_up_ratio` so a pathological reading cannot request a 10× jump.
 
-**Platform-side (fleet mode).** No queue-in-operations and no read queue, so only the
-latency-ratio form is available, computed from the exported histograms. Coarser, and one more reason
-`local` prefers the guest (ADR-001).
+The closed-workload form needs `baseline_established` (ADR-012); the open-workload form does not — a
+growing queue is visible without any latency baseline at all. In the one corner where saturation was
+already confirmed via `queue_depth` or `throttling_detected`, the workload is closed, and the
+baseline has not yet been computed from this window, `demand()` has no ratio to compute and the cycle
+emits `NoAction` with that specific reason rather than guessing. Because the baseline seeds from this
+same window regardless of saturation (§4.4), this is a single reconcile cycle, not a repeat of the
+deadlock the blanket gate used to cause — the next cycle has a baseline to work with.
 
-**Honesty note.** These estimators are unvalidated. They are the reason the rollout starts
-observe-only: the first stage exists specifically to check whether the estimate matches what actually
-happened after a manual resize.
+**Platform-side (fleet mode).** No queue-in-operations and no read queue, so only the
+latency-ratio form is available — but that ratio itself can use `LatencyHistogram`, the more accurate
+of the two `LatencyStatKind`s (ADR-011), when a fresh histogram is present. The form being unavailable
+without a queue signal is what makes this coarser than guest's throttling detection, and one more
+reason `local` prefers the guest (ADR-001) — it is not a statement about the latency figure's own
+accuracy.
+
+**Honesty note.** These estimators are unvalidated. They are why `--dry-run` (US-013) is run against
+the live test environment as a validation step inside M6 before actuation is flipped on — not a
+separate observe-only release gating the MVP (ADR-005 amends ADR-002 on this point) — checking
+whether the estimate matches what actually happened after a manual resize before the estimator is
+ever allowed to act on its own.
 
 ### 4.6 VM headroom
 
@@ -290,11 +404,30 @@ Idempotency-Key: <uuid>
 **Dependent disk** — read-modify-write through the VM, which is the riskier path:
 
 ```
-GET  .../virtualMachines/{vm}                   capture etag
-  mutate exactly one entry in spec.storage.disks[]
-  assert every other field byte-identical to what was read
+GET  .../virtualMachines/{vm}                   capture etag, every disk's alias (name)
+  build a minimal partial body: every alias, in order, carrying nothing but its name —
+  except the target alias, which additionally carries spec.iops
 POST .../virtualMachines/{vm}                   send etag, Idempotency-Key
 ```
+
+Every alias must still be present, because Upsert treats an existing `storage.disks[]` element
+missing from the request as a delete — dropping an entry to "only touch the target" would detach
+every other disk on the VM (issue #3). But no entry, including the target, carries anything beyond
+its collection key (`name`) plus the one field actually changing. Earlier drafts of this path
+round-tripped a full disk spec — `boot`, `deviceName`, `diskType`, `size` — reconstructed from the
+GET response and resent as an assertion that nothing else had changed. That is strictly worse than
+omitting those fields: `name`/`boot`/`deviceName`/`diskType` are immutable on update and the API
+accepts them omitted entirely (CLAUDE.md "DiskSpecRequest mutability"), so a value resent through a
+lossy response→domain→request translation risks a mismatch the platform would reject or, worse,
+silently accept as an unintended change. Sending the collection key alone carries the same
+concurrency guarantee (the etag) without manufacturing a value for a field the write never intended
+to touch.
+
+`UpdateVirtualMachine` has no `validateOnly` — confirmed against the generated SDK client, which has
+no such field on this request (unlike `UpdateDiskRequest`, which does). **This path has no
+server-side dry-run** (ADR-007): `--dry-run` can report the computed decision and the agent's own
+client-side checks for a dependent disk, but not a platform-confirmed verdict the way it can for an
+independent one.
 
 Both paths verify the applied value from the response. A write whose response does not carry the
 requested value is a failure, not a success — in-memory state must never claim a change that did not
@@ -346,6 +479,14 @@ type MetricSource interface {
     Kind() SourceKind // guest | platform
 }
 
+// Sample is one interval's observation — an average, not a percentile.
+// Neither source can honestly give a within-interval percentile at the
+// single-sample level: guest has only diskstats' cumulative ticks/ops (an
+// average is all it can ever produce), and platform's real distribution
+// lives in its exported histogram, not in any one Sample. The Analyzer
+// (§4.4, US-007) turns these into a percentile over a window — see
+// LatencyStat below for why that computation is not uniform across
+// Source (ADR-011).
 type Sample struct {
     DiskID       string
     Timestamp    time.Time     // metric timestamp, not wall clock
@@ -354,17 +495,147 @@ type Sample struct {
     ReadBytes    float64       // bytes/s
     WriteBytes   float64       // bytes/s
     QueueDepth   QueueDepth    // value + unit (ops | bytes) — never bare
-    ReadLatP95   time.Duration
-    WriteLatP95  time.Duration
+    ReadLatAvg   time.Duration // average latency this interval, not a percentile
+    WriteLatAvg  time.Duration
     Source       SourceKind
 }
 
+// LatencyStatKind names how a latency percentile was derived — carried on
+// the value itself, the same move QueueDepth makes for its unit, so a
+// windowed estimate and a histogram-derived quantile are never silently
+// compared as if they meant the same thing (ADR-011).
+type LatencyStatKind string
+
+const (
+    // LatencyWindowedAvg: a percentile estimated from a window of
+    // per-interval Sample averages. The only method guest can ever
+    // produce; platform's fallback when no histogram is available.
+    LatencyWindowedAvg LatencyStatKind = "windowed_avg"
+    // LatencyHistogram: a real quantile computed directly from platform's
+    // exported bucket histogram (CLAUDE.md) for a single scrape — no
+    // windowing needed for accuracy. platform only.
+    LatencyHistogram LatencyStatKind = "histogram"
+)
+
+type LatencyStat struct {
+    P95  time.Duration
+    Kind LatencyStatKind
+}
+
+// Analysis is the Analyzer's output: the evidence and verdict the Decider
+// and the journal need, computed once per disk per cycle. Saturated and
+// Underutilized are the "saturation verdict" §3.2 assigns to the Analyzer —
+// each already folds in its own "sustained over window" evaluation (§4.4),
+// so the reconcile loop's `if saturated(m, policy)` is just `if
+// m.Saturated`. Everything else on Analysis is the evidence *behind* that
+// verdict, for the journal and for the Decider's demand estimate (§4.5) —
+// Analysis itself carries no demand figure ("Demand estimate → raw target"
+// is the Decider's job, §3.2), so the two regimes in §4.5 stay
+// unit-testable against a fixed Analysis without a real sample window for
+// every case. ReadLatency/WriteLatency/Baseline carry LatencyWindowedAvg
+// today, always — M3 has no histogram source to read (Sample carries no
+// histogram data; that arrives with PlatformSource in M7). Baseline is
+// frozen against updates while the disk is saturated (§4.4) —
+// BaselineEstablished is a separate state question (do we have one yet)
+// from Baseline.Kind (how it was computed); establishing it is never
+// blocked by saturation, only revising it is (ADR-012).
+type Analysis struct {
+    DiskID string
+
+    // Latest-sample snapshot, for the journal — not what Saturated/
+    // Underutilized are computed from (each re-evaluates its own signal
+    // against every sample in its own window, not just this one).
+    IOPSUtilization      float64
+    BandwidthUtilization float64
+    QueueDepth           QueueDepth
+    ReadLatency          LatencyStat // p95 over scale_up_window
+    WriteLatency         LatencyStat
+    ThrottleDetected     bool
+
+    Baseline            LatencyStat // low percentile over the full buffered history
+    BaselineEstablished bool
+
+    WindowFullUp   bool // span ≥ scale_up_window (ADR-010)
+    WindowFullDown bool // span ≥ scale_down_window
+
+    Saturated     bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
+    Underutilized bool // every signal quiet AND sustained over scale_down_window (US-010); false if !WindowFullDown
+
+    IOPSP95Down float64 // p95 served ops/s over scale_down_window — the Decider's p95_iops(m) input (§4.3)
+
+    // demand()'s (§4.5) two remaining inputs beyond what's above — both
+    // measured over ScaleUpWindow, since demand() is only ever called from
+    // the Saturated branch. ServedIOPS is exposed directly (not just
+    // IOPSUtilization, a ratio) so the Decider never needs specIOPS a
+    // second time. QueueGrowthRate is (newest−oldest queue depth) / elapsed
+    // seconds within the up-window — units match QueueDepth.Unit per
+    // second, so it sums directly with ServedIOPS in the open-workload form.
+    ServedIOPS      float64
+    QueueGrowthRate float64
+}
+
 type Analyzer interface {
-    Analyze(samples []Sample, p EvaluationPolicy) Analysis
+    // diskID is explicit rather than read from samples[0].DiskID — the
+    // empty-window case (§8.1's own test matrix: "Empty, partial, exactly-
+    // full...") has no samples to read it from, and Analysis.DiskID must
+    // still identify which disk produced a "no data yet" result.
+    // specIOPS is the disk's current provisioned limit (Discover, M1) —
+    // needed for iops_utilization, bandwidth_utilization (ADR-008), and
+    // throttling_detected's "served ≈ provisioned_limit" comparison (§4.5).
+    // It is live disk state, not a policy value, so it is not part of
+    // EvaluationPolicy.
+    Analyze(diskID string, samples []Sample, p EvaluationPolicy, specIOPS int64) Analysis
+}
+
+// VMState is the sibling-disk headroom picture (§4.6) — pre-aggregated by
+// the caller (analyze_vm in §4.3's pseudocode, not this package): IOPSPool
+// and every other managed disk's own Analysis are already available from
+// the same reconcile cycle, so recomputing them inside Decide would just
+// be redoing work the caller already did.
+type VMState struct {
+    IOPSPool       int64   // 3000 × vCPU (Discover, M1) — not enforced by the platform
+    SiblingP95IOPS float64 // aggregate p95 IOPS of every other managed disk on this VM
+}
+
+// EffectivePolicy is the narrow slice of the resolved policy Decide needs —
+// a plain struct decoupled from internal/config, the same way
+// analyzer.EvaluationPolicy is (design.md §3.3); translating a resolved
+// policy into this shape is the orchestrator's job.
+type EffectivePolicy struct {
+    MinIOPS int64
+    MaxIOPS int64
+
+    ScaleUpUtilization   float64
+    ScaleDownUtilization float64
+
+    CooldownScaleUp   time.Duration
+    CooldownScaleDown time.Duration
+
+    MinChangeIOPS     int64
+    MaxScaleUpRatio   float64
+    MaxScaleDownRatio float64
+
+    MaxChangesPer24h int
+}
+
+// GuardrailState is cooldown/budget state as of now, resolved by the
+// caller from wherever it is tracked (ADR-013: the 24h counter is
+// persisted, cooldown timestamps are not) — Decide reads it, never owns
+// it, keeping this package pure like Analyzer (§3.3). ResizeInProgress
+// covers both directions: one in-flight write blocks either.
+type GuardrailState struct {
+    ResizeInProgress bool
+    LastChangeUp     time.Time // zero value = never
+    LastChangeDown   time.Time
+    ChangesInLast24h int
 }
 
 type Decider interface {
-    Decide(a Analysis, vm VMState, p EffectivePolicy) Decision
+    // diskID/current mirror Analyzer.Analyze's explicit-diskID rationale —
+    // Decision.DiskID/Current must be set even on an Analysis with no
+    // samples. now is explicit so cooldown math is testable without a real
+    // clock (the same reason GuestSource takes an injectable now func).
+    Decide(diskID string, current int64, a Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision
 }
 
 type Actuator interface {
@@ -372,15 +643,49 @@ type Actuator interface {
 }
 
 type Decision struct {
-    DiskID     string
-    Action     Action  // ScaleUp | ScaleDown | NoAction | VMCapReached
-    Reason     string  // machine-parseable
-    Current    int64
-    Target     int64
-    Demand     float64
-    Inputs     Analysis // full evidence, for the journal
+    DiskID  string
+    Action  Action // scale_up | scale_down | no_action | vm_cap_reached — snake_case,
+                    // same convention as Reason, since both feed the same machine-parseable journal (§7.2)
+    Reason  string // machine-parseable
+    Current int64
+    Target  int64  // == Current when Action is no_action or vm_cap_reached
+    Demand  float64
+    Inputs  Analysis // full evidence, for the journal
+
+    // Carried forward from vm/state (§4.6, ADR-013) so a journal/metrics
+    // consumer (M5) doesn't need those inputs threaded through separately
+    // just to report on them — Decide already computed/received them.
+    VMHeadroomIOPS  int64
+    BudgetRemaining int
 }
 ```
+
+`guardrails()` — folded into `Decide`, not a separate interface; the architecture diagram's separate
+Guardrails box (§3.2) is an internal step of `Decide`, not a second pluggable component — clamps to
+`[p.MinIOPS, min(10000, p.MaxIOPS, vm.IOPSPool − vm.SiblingP95IOPS)]` (NFR-5, §4.6), rounds to a
+100-IOPS multiple, applies `p.MaxScaleUpRatio`/`p.MaxScaleDownRatio` relative to `current`, and
+suppresses a change smaller than `p.MinChangeIOPS`. `state.ChangesInLast24h >= p.MaxChangesPer24h` is
+checked only once the guardrail-clamped target is known to actually differ from `current` — checking
+budget on a decision guardrails would clamp back to `current` anyway would count against a change that
+was never going to write.
+
+`demand()` (§4.5), only ever called from the Saturated branch:
+
+```
+regime  := a.QueueGrowthRate > queueGrowingThreshold ? open : closed
+
+demand  := open:   a.ServedIOPS + a.QueueGrowthRate
+           closed: a.BaselineEstablished
+                       ? a.ServedIOPS × (max(a.ReadLatency.P95, a.WriteLatency.P95) / a.Baseline.P95)
+                       : unavailable → NoAction("baseline_unavailable")
+```
+
+The closed-regime `unavailable` branch is defensive, not reachable through the real pipeline: `Analyze`
+(M3) always sets `BaselineEstablished` the same cycle `WindowFullUp` first becomes true, and
+`Saturated` already requires `WindowFullUp` — so by construction, `Saturated ⟹ BaselineEstablished`.
+ADR-012's "single reconcile cycle of `NoAction`" scenario is handled by that guarantee before `demand`
+is ever called, not inside it; the branch stays only because `Decide` must not divide by zero if ever
+handed an `Analysis` that violates the invariant (e.g. a hand-built one in a Decider-only unit test).
 
 `QueueDepth` carrying its unit in the type is deliberate. Guest gives operations, platform gives
 bytes; a silent mix would be a real and hard-to-spot bug.
@@ -388,7 +693,8 @@ bytes; a silent mix would be a real and hard-to-spot bug.
 ### 5.3 Configuration
 
 See `docs/configuration.md` for the full model. Disks are addressed by `device_name` and never by
-kernel device path (ADR-004). Summary: presets are the user-facing surface;
+kernel device path (ADR-004). Summary: limits plus disk selection are the user-facing surface, on top
+of one built-in default parameter set — no preset name to choose in Phase 1 (ADR-006);
 inheritance is `disk → vm → project → platform default` (`fleet`) or `disk → vm → default` (`local`);
 advanced controller knobs exist but are opt-in and treated as experimental until telemetry justifies
 exposing them.
@@ -402,12 +708,12 @@ exposing them.
 | NFR-1 | Decision latency after sustained saturation | `local` ≤ 60 s; `fleet` ≤ 5 min | Guest samples at 1–10 s; platform floor is ~135 s (30 s publish + 60 s window + 62–90 s lag) |
 | NFR-2 | Reconcile cost | O(disks); one metrics call per project per cycle | Metrics API is per-project, not per-disk |
 | NFR-3 | Memory | ≤ 32 MB for 100 disks | Ring buffers are fixed-size; ~360 samples/disk at 10 s over 60 min |
-| NFR-4 | Blast radius | One `spec.iops` field, one disk, per write | Everything else round-trips unchanged |
+| NFR-4 | Blast radius | One `spec.iops` field, one disk, per write | Nothing else is sent as a value — immutable fields are omitted, not round-tripped (ADR-009) |
 | NFR-5 | Safety | Never write outside `[1000, min(10000, 3000×vCPU)]`, always ×100 | Platform enforces disk bounds but **not** the VM cap |
 | NFR-6 | Change rate | ≤ `max_changes_per_24h` per disk (default 48) | Runaway guard; billing is per-minute so this is not a cost constraint |
 | NFR-7 | Network resilience | Retry with backoff + jitter; idempotency key on every write | Measured: `SSL_ERROR_SYSCALL` and 10–15 s stalls are routine on this network |
 | NFR-8 | Timeout | ≥ 30 s, never the SDK's 5 s default | Endpoint discovery alone was measured at 15 s |
-| NFR-9 | Cold start | No action until window full **and** baseline established | A fresh agent must not act on partial evidence |
+| NFR-9 | Cold start | No action until window full; no action on a signal-baseline pairing whose baseline is not yet established (queue/throttling-based signals are unaffected) | A fresh agent must not act on partial evidence — but must not deadlock on an already-saturated disk either (ADR-012) |
 | NFR-10 | Crash safety | Restart loses windows, never doubles a write | Idempotency key + verify-after-write |
 | NFR-11 | Availability | Metrics-source outage degrades to no-action, never to a guess | Missing data is not zero load |
 | NFR-12 | Permissions | `local` needs no metrics credential at all | Guest source removes the API key requirement |
@@ -435,7 +741,7 @@ iops_autoscaler_disk_provisioned_iops{disk,vm,class}          gauge
 iops_autoscaler_disk_observed_iops{disk,vm,op}                gauge
 iops_autoscaler_disk_utilization_ratio{disk,vm}               gauge
 iops_autoscaler_disk_estimated_demand_iops{disk,vm}           gauge
-iops_autoscaler_disk_latency_baseline_seconds{disk,vm,op}     gauge
+iops_autoscaler_disk_latency_baseline_seconds{disk,vm}        gauge
 iops_autoscaler_disk_saturated{disk,vm}                       gauge 0|1
 iops_autoscaler_decisions_total{action,reason}                counter
 iops_autoscaler_writes_total{path,outcome}                    counter   path=disk|vm
@@ -448,6 +754,17 @@ iops_autoscaler_window_fill_ratio{disk,direction}             gauge
 iops_autoscaler_change_budget_remaining{disk}                 gauge
 iops_autoscaler_cost_delta_iops_hours{disk}                   counter
 ```
+
+`disk_latency_baseline_seconds` has no `{op}` label, unlike `disk_observed_iops` — the baseline (§4.4) is
+one combined low-percentile over both read and write latencies, not tracked separately per operation
+(ADR-011's `LatencyStat` is per-op for the *trigger* comparison, but the baseline itself is not); an
+`{op}` label here would imply a distinction the value doesn't actually carry.
+
+M5 wires every metric above except `writes_total`, `write_duration_seconds` (no Actuator exists yet to
+report a write outcome — M6), and `cost_delta_iops_hours` (needs a billing-rate model not designed
+anywhere yet) — registering a metric with nothing real to report would repeat the exact
+`*_quota_utilization`-reads-zero trap CLAUDE.md documents as a platform bug, not something to imitate.
+Those three are added when their producing subsystem exists.
 
 `metric_source` and `staleness` are there because ADR-001 accepts two sources: when `local` and
 `fleet` disagree, the first question is which source fed the decision and how stale it was.
@@ -463,20 +780,27 @@ Every reconcile emits one structured record per disk, including no-action:
 {
   "ts": "2026-08-28T15:04:05Z",
   "disk": "db-data", "vm": "database-01", "class": "dependent",
-  "action": "NoAction",
+  "action": "no_action",
   "reason": "saturation_gate_not_met",
-  "current_iops": 5000,
+  "current_iops": 5000, "target_iops": 5000, "demand_iops": 0,
   "utilization": 0.62,
   "queue_depth": {"value": 0, "unit": "ops"},
-  "p95_read_latency_ms": 1.2, "latency_baseline_ms": 1.1,
-  "vm_headroom_iops": 4200,
-  "window_fill": 1.0,
+  "p95_read_latency_ms": 1.2, "p95_write_latency_ms": 0.9, "latency_baseline_ms": 1.1,
+  "vm_headroom_iops": 4200, "budget_remaining": 47,
+  "window_fill_up": 1.0, "window_fill_down": 1.0,
   "source": "guest"
 }
 ```
 
-This is the primary calibration input for the observe-only stage — thresholds are tuned from these
-records, not from reasoning.
+`action`/`reason` are snake_case throughout, matching `Reason`'s own "machine-parseable" requirement —
+one casing convention across the whole record, not `Action` in one case and `Reason` in another.
+`target_iops`/`demand_iops` equal `current_iops`/`0` on a `no_action` record like this one, which is
+why the original draft of this example omitted them; a `scale_up`/`scale_down` record needs both
+visible. `window_fill_up`/`window_fill_down` are separate because they're independent windows
+(ADR-010) — a disk can be full on one and not the other.
+
+This is the primary calibration input for the `--dry-run` harness (§8.5) — thresholds are tuned from
+these records, not from reasoning.
 
 ### 7.3 Health and alerting
 
@@ -496,7 +820,7 @@ The pipeline is pure between Discovery and Actuator, so the decision logic is te
 
 | Target | Cases |
 |---|---|
-| Config resolver | Inheritance at every level; preset expansion; overrides; invalid configs rejected |
+| Config resolver | Inheritance at every level; default-set application; overrides; invalid configs rejected |
 | Window/percentile | Empty, partial, exactly-full, wrapped ring; p50/p95/p99 against known series |
 | Saturation | Gate passes but no signal → not saturated; each signal alone triggers; sustained vs momentary |
 | Demand estimator | Open regime (growing queue); closed regime (latency ratio); clamped at `max_scale_up_ratio` |
@@ -508,7 +832,10 @@ The pipeline is pure between Discovery and Actuator, so the decision logic is te
 **Property-based tests** for the invariants that must hold for *any* input:
 - output is always in `[min_iops, min(max_iops, 10000, vm_headroom)]`
 - output is always a multiple of 100
-- `NoAction` whenever the window is not full or the baseline is unset
+- `NoAction` whenever the window is not full
+- `NoAction` only for the specific evaluation cycle where every applicable signal needed a baseline
+  that isn't established yet — never permanently, and never when queue depth or throttling alone
+  already confirm saturation (ADR-012)
 - scale-down never produces a target above current; scale-up never below
 
 ### 8.2 Integration tests — against fakes
@@ -536,11 +863,11 @@ pool), one dependent disk, one independent disk attached by ref.
 | Scale-down after quiet | stop load, wait `scale_down_window` | IOPS lowered, never below `min_iops` |
 | No flapping | alternating bursts around the threshold | Changes ≤ expected given hysteresis and cooldown |
 | VM cap detection | load both disks simultaneously past 6000 aggregate | `VM_IOPS_CAP_REACHED`, no write |
-| Bandwidth-bound case | `fio bs=64k` — pins `%util` at 100 while ops read ~51% of limit | Saturation detected via latency/queue, **not** missed |
+| Bandwidth-bound case | `fio bs=64k` — pins guest `%util` at 100 and `bandwidth_utilization` at the ceiling while `iops_utilization` reads ~51% | Gate opens on bandwidth (ADR-008); saturation detected via latency/queue, **not** missed |
 | Dependent write path | drive the VM-owned disk | Change applied via VM path; all other fields unchanged |
 | Independent write path | drive the ref-attached disk | Change applied via disk path |
 | Cold start | restart mid-load | No action until window full |
-| Dry run | `--dry-run` under load | `ValidateOnly` used; zero mutations; verdicts reported |
+| Dry run | `--dry-run` under load, both classes | Independent: `ValidateOnly` used, server verdict. Dependent: computed verdict only (ADR-007). Zero mutations either way |
 
 The bandwidth-bound scenario is the one that catches a whole class of bugs: a naive IOPS-only
 controller sees 513/1000 and concludes there is headroom, while the disk is at 100% utilization with
@@ -554,41 +881,89 @@ controller sees 513/1000 and concludes there is headroom, while the disk is at 1
   sane, no unbounded memory growth, no budget exhaustion under normal load.
 - **Chaos:** random injected API failures at 20% — assert no double-applies and no state divergence.
 
-### 8.5 Calibration harness (observe-only)
+### 8.5 Calibration harness (`--dry-run`)
 
-Not a test but the mechanism that makes the defaults defensible: run in observe-only against real
-workloads, record every decision that *would* have been made plus what the load did next, then tune
-thresholds against that corpus. **No default in `docs/configuration.md` should be treated as
-validated until it has survived this.**
+Not a test but the mechanism that makes the defaults defensible: run `--dry-run` (US-013) against
+real workloads, record every decision that *would* have been made plus what the load did next, then
+tune thresholds against that corpus. This is the same validation step §9.2 folds into M6 before
+actuation is flipped on — a mechanism used once as a gate before GA, and again wherever recalibration
+is needed — not a separate observe-only release phase of its own (ADR-005). **No default in
+`docs/configuration.md` should be treated as validated until it has survived this.**
 
 ---
 
 ## 9. Implementation plan
 
+### 9.0 CLI flags
+
+`cmd/mws-iops-autoscaler` (the orchestrator wiring every package above together — §3.1's whole
+pipeline, minus systemd/`.deb` packaging and live validation, both deliberately left for a human step,
+not this binary's own job):
+
+| Flag | Meaning |
+|---|---|
+| `-config <path>` | Required. |
+| `-validate-config` | Parse and validate, then exit (§9.1's M0). |
+| `-dry-run` | US-013 — discover, sample, decide; apply no change. |
+| `-state-dir <path>` | Where the durable 24h change budget lives (ADR-013). Default `/var/lib/mws-iops-autoscaler`. |
+| `-journal <path>` | Decision-journal (§7.2) output file. Default stdout. |
+| `-listen <addr>` | `/metrics`, `/healthz`, `/readyz` (§7.1/§7.3). Default `:9435`. |
+
+Project comes from `MWS_PROJECT` (the SDK's own env var, `go.mws.cloud/go-sdk`'s table above) — not a
+flag, since it's a credential-adjacent value, not a run-mode choice. `runtime.metrics.source: platform`
+in the config is rejected with a clear "not implemented yet" rather than silently falling back to
+guest — `PlatformSource` is M7.
+
 ### 9.1 Milestones
 
-| M | Deliverable | Depends on |
-|---|---|---|
-| **M0** | Repo skeleton, config schema + resolver, `--validate-config` | — |
-| **M1** | Compute API client (discovery, classification, both write paths behind a flag) | M0 |
-| **M2** | `MetricSource`: guest implementation + Sampler | M0 |
-| **M3** | Analyzer: windows, percentiles, baselines, saturation | M2 |
-| **M4** | Decider + Guardrails; `--dry-run` via `ValidateOnly` | M1, M3 |
-| **M5** | Observability: metrics, decision journal, health endpoints | M4 |
-| **M6** | **Observe-only release.** E2E scenarios green in `local` mode | M5 |
-| **M7** | Platform `MetricSource` → `fleet` mode; project/VM/disk inheritance | M2, M6 |
-| **M8** | Scale-up enabled; soak and chaos | M6 |
-| **M9** | Bidirectional; presets calibrated from M6/M8 telemetry | M8 |
-| **M10** | Packaging: static binary, systemd unit, `.deb`, container image | M9 |
+Product-facing phasing — what ships, in what order, and why — lives in the PRD, §6 "Release Phases".
+This table is the engineering sequencing underneath it; the **Phase** column is the mapping. Ordering
+rationale (local complete before fleet exists at all; platform metrics validated in `local` before
+`fleet` depends on them exclusively) is ADR-005.
+
+| M | Deliverable | Depends on | Phase (PRD §6) |
+|---|---|---|---|
+| **M0** | Repo skeleton, config schema + resolver, `--validate-config` | — | 1 |
+| **M1** | Compute API client (discovery, classification, both write paths) | M0 | 1 |
+| **M2** | `MetricSource`: guest implementation + Sampler | M0 | 1 |
+| **M3** | Analyzer: windows, percentiles, baselines, saturation | M2 | 1 |
+| **M4** | Decider + Guardrails; `--dry-run` via `ValidateOnly` | M1, M3 | 1 |
+| **M5** | Observability: metrics, decision journal, health endpoints | M4 | 1 |
+| **M6** | **MVP release.** Scale-up actuation enabled (validated live via `--dry-run` first); binary + systemd + `.deb` | M5 | 1 (exit) |
+| **M7** | Platform `MetricSource` (`PlatformSource`), usable standalone in `local` mode | M2 | 2 |
+| **M8** | Comparison (shadow) mode: `Guest` + `Platform` run concurrently, journaled, divergence surfaced | M6, M7 | 2 (exit) |
+| **M9** | Scale-down decision; the default parameter set calibrated from M6–M8 telemetry | M6 | 3 (exit) |
+| **M10** | Fleet discovery, project/VM/disk inheritance, container image | M7, M9 | 4 (exit) |
+| **M11** | Further fleet capabilities and optimizations | M10 | 5 |
+
+`fleet` mode (M10) is built last and inherits an already-proven `PlatformSource` (M7-M8) and an
+already-proven bidirectional `Decider` (M9) — it adds only discovery scope, config inheritance, and
+the container deployment shape, nothing decision-related.
 
 ### 9.2 Sequencing rationale
 
-`local` mode ships first (M6) because it has fewer moving parts — no metrics credential, no network
-in the control loop — and because the guest source is the one with the signals needed to validate the
-demand estimator. `fleet` follows once the decision logic is proven.
+**`local` mode ships complete — including bidirectional scaling — before `fleet` mode is built at
+all** (M0–M9 precede M10). See ADR-005 for the full comparison against the alternative orderings.
+In short: it maximizes value delivered per phase, and it means `fleet` is built on top of a metric
+source and a decision engine that have already run against real load, rather than being the first
+place either does.
 
-Observe-only (M6) precedes any writing. The estimators in §4.5 are unvalidated; shipping them
-directly to actuation would be guessing with someone's money.
+**Scale-up actuation is folded into the MVP itself (M6)**, not gated behind a separate observe-only
+release. `--dry-run` (US-013) remains available and is validated against the live test environment
+before the flag is flipped to live — that validation is now a step inside M6, not a numbered phase of
+its own, because scale-up's blast radius is bounded: it can only add capacity, and any overspend is
+visible and reversible on the very next cycle. The estimators in §4.5 are still unvalidated at M6,
+but the cost of that being wrong in the *up* direction is bounded in a way it is not in the *down*
+direction.
+
+**Scale-down (M9) waits until scale-up has run live.** Its failure mode is real, not just wasteful: a
+wrong scale-down throttles the workload. It also gets to reuse M6–M8 telemetry for calibration
+instead of guessing thresholds cold.
+
+**Platform metrics (M7) are built and exercised in `local` mode (M8, shadow/comparison against the
+trusted guest source) before `fleet` mode exists.** `fleet` has no guest fallback — if the platform
+source were validated for the first time there, a bad decision would have no cheaper environment to
+have caught it in first.
 
 ### 9.3 Definition of done per milestone
 
@@ -598,9 +973,14 @@ milestone introduces.
 
 ### 9.4 Deferred decisions
 
-- **State persistence.** v1 keeps cooldowns and budgets in memory, so a restart forgets them. Bounded
-  by the cold-start rule (no action until windows refill), which is at least as long as a cooldown.
-  Revisit if restarts prove frequent.
+- **Cooldown persistence (only).** v1 keeps cooldowns in memory, so a restart forgets them. This is
+  safe, not just cheap: `cooldown.scale_up ≤ scale_up_window` and `cooldown.scale_down ≤
+  scale_down_window` are both enforced by `--validate-config`, so the cold-start rule (no action
+  until windows refill) always takes at least as long as the cooldown it would have replaced. Revisit
+  if restarts prove frequent. **The 24h change budget is not part of this deferral** — see ADR-013:
+  the cold-start bound says nothing about total changes across many restarts in a day, so the budget
+  counter must be reconstructible from durable storage on startup. M4 (Decider + Guardrails) is not
+  done without it.
 - **Leader election.** Two `fleet` agents on the same project would both act. v1 documents
   "run one"; a lease is the fix if it becomes real.
 - **Absolute latency thresholds.** Relative-to-baseline only in v1; absolute mode is in the config

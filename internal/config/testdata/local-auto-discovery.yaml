@@ -1,0 +1,19 @@
+apiVersion: autoscaling.mws.cloud/v1alpha1
+kind: IOPSAutoScaler
+mode: local
+
+policy:
+  limits: {min_iops: 1000, max_iops: 10000}
+
+disks:
+  mode: auto-discovery
+  exclude:
+    - bootdisk
+
+runtime:
+  metrics:
+    source: guest
+    collection_interval: 10s
+  controller:
+    reconcile_interval: 30s
+    discovery_interval: 5m
