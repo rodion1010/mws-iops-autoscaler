@@ -217,6 +217,11 @@ spikes do not throttle.
 - [ ] Triggers only on confirmed saturation — queue depth at/above threshold, **or** p95 latency
       above the disk's own baseline × `baseline_multiplier`, **or** throttling detected — sustained
       over `scale_up_window`
+- [ ] A disk saturated since the agent's first sample still reaches a scale-up decision — the queue
+      depth and throttling signals need no latency baseline, and the baseline itself seeds from the
+      first full window regardless of saturation (only *updates* to an established baseline are
+      frozen during saturation, not its initial establishment); no blanket "wait for baseline" gate
+      may block every signal indefinitely (ADR-012)
 - [ ] A disk at 100% utilization with flat latency and an empty queue is efficient and **must not**
       be scaled up
 - [ ] Target is computed from estimated demand: `demand / target.scale_up_utilization`, not by

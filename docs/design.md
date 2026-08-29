@@ -190,13 +190,19 @@ actually be honored (ADR-010).
    if resize_in_progress(disk):        skip
    if in_cooldown(disk):               skip
    if window_not_full(disk):           skip   ← cold start never acts
-   if baseline_not_established(disk):  skip   ← latency baseline warm-up
 
    # window_not_full is timestamp-based, not a sample count (ADR-010):
    #   newest_sample.Timestamp - oldest_sample.Timestamp < policy.evaluation.scale_up_window
    # (scale_down_window for the down-check). A count derived from an assumed
    # collection_interval would silently misjudge readiness under tick jitter
    # or a missed sample — the timestamp span is what "full" actually means.
+   #
+   # There is deliberately no blanket "skip if baseline not established" here
+   # (ADR-012) — that gate used to block every decision on a disk saturated
+   # since startup forever, since a baseline could only be learned from a
+   # quiet sample the saturation itself prevented. Baseline availability now
+   # gates only the specific signal and demand form that need it, inside
+   # analyze() below.
 
    m  = analyze(samples, policy.evaluation)
    vm = analyze_vm(sibling disks)
@@ -232,11 +238,16 @@ resource_gate :=
 
 saturated :=
       resource_gate
-  AND ( queue_depth        >= policy.saturation.queue_depth_threshold
-     OR latency.P95        >  baseline.P95 × policy.saturation.latency.baseline_multiplier
+  AND ( queue_depth >= policy.saturation.queue_depth_threshold
+     OR (baseline_established AND latency.P95 > baseline.P95 × policy.saturation.latency.baseline_multiplier)
      OR throttling_detected )
   AND sustained over policy.evaluation.scale_up_window
 ```
+
+The latency disjunct is conditional on `baseline_established` — it evaluates false, never blocks,
+when no baseline exists yet. `queue_depth` and `throttling_detected` need no baseline at all and can
+confirm saturation on their own (ADR-012) — this is what actually breaks the cold-start-while-
+saturated deadlock a blanket "skip until baseline exists" gate used to cause.
 
 `bandwidth_utilization = (read_bytes/s + write_bytes/s) / (spec.iops × 32768)` — NBS-PL2's fixed
 IOPS-to-bandwidth ratio (CLAUDE.md: `MB/s = IOPS × 32 / 1024`), using the exact measured bytes/IOPS
@@ -250,7 +261,17 @@ count; gating on IOPS alone would silently miss it — the whole reason ADR-008 
 
 **Latency is baseline-relative, never absolute.** `p95 > 10 ms` is wrong for everyone; acceptable
 latency is workload-specific. The baseline is a long rolling low-percentile of the disk's own
-observed latency, frozen while the disk is saturated so a throttled period cannot poison it.
+observed latency, **frozen against updates** while the disk is saturated so a throttled period cannot
+poison an already-established baseline.
+
+**Establishment is not gated by saturation — only updates are** (ADR-012). The baseline seeds from
+the disk's first full window's low-percentile latency regardless of whether that window happened to
+be saturated; the low percentile is exactly the statistic that stays close to true unloaded service
+time even under load, which is why §4.4 chose it over a mean. Only once established does the freeze
+apply, holding it fixed for the rest of an active saturation episode. Without this, a disk saturated
+since the agent started would never get a quiet sample to learn from — the freeze rule would keep a
+never-established baseline unestablished forever, and the latency signal (plus the closed-workload
+demand form below) would be permanently unavailable, not just delayed.
 
 **How the p95 is derived is not uniform across `Source`, and is recorded, not assumed** (ADR-011).
 `guest` always uses `LatencyWindowedAvg` — a percentile estimated from a window of per-interval
@@ -290,6 +311,14 @@ the service rate is pinned, so the excess appears as queueing. Two regimes:
 The closed-workload form is the workhorse: if latency is 3× baseline, the workload is receiving
 roughly a third of the service it wants. Both forms are clamped to
 `max_scale_up_ratio` so a pathological reading cannot request a 10× jump.
+
+The closed-workload form needs `baseline_established` (ADR-012); the open-workload form does not — a
+growing queue is visible without any latency baseline at all. In the one corner where saturation was
+already confirmed via `queue_depth` or `throttling_detected`, the workload is closed, and the
+baseline has not yet been computed from this window, `demand()` has no ratio to compute and the cycle
+emits `NoAction` with that specific reason rather than guessing. Because the baseline seeds from this
+same window regardless of saturation (§4.4), this is a single reconcile cycle, not a repeat of the
+deadlock the blanket gate used to cause — the next cycle has a baseline to work with.
 
 **Platform-side (fleet mode).** No queue-in-operations and no read queue, so only the
 latency-ratio form is available — but that ratio itself can use `LatencyHistogram`, the more accurate
@@ -454,8 +483,10 @@ type LatencyStat struct {
 // journal need, computed once per disk per cycle. ReadLatency/WriteLatency
 // carry LatencyWindowedAvg for guest always, and for platform whenever no
 // fresh histogram is available; LatencyHistogram for platform when one is
-// (ADR-011). Baseline is frozen while the disk is saturated (§4.4) and
-// carries whichever Kind produced it.
+// (ADR-011). Baseline is frozen against updates while the disk is
+// saturated (§4.4) — BaselineEstablished is a separate state question
+// (do we have one yet) from Baseline.Kind (how it was computed); establishing
+// it is never blocked by saturation, only revising it is (ADR-012).
 type Analysis struct {
     DiskID               string
     IOPSUtilization      float64
@@ -464,6 +495,7 @@ type Analysis struct {
     ReadLatency          LatencyStat
     WriteLatency         LatencyStat
     Baseline             LatencyStat
+    BaselineEstablished  bool
     ThrottleDetected     bool
     Demand               float64
     WindowFull           bool // timestamp-span based, not a count (ADR-010)
@@ -518,7 +550,7 @@ exposing them.
 | NFR-6 | Change rate | ≤ `max_changes_per_24h` per disk (default 48) | Runaway guard; billing is per-minute so this is not a cost constraint |
 | NFR-7 | Network resilience | Retry with backoff + jitter; idempotency key on every write | Measured: `SSL_ERROR_SYSCALL` and 10–15 s stalls are routine on this network |
 | NFR-8 | Timeout | ≥ 30 s, never the SDK's 5 s default | Endpoint discovery alone was measured at 15 s |
-| NFR-9 | Cold start | No action until window full **and** baseline established | A fresh agent must not act on partial evidence |
+| NFR-9 | Cold start | No action until window full; no action on a signal-baseline pairing whose baseline is not yet established (queue/throttling-based signals are unaffected) | A fresh agent must not act on partial evidence — but must not deadlock on an already-saturated disk either (ADR-012) |
 | NFR-10 | Crash safety | Restart loses windows, never doubles a write | Idempotency key + verify-after-write |
 | NFR-11 | Availability | Metrics-source outage degrades to no-action, never to a guess | Missing data is not zero load |
 | NFR-12 | Permissions | `local` needs no metrics credential at all | Guest source removes the API key requirement |
@@ -619,7 +651,10 @@ The pipeline is pure between Discovery and Actuator, so the decision logic is te
 **Property-based tests** for the invariants that must hold for *any* input:
 - output is always in `[min_iops, min(max_iops, 10000, vm_headroom)]`
 - output is always a multiple of 100
-- `NoAction` whenever the window is not full or the baseline is unset
+- `NoAction` whenever the window is not full
+- `NoAction` only for the specific evaluation cycle where every applicable signal needed a baseline
+  that isn't established yet — never permanently, and never when queue depth or throttling alone
+  already confirm saturation (ADR-012)
 - scale-down never produces a target above current; scale-up never below
 
 ### 8.2 Integration tests — against fakes
