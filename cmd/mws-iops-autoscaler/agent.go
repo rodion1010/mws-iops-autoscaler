@@ -150,13 +150,20 @@ func (a *Agent) discover(ctx context.Context) error {
 		a.telemetry.RecordDiscoverySkipped(s.Alias, s.Category)
 	}
 
-	managed, missing, err := registry.Select(vm, a.cfg.Disks, a.resolved)
+	// An unmatched disks.selected device_name is now a hard error, not a
+	// logged omission (issue #5, reopened): registry.Select's "selected"
+	// branch never returns a non-nil err alongside a nil missing, and
+	// never returns a non-nil missing alongside a nil err — the two
+	// possibilities the old code handled separately (fatal vs. "log and
+	// continue with a partial set") have collapsed into one. Returning
+	// here means a.managed/a.sampler.SetDisks are never reached, so the
+	// previous (still valid) managed set is left in place rather than
+	// replaced by a partial one — and SetDiscoverySucceeded(false) makes
+	// that visible on /readyz, exactly as this issue requires.
+	managed, _, err := registry.Select(vm, a.cfg.Disks, a.resolved)
 	if err != nil {
 		a.readiness.SetDiscoverySucceeded(false)
 		return err
-	}
-	for _, name := range missing {
-		log.Printf("discover: disks.selected device_name %q not found on the VM", name)
 	}
 
 	// Local mode's guest-path verification (issue #4): a disk that passed

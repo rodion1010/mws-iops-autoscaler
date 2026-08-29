@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -380,5 +381,64 @@ func TestHasManagedDisks(t *testing.T) {
 	a.managed = []registry.ManagedDisk{independentDisk()}
 	if !a.hasManagedDisks() {
 		t.Error("hasManagedDisks() = false with a non-empty managed set")
+	}
+}
+
+// --- issue #5 (reopened): unmatched disks.selected must be fatal ---
+
+func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(), // has "good" and "bad", not "missing-disk"
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
+		{DeviceName: "good"}, {DeviceName: "missing-disk"},
+	}}
+	// Simulate a prior successful cycle: every readiness dimension already
+	// true, and a real managed set already published.
+	a.readiness.SetConfigValid(true)
+	a.readiness.SetDiscoverySucceeded(true)
+	a.readiness.SetSourceReachable(true)
+	stale := []registry.ManagedDisk{independentDisk()}
+	a.managed = stale
+	if !a.readiness.Ready() {
+		t.Fatal("test setup: readiness must be true before the fatal discover() call")
+	}
+
+	err := a.discover(context.Background())
+	if err == nil {
+		t.Fatal("discover succeeded despite an unmatched disks.selected device_name")
+	}
+	if !strings.Contains(err.Error(), "missing-disk") {
+		t.Errorf("err = %v, want it to name the unmatched device_name", err)
+	}
+	if len(a.managed) != 1 || a.managed[0].Disk.DeviceName != stale[0].Disk.DeviceName {
+		t.Errorf("managed = %+v, want the prior snapshot left untouched, never replaced by a partial one", a.managed)
+	}
+	if a.readiness.Ready() {
+		t.Error("readiness.Ready() = true after a fatal disks.selected mismatch, want false")
+	}
+}
+
+func TestDiscover_selectedSucceedsWhenEveryDeviceMatches(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "good"}}}
+
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(a.managed) != 1 || a.managed[0].Disk.DeviceName != "good" {
+		t.Errorf("managed = %+v, want exactly the selected disk", a.managed)
 	}
 }

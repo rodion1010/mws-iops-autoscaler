@@ -176,7 +176,18 @@ disks:
 `exclude` is a plain list of device names. `selected` entries are mappings, because each one may
 carry a policy.
 
-Rediscovery runs on an interval, so disks attached after startup are picked up without a restart.
+**`mode: selected` is exhaustive, not best-effort (issue #5).** Every `device_name` listed must
+resolve against the VM's live disks on every discovery cycle — a name that doesn't match anything is a
+startup/discovery error, not a logged omission. This is deliberately asymmetric with
+`mode: auto-discovery`'s `exclude`, where naming a disk that doesn't exist is harmless (there's nothing
+to exclude): under `selected`, the list *is* the operator's entire stated intent, so silently managing
+fewer disks than named would make the agent's actual behavior diverge from what was configured, with no
+signal beyond a log line. On this error the agent keeps whatever managed set the previous successful
+discovery produced (never a partial one built from only the matched names) and `/readyz` reports not
+ready until the mismatch is resolved — either the missing disk is attached, or the config is corrected.
+
+Rediscovery runs on an interval, so disks attached after startup are picked up without a restart —
+including recovering from this error once the VM's inventory becomes consistent with `selected` again.
 
 **Classification is automatic and not user-configurable.** Each disk is dependent (VM-owned, written
 through the VM spec) or independent (written through the disk API) — see ADR-003. Both are managed;
