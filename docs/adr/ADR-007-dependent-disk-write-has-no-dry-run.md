@@ -92,4 +92,6 @@ failure instead of a clean no-op, and this has not been tested live to know whic
   genuinely has no dry-run path — promote this from "strong evidence" to `[V]` in CLAUDE.md either
   way.
 - If the platform ever adds `validateOnly` to the VM update operation, this ADR's asymmetry goes away
-  and US-013 can drop the per-class distinction.
+  and US-013 can drop the per-class distinction. Tracked as a platform feature request in
+  `PLATFORM_DEPENDENCIES.md` item 5 ("No `validate_only` on Upsert") — check there for status before
+  re-investigating this from scratch.

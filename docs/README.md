@@ -8,6 +8,7 @@
 | [`configuration.md`](configuration.md) | Derived from the PRD and design: policy model, defaults, inheritance, examples, validation rules |
 | [`TODO.md`](TODO.md) | Parking lot. **Nothing is picked up from here without an explicit decision.** |
 | [`../CLAUDE.md`](../CLAUDE.md) | Measured platform behaviour — every empirical claim above is sourced here |
+| [`../PLATFORM_DEPENDENCIES.md`](../PLATFORM_DEPENDENCIES.md) | Living log of platform limitations/bugs with a filed or planned feature request/bug report, and the workaround each currently forces here |
 
 ## Document hierarchy
 
