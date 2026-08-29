@@ -1,5 +1,8 @@
 module github.com/rodion1010/mws-iops-autoscaler
 
-go 1.24.7
+go 1.26.0
 
-require gopkg.in/yaml.v3 v3.0.1 // indirect
+require (
+	go.mws.cloud/go-sdk v0.19.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
