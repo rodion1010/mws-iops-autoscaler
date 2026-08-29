@@ -83,7 +83,7 @@ policy:
 | `limits.min_iops` | Floor. 1000 is included in the disk's base price, so going lower is impossible and would save nothing. |
 | `limits.max_iops` | User ceiling. Clamped to 10000 and further to `3000 × vCPU` at runtime — **the platform does not enforce the VM cap**, the agent does. |
 | `saturation.utilization_threshold` | Precondition only, checked against **whichever of IOPS or bandwidth utilization is higher** (ADR-008) — a disk below it on both cannot be limit-starved, so signal checks are skipped. Never triggers a change on its own. |
-| `saturation.queue_depth_threshold` | Units differ by source: operations in `local`, bytes in `fleet`. The agent will not compare across units. |
+| `saturation.queue_depth_threshold` | Units differ by source: operations in `local`, bytes in `fleet`. The agent will not compare across units — the Analyzer rejects a window whose samples are not all `local`'s own ops unit before evaluating this threshold or summing queue growth into an IOPS demand figure (issue #18), rather than silently comparing a bytes reading against an ops-calibrated number. |
 | `saturation.latency.baseline_multiplier` | Relative to the disk's own baseline. An absolute threshold is wrong for everyone; acceptable latency is workload-specific. |
 | `target.scale_up_utilization` | Applied to estimated demand *after* saturation is confirmed: `target = demand / 0.85`. |
 | `target.scale_down_utilization` | Deliberately lower, so scale-down leaves headroom instead of landing flush against current demand. |

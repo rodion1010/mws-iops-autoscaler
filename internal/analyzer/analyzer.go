@@ -119,7 +119,7 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 		demandP95Down(downWindow)
 
 	out.ServedIOPS = newest.ReadOps + newest.WriteOps
-	out.QueueGrowthRate = queueGrowthRate(upWindow)
+	out.QueueGrowthRate, out.QueueGrowthRateValid = queueGrowthRate(upWindow)
 
 	// Freeze against updates while saturated (§4.4) — use this cycle's own
 	// verdict, computed above from the baseline as of *before* this
@@ -288,8 +288,29 @@ func sustainedResourceGate(window []metrics.Sample, specIOPS int64, threshold fl
 	return true
 }
 
+// queueUnitConsistent reports whether every sample in window carries its
+// QueueDepth in want's unit — the guard every ops-denominated queue formula
+// below needs before comparing raw QueueDepth.Value against an
+// ops-calibrated threshold or summing it into an IOPS quantity (issue #18).
+// Guest is the only MetricSource implemented today and always produces
+// QueueDepthOps (ADR-001), so a false return is unreachable through the
+// real pipeline right now — it exists so a future platform-sourced window
+// (QueueDepthBytes, CLAUDE.md: "write_queue_length ... byte-denominated")
+// is rejected outright the moment M7 lands, rather than silently compared
+// against a threshold calibrated for a different unit. "Reject unknown
+// units instead of silently evaluating them" is the issue's own proposed
+// direction.
+func queueUnitConsistent(window []metrics.Sample, want metrics.QueueDepthUnit) bool {
+	for _, s := range window {
+		if s.QueueDepth.Unit != want {
+			return false
+		}
+	}
+	return true
+}
+
 func sustainedQueueAtOrAbove(window []metrics.Sample, threshold float64) bool {
-	if len(window) == 0 {
+	if len(window) == 0 || !queueUnitConsistent(window, metrics.QueueDepthOps) {
 		return false
 	}
 	for _, s := range window {
@@ -300,8 +321,14 @@ func sustainedQueueAtOrAbove(window []metrics.Sample, threshold float64) bool {
 	return true
 }
 
+// sustainedQueueBelow gates on queueUnitConsistent the same as
+// sustainedQueueAtOrAbove, which means a non-ops window can never satisfy
+// it — Underutilized (an AND of this predicate with the others) fails
+// closed rather than treating unrecognized-unit backlog as "quiet" (issue
+// #18: no scale-down decision may be based on queue data this formula
+// cannot interpret).
 func sustainedQueueBelow(window []metrics.Sample, threshold float64) bool {
-	if len(window) == 0 {
+	if len(window) == 0 || !queueUnitConsistent(window, metrics.QueueDepthOps) {
 		return false
 	}
 	for _, s := range window {
@@ -361,20 +388,27 @@ func writeLatencies(window []metrics.Sample) []time.Duration {
 // window — a simple endpoint slope, not a least-squares regression. With
 // as few as minSamplesForWindow points, a regression wouldn't be
 // meaningfully more accurate than the direct endpoint difference, and the
-// endpoint form is far easier to reason about and test. Zero (or negative,
-// for two samples with a non-monotonic timestamp — shouldn't happen given
-// Sampler's chronological contract, but division still needs a guard) for
-// a window that can't produce a rate.
-func queueGrowthRate(window []metrics.Sample) float64 {
-	if len(window) < 2 {
-		return 0
+// endpoint form is far easier to reason about and test. Zero/invalid (or
+// negative, for two samples with a non-monotonic timestamp — shouldn't
+// happen given Sampler's chronological contract, but division still needs
+// a guard) for a window that can't produce a rate.
+//
+// valid is false whenever window isn't ops-denominated throughout
+// (queueUnitConsistent, issue #18) — the Decider's open-workload demand
+// formula sums this rate directly with ServedIOPS (an ops/s quantity), so
+// a bytes/s reading must never reach it labeled as if it were ops/s. The
+// caller (decider.demand) is required to check valid before trusting rate;
+// see decider.go's own comment at that call site.
+func queueGrowthRate(window []metrics.Sample) (rate float64, valid bool) {
+	if len(window) < 2 || !queueUnitConsistent(window, metrics.QueueDepthOps) {
+		return 0, false
 	}
 	first, last := window[0], window[len(window)-1]
 	elapsed := last.Timestamp.Sub(first.Timestamp).Seconds()
 	if elapsed <= 0 {
-		return 0
+		return 0, false
 	}
-	return (last.QueueDepth.Value - first.QueueDepth.Value) / elapsed
+	return (last.QueueDepth.Value - first.QueueDepth.Value) / elapsed, true
 }
 
 // demandP95Down computes the three down-window demand figures issue #17

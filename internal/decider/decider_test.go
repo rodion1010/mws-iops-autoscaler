@@ -79,7 +79,7 @@ func TestDecide_cooldownScaleDownBlocks(t *testing.T) {
 func TestDecide_scaleUpOpenRegime(t *testing.T) {
 	d := NewPolicyDecider(true)
 	// demand = served + growth = 900 + 100 = 1000; raw = 1000/0.85 = 1176.47 -> 1200.
-	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, ServedIOPS: 900}
+	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, QueueGrowthRateValid: true, ServedIOPS: 900}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionScaleUp {
 		t.Fatalf("Action = %v, want ActionScaleUp (got %+v)", got.Action, got)
@@ -127,7 +127,7 @@ func TestDecide_targetBelowMinChangeIsNoAction(t *testing.T) {
 	d := NewPolicyDecider(true)
 	// demand = 900 + 5 = 905; raw = 905/0.85 = 1064.7 -> 1100; delta from
 	// current(1000) is only 100, below MinChangeIOPS(200).
-	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 5, ServedIOPS: 900}
+	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 5, QueueGrowthRateValid: true, ServedIOPS: 900}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionNoAction || got.Reason != "target_not_above_current" {
 		t.Errorf("got %+v, want NoAction/target_not_above_current", got)
@@ -139,7 +139,7 @@ func TestDecide_targetBelowMinChangeIsNoAction(t *testing.T) {
 
 func TestDecide_budgetExhaustedBlocksOtherwiseValidScaleUp(t *testing.T) {
 	d := NewPolicyDecider(true)
-	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, ServedIOPS: 900}
+	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, QueueGrowthRateValid: true, ServedIOPS: 900}
 	state := GuardrailState{ChangesInLast24h: testPolicy.MaxChangesPer24h}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, state, epoch)
 	if got.Action != ActionNoAction || got.Reason != "budget_exhausted" {
@@ -249,7 +249,7 @@ func TestDecide_scaleDownDisabledIgnoresCooldownAndBudget(t *testing.T) {
 
 func TestDecide_scaleUpUnaffectedByScaleDownGate(t *testing.T) {
 	d := NewPolicyDecider(false)
-	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, ServedIOPS: 900}
+	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, QueueGrowthRateValid: true, ServedIOPS: 900}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionScaleUp {
 		t.Errorf("Action = %v, want ActionScaleUp — the scale-down gate must not affect scale-up", got.Action)
@@ -370,7 +370,7 @@ func TestHeadroomCeiling_takesTightestBound(t *testing.T) {
 }
 
 func TestDemand_openRegimeIgnoresLatency(t *testing.T) {
-	a := analyzer.Analysis{QueueGrowthRate: 50, ServedIOPS: 800, BaselineEstablished: false}
+	a := analyzer.Analysis{QueueGrowthRate: 50, QueueGrowthRateValid: true, ServedIOPS: 800, BaselineEstablished: false}
 	got, ok := demand(a)
 	if !ok {
 		t.Fatal("ok = false, want true")
@@ -398,5 +398,45 @@ func TestDemand_closedRegimeUnavailableWithoutBaseline(t *testing.T) {
 	a := analyzer.Analysis{QueueGrowthRate: 0, BaselineEstablished: false}
 	if _, ok := demand(a); ok {
 		t.Error("ok = true, want false — no baseline and no growth means no demand estimate")
+	}
+}
+
+// TestDemand_invalidQueueGrowthRateNeverSums is issue #18's core scenario:
+// a large raw QueueGrowthRate (as a future platform-sourced bytes/s
+// reading would be) must never reach the open-workload sum just because
+// its number happens to be large — only QueueGrowthRateValid decides that,
+// never the magnitude. Falls through to the closed-workload regime, and
+// with no baseline established here, that means no estimate at all —
+// never a bytes-inflated demand that guardrails would clamp to max.
+func TestDemand_invalidQueueGrowthRateNeverSums(t *testing.T) {
+	a := analyzer.Analysis{
+		QueueGrowthRate:      1_000_000, // a bytes/s-scale number, not ops/s
+		QueueGrowthRateValid: false,
+		ServedIOPS:           800,
+		BaselineEstablished:  false,
+	}
+	_, ok := demand(a)
+	if ok {
+		t.Error("ok = true, want false — an invalid growth rate must never be summed with ServedIOPS regardless of its magnitude")
+	}
+}
+
+// TestDecide_invalidQueueGrowthRateFallsBackNotMaxClamp is the same
+// scenario through the full Decide path: a saturated disk with an invalid,
+// large QueueGrowthRate and no baseline must end in NoAction/
+// baseline_unavailable, never a scale-up target driven by the bogus sum
+// (which guardrails would otherwise clamp to the VM/policy ceiling).
+func TestDecide_invalidQueueGrowthRateFallsBackNotMaxClamp(t *testing.T) {
+	d := NewPolicyDecider(true)
+	a := analyzer.Analysis{
+		Saturated:            true,
+		QueueGrowthRate:      1_000_000,
+		QueueGrowthRateValid: false,
+		ServedIOPS:           800,
+		BaselineEstablished:  false,
+	}
+	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionNoAction || got.Reason != "baseline_unavailable" {
+		t.Errorf("got %+v, want NoAction/baseline_unavailable — an invalid growth rate must never drive a scale-up, however large its raw number", got)
 	}
 }

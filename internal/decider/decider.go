@@ -170,7 +170,15 @@ func headroomCeiling(vm VMState, p EffectivePolicy) int64 {
 // amendment note). It stays here so Decide never divides by zero if ever
 // handed an Analysis built by hand in a test that violates the invariant.
 func demand(a analyzer.Analysis) (float64, bool) {
-	if a.QueueGrowthRate > queueGrowthThreshold {
+	// a.QueueGrowthRateValid gates this sum (issue #18): ServedIOPS is
+	// ops/s, and the open-workload formula is only dimensionally valid
+	// when QueueGrowthRate is too. Analyzer sets Valid=false whenever the
+	// up-window's QueueDepth isn't ops-denominated (today, only reachable
+	// once a future platform source can deliver QueueDepthBytes) — never
+	// reach here treating a bytes/s reading as if it were ops/s. An
+	// invalid growth rate falls through to the closed-workload regime
+	// below, the same as a growth rate that simply isn't above threshold.
+	if a.QueueGrowthRateValid && a.QueueGrowthRate > queueGrowthThreshold {
 		return a.ServedIOPS + a.QueueGrowthRate, true
 	}
 	if !a.BaselineEstablished || a.Baseline.P95 <= 0 {

@@ -153,11 +153,24 @@ type Analysis struct {
 	// called from the Saturated branch. ServedIOPS is exposed directly
 	// (not just IOPSUtilization, a ratio) so the Decider never needs
 	// specIOPS a second time. QueueGrowthRate is (newest−oldest queue
-	// depth) / elapsed seconds within the up-window — units match
-	// QueueDepth.Unit per second, so it sums directly with ServedIOPS in
-	// the open-workload form.
-	ServedIOPS      float64
-	QueueGrowthRate float64
+	// depth) / elapsed seconds within the up-window.
+	//
+	// QueueGrowthRate is NOT unconditionally safe to sum with ServedIOPS
+	// (issue #18): QueueDepth.Unit distinguishes ops (guest) from bytes
+	// (platform, CLAUDE.md), and the open-workload demand formula is
+	// dimensionally valid only for ops/s. QueueGrowthRateValid is true
+	// only when every sample in the up-window carried QueueDepthOps; the
+	// Decider must check it before adding QueueGrowthRate to ServedIOPS,
+	// falling back to the closed-workload (latency-ratio) regime
+	// otherwise, same as it already does when no baseline is available.
+	// Guest is the only source implemented today and always produces
+	// QueueDepthOps, so QueueGrowthRateValid is unconditionally true
+	// through the real pipeline right now — the flag exists so a future
+	// platform-sourced (bytes) window can never silently reach the
+	// ops-denominated formula the moment M7 lands.
+	ServedIOPS           float64
+	QueueGrowthRate      float64
+	QueueGrowthRateValid bool
 }
 
 // Analyzer is implemented by WindowAnalyzer (analyzer.go); an interface so

@@ -335,6 +335,113 @@ func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
 	if diff := got.QueueGrowthRate - wantRate; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("QueueGrowthRate = %v, want %v", got.QueueGrowthRate, wantRate)
 	}
+	if !got.QueueGrowthRateValid {
+		t.Error("QueueGrowthRateValid = false, want true — guest samples are always ops-denominated (ADR-001)")
+	}
+}
+
+// --- issue #18: queue units must never mix into IOPS demand math ---
+
+// sampleWithQueueUnit builds one sample identical in shape to sampleAt but
+// with an explicit QueueDepth unit, so these tests can construct a
+// bytes-denominated window with the exact same numeric progression as an
+// ops-denominated one — proving the two cannot produce the same math
+// despite identical raw values.
+func sampleWithQueueUnit(minute int, queue float64, unit metrics.QueueDepthUnit) metrics.Sample {
+	s := sampleAt(minute, 100, 0, 0, 0, queue, time.Millisecond, time.Millisecond)
+	s.QueueDepth.Unit = unit
+	return s
+}
+
+func TestQueueUnitConsistent_mixedOrBytesWindowRejected(t *testing.T) {
+	opsWindow := []metrics.Sample{
+		sampleWithQueueUnit(0, 5, metrics.QueueDepthOps),
+		sampleWithQueueUnit(1, 5, metrics.QueueDepthOps),
+	}
+	if !queueUnitConsistent(opsWindow, metrics.QueueDepthOps) {
+		t.Error("queueUnitConsistent(all-ops, ops) = false, want true")
+	}
+
+	bytesWindow := []metrics.Sample{
+		sampleWithQueueUnit(0, 5, metrics.QueueDepthBytes),
+		sampleWithQueueUnit(1, 5, metrics.QueueDepthBytes),
+	}
+	if queueUnitConsistent(bytesWindow, metrics.QueueDepthOps) {
+		t.Error("queueUnitConsistent(all-bytes, ops) = true, want false")
+	}
+
+	mixedWindow := []metrics.Sample{
+		sampleWithQueueUnit(0, 5, metrics.QueueDepthOps),
+		sampleWithQueueUnit(1, 5, metrics.QueueDepthBytes),
+	}
+	if queueUnitConsistent(mixedWindow, metrics.QueueDepthOps) {
+		t.Error("queueUnitConsistent(mixed, ops) = true, want false — one wrong-unit sample must invalidate the whole window")
+	}
+}
+
+// TestSustainedQueue_identicalValuesDifferentUnitsDiverge is the issue's
+// own acceptance criterion: "tests cover identical numeric values with ops
+// and bytes and prove they cannot produce silently identical math." Both
+// windows carry the exact same QueueDepth.Value progression; only the unit
+// differs.
+func TestSustainedQueue_identicalValuesDifferentUnitsDiverge(t *testing.T) {
+	const threshold = 1.0
+	opsWindow := []metrics.Sample{
+		sampleWithQueueUnit(0, 5, metrics.QueueDepthOps),
+		sampleWithQueueUnit(1, 5, metrics.QueueDepthOps),
+	}
+	bytesWindow := []metrics.Sample{
+		sampleWithQueueUnit(0, 5, metrics.QueueDepthBytes),
+		sampleWithQueueUnit(1, 5, metrics.QueueDepthBytes),
+	}
+
+	if !sustainedQueueAtOrAbove(opsWindow, threshold) {
+		t.Error("sustainedQueueAtOrAbove(ops, value=5, threshold=1) = false, want true")
+	}
+	if sustainedQueueAtOrAbove(bytesWindow, threshold) {
+		t.Error("sustainedQueueAtOrAbove(bytes, value=5, threshold=1) = true, want false — an ops-calibrated threshold must never confirm against bytes, even with an identical raw value")
+	}
+
+	quietOps := []metrics.Sample{
+		sampleWithQueueUnit(0, 0, metrics.QueueDepthOps),
+		sampleWithQueueUnit(1, 0, metrics.QueueDepthOps),
+	}
+	quietBytes := []metrics.Sample{
+		sampleWithQueueUnit(0, 0, metrics.QueueDepthBytes),
+		sampleWithQueueUnit(1, 0, metrics.QueueDepthBytes),
+	}
+	if !sustainedQueueBelow(quietOps, threshold) {
+		t.Error("sustainedQueueBelow(ops, value=0, threshold=1) = false, want true")
+	}
+	if sustainedQueueBelow(quietBytes, threshold) {
+		t.Error("sustainedQueueBelow(bytes, value=0, threshold=1) = true, want false — a byte-denominated window must fail closed, not be read as confirming quiet")
+	}
+}
+
+// TestQueueGrowthRate_identicalProgressionDifferentUnitsDiverge is the
+// growth-rate half of the same acceptance criterion, at the exact call
+// site issue #18 flags: decider.demand()'s open-workload sum.
+func TestQueueGrowthRate_identicalProgressionDifferentUnitsDiverge(t *testing.T) {
+	opsWindow := []metrics.Sample{
+		sampleWithQueueUnit(0, 0, metrics.QueueDepthOps),
+		sampleWithQueueUnit(1, 60, metrics.QueueDepthOps),
+	}
+	rate, valid := queueGrowthRate(opsWindow)
+	if !valid {
+		t.Fatal("valid = false for an all-ops window, want true")
+	}
+	if rate != 1.0 {
+		t.Errorf("rate = %v, want 1.0 (60 units over 60s)", rate)
+	}
+
+	bytesWindow := []metrics.Sample{
+		sampleWithQueueUnit(0, 0, metrics.QueueDepthBytes),
+		sampleWithQueueUnit(1, 60, metrics.QueueDepthBytes),
+	}
+	_, valid = queueGrowthRate(bytesWindow)
+	if valid {
+		t.Error("valid = true for an all-bytes window, want false — a bytes/s rate must never be handed to the Decider labeled as if it were ops/s")
+	}
 }
 
 func TestAnalyze_sourceAndPerOpOpsAndFillRatio(t *testing.T) {

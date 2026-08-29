@@ -237,6 +237,12 @@ spikes do not throttle.
       be scaled up
 - [ ] Target is computed from estimated demand: `demand / target.scale_up_utilization`, not by
       stepping a fixed percentage
+- [ ] The open-workload estimate (`served + queue growth rate`) is only used when the queue growth
+      rate is confirmed ops-denominated (issue #18) — `local`'s queue metric is ops, `fleet`'s is
+      bytes (`queue_depth_threshold` field note, §7), and the two must never be summed as if they
+      were the same unit merely because both are numbers; an unconfirmed rate falls back to the
+      closed-workload (latency-ratio) estimate, or to no estimate at all, never to a bytes-inflated
+      demand that guardrails would clamp straight to the ceiling
 - [ ] Rounded to a 100-IOPS multiple and clamped by `max_scale_up_ratio`
 - [ ] Never exceeds `min(10000, 3000 × vcpuCount)` — the platform does not enforce this (FR-15c)
 - [ ] Respects cooldown since the last change

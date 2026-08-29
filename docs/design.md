@@ -385,6 +385,16 @@ The closed-workload form is the workhorse: if latency is 3× baseline, the workl
 roughly a third of the service it wants. Both forms are clamped to
 `max_scale_up_ratio` so a pathological reading cannot request a 10× jump.
 
+`dL/dt` (`Analysis.QueueGrowthRate`) is only summed with `served` (ops/s) when
+`Analysis.QueueGrowthRateValid` is true — the Analyzer sets it false whenever the up-window's
+`QueueDepth` is not entirely `local`'s own ops unit (issue #18), since `fleet`'s queue metric is
+byte-denominated (CLAUDE.md) and `served + dL/dt` is only dimensionally valid for ops/s. An invalid
+growth rate falls through to the closed-workload form exactly as a growth rate that's simply not above
+`queueGrowthThreshold` does — never a raw bytes/s number added onto an ops/s figure, however large
+that number is. Today `local` (guest) is the only implemented source and always produces the ops unit,
+so `QueueGrowthRateValid` is unconditionally true through the real pipeline; the guard exists so a
+future `fleet` (platform) window can never silently reach this formula.
+
 The closed-workload form needs `baseline_established` (ADR-012); the open-workload form does not — a
 growing queue is visible without any latency baseline at all. In the one corner where saturation was
 already confirmed via `queue_depth` or `throttling_detected`, the workload is closed, and the
@@ -673,10 +683,14 @@ type Analysis struct {
     // the Saturated branch. ServedIOPS is exposed directly (not just
     // IOPSUtilization, a ratio) so the Decider never needs specIOPS a
     // second time. QueueGrowthRate is (newest−oldest queue depth) / elapsed
-    // seconds within the up-window — units match QueueDepth.Unit per
-    // second, so it sums directly with ServedIOPS in the open-workload form.
-    ServedIOPS      float64
-    QueueGrowthRate float64
+    // seconds within the up-window. It must NOT be assumed to sum directly
+    // with ServedIOPS (issue #18) — QueueGrowthRateValid is true only when
+    // every up-window sample carried QueueDepthOps; the Decider checks it
+    // before using the open-workload formula, falling back to the
+    // closed-workload one otherwise.
+    ServedIOPS           float64
+    QueueGrowthRate      float64
+    QueueGrowthRateValid bool
 }
 
 type Analyzer interface {
