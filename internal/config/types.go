@@ -58,9 +58,11 @@ type EvaluationSpec struct {
 }
 
 type SaturationSpec struct {
-	IOPSUtilizationThreshold *float64     `yaml:"iops_utilization_threshold"`
-	QueueDepthThreshold      *float64     `yaml:"queue_depth_threshold"`
-	Latency                  *LatencySpec `yaml:"latency"`
+	// UtilizationThreshold gates on whichever of IOPS or bandwidth
+	// utilization is higher, not IOPS alone (ADR-008).
+	UtilizationThreshold *float64     `yaml:"utilization_threshold"`
+	QueueDepthThreshold  *float64     `yaml:"queue_depth_threshold"`
+	Latency              *LatencySpec `yaml:"latency"`
 }
 
 type LatencySpec struct {

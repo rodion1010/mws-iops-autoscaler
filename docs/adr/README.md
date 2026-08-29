@@ -9,6 +9,7 @@
 | [005](ADR-005-local-before-fleet-sequencing.md) | Local mode ships complete before fleet mode; platform metrics validated via shadow mode | Accepted |
 | [006](ADR-006-single-default-defer-presets.md) | Phase 1 ships one built-in default parameter set; named presets deferred | Accepted |
 | [007](ADR-007-dependent-disk-write-has-no-dry-run.md) | `UpdateVirtualMachine` has no `validateOnly` — dependent-disk dry-run cannot be server-confirmed | Accepted |
+| [008](ADR-008-bandwidth-bound-saturation-gate.md) | Saturation gate opens on IOPS or bandwidth utilization, not IOPS alone | Accepted |
 
 ADRs are **derived from the PRD**, which is the primary document: it states the requirement, an ADR
 records how the requirement is met and why that way. An ADR never introduces or drops a requirement

@@ -41,7 +41,7 @@ recorded here already corrected, not as they shipped in the first draft:
 ```yaml
 performance:                           # earlier up, slower down, more headroom
   evaluation:  {scale_up_window: 3m,  scale_down_window: 60m}   # was 2m — violated cooldown.scale_up
-  saturation:  {iops_utilization_threshold: 0.95, queue_depth_threshold: 1,
+  saturation:  {utilization_threshold: 0.95, queue_depth_threshold: 1,
                 latency: {mode: relative, baseline_multiplier: 1.25}}
   target:      {scale_up_utilization: 0.75, scale_down_utilization: 0.60}
   cooldown:    {scale_up: 3m,  scale_down: 60m}
@@ -49,7 +49,7 @@ performance:                           # earlier up, slower down, more headroom
 
 cost:                                   # later up, tighter fit, faster down
   evaluation:  {scale_up_window: 10m, scale_down_window: 20m}
-  saturation:  {iops_utilization_threshold: 1.00, queue_depth_threshold: 2,
+  saturation:  {utilization_threshold: 1.00, queue_depth_threshold: 2,
                 latency: {mode: relative, baseline_multiplier: 2.0}}
   target:      {scale_up_utilization: 0.90, scale_down_utilization: 0.80}
   cooldown:    {scale_up: 10m, scale_down: 20m}

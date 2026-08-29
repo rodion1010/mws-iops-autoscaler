@@ -91,8 +91,8 @@ func applyAdvancedOverride(dst *ResolvedAdvanced, src *AdvancedSpec) {
 		}
 	}
 	if s := src.Saturation; s != nil {
-		if s.IOPSUtilizationThreshold != nil {
-			dst.IOPSUtilizationThreshold = *s.IOPSUtilizationThreshold
+		if s.UtilizationThreshold != nil {
+			dst.UtilizationThreshold = *s.UtilizationThreshold
 		}
 		if s.QueueDepthThreshold != nil {
 			dst.QueueDepthThreshold = *s.QueueDepthThreshold

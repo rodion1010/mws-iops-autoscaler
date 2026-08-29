@@ -202,8 +202,11 @@ single noisy sample cannot trigger a change.
 spikes do not throttle.
 
 **Acceptance Criteria:**
-- [ ] Utilization is a **gate, not a trigger**: at or above `saturation.iops_utilization_threshold`
-      the disk *may* be starved; below it, it cannot be, and the signal checks are skipped
+- [ ] Utilization is a **gate, not a trigger**: at or above `saturation.utilization_threshold` on
+      **either IOPS or bandwidth utilization** (ADR-008 — NBS-PL2's fixed IOPS-to-bandwidth ratio
+      means a large-block workload saturates bandwidth well before it saturates IOPS count, so
+      gating on IOPS alone would miss it) the disk *may* be starved; below both, it cannot be, and
+      the signal checks are skipped
 - [ ] Triggers only on confirmed saturation — queue depth at/above threshold, **or** p95 latency
       above the disk's own baseline × `baseline_multiplier`, **or** throttling detected — sustained
       over `scale_up_window`
@@ -562,7 +565,7 @@ model, default values and examples: `docs/configuration.md`.
 | `billing_step_iops` | 100 | platform-fixed, not user-settable |
 | `discovery_interval` | 5 min | picks up newly attached disks |
 | **Saturation (gate + signals)** | | |
-| `iops_utilization_threshold` | 0.98 | **gate only** — never triggers a change by itself |
+| `utilization_threshold` | 0.98 | **gate only**, on whichever of IOPS/bandwidth utilization is higher (ADR-008) — never triggers a change by itself |
 | `queue_depth_threshold` | 1 | units differ by source: ops in `local`, bytes in `fleet` |
 | `latency.mode` | `relative` | absolute thresholds are wrong for every workload |
 | `latency.baseline_multiplier` | 1.5 | versus the disk's own observed baseline |

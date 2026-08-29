@@ -27,7 +27,7 @@ type ResolvedAdvanced struct {
 	ScaleUpWindow      time.Duration
 	ScaleDownWindow    time.Duration
 
-	IOPSUtilizationThreshold  float64
+	UtilizationThreshold      float64 // gates on IOPS or bandwidth, whichever is higher (ADR-008)
 	QueueDepthThreshold       float64
 	LatencyMode               string
 	LatencyBaselineMultiplier float64
@@ -73,7 +73,7 @@ var presets = map[PresetName]ResolvedAdvanced{
 		CollectionInterval:        10 * time.Second,
 		ScaleUpWindow:             5 * time.Minute,
 		ScaleDownWindow:           30 * time.Minute,
-		IOPSUtilizationThreshold:  0.98,
+		UtilizationThreshold:      0.98,
 		QueueDepthThreshold:       1,
 		LatencyMode:               "relative",
 		LatencyBaselineMultiplier: 1.5,
@@ -90,7 +90,7 @@ var presets = map[PresetName]ResolvedAdvanced{
 		CollectionInterval:        10 * time.Second,
 		ScaleUpWindow:             3 * time.Minute, // ADR-006: first draft had 2m, violated §8's cooldown rule
 		ScaleDownWindow:           60 * time.Minute,
-		IOPSUtilizationThreshold:  0.95,
+		UtilizationThreshold:      0.95,
 		QueueDepthThreshold:       1,
 		LatencyMode:               "relative",
 		LatencyBaselineMultiplier: 1.25,
@@ -107,7 +107,7 @@ var presets = map[PresetName]ResolvedAdvanced{
 		CollectionInterval:        10 * time.Second,
 		ScaleUpWindow:             10 * time.Minute,
 		ScaleDownWindow:           20 * time.Minute,
-		IOPSUtilizationThreshold:  1.00,
+		UtilizationThreshold:      1.00,
 		QueueDepthThreshold:       2,
 		LatencyMode:               "relative",
 		LatencyBaselineMultiplier: 2.0,

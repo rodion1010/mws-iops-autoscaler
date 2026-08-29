@@ -215,16 +215,27 @@ through into `Analysis`, so the journal attributes each decision by source from 
 ### 4.4 Saturation detection
 
 ```
+resource_gate :=
+      iops_utilization      >= policy.saturation.utilization_threshold   (default 0.98)
+   OR bandwidth_utilization >= policy.saturation.utilization_threshold
+
 saturated :=
-      utilization >= policy.saturation.iops_utilization_threshold   (gate, default 0.98)
+      resource_gate
   AND ( queue_depth      >= policy.saturation.queue_depth_threshold
      OR p95_latency      >  baseline_p95 × policy.saturation.latency.baseline_multiplier
      OR throttling_detected )
   AND sustained over policy.evaluation.scale_up_window
 ```
 
-Utilization is a **gate, not a trigger** (ADR-002). If a disk is not near its limit it cannot be
-limit-starved, so the expensive checks are skipped.
+`bandwidth_utilization = (read_bytes/s + write_bytes/s) / (spec.iops × 32768)` — NBS-PL2's fixed
+IOPS-to-bandwidth ratio (CLAUDE.md: `MB/s = IOPS × 32 / 1024`), using the exact measured bytes/IOPS
+figure, not an approximation. `spec.iops` is already read by `Discover` (M1) on the same cycle — no
+extra API call.
+
+**Utilization is a gate, not a trigger** (ADR-002) — **on either resource** (ADR-008). If a disk is
+not near either of its provisioned limits it cannot be limit-starved, so the expensive checks are
+skipped. A large-block, throughput-heavy workload saturates bandwidth long before it saturates IOPS
+count; gating on IOPS alone would silently miss it — the whole reason ADR-008 exists.
 
 **Latency is baseline-relative, never absolute.** `p95 > 10 ms` is wrong for everyone; acceptable
 latency is workload-specific. The baseline is a long rolling low-percentile of the disk's own
@@ -561,7 +572,7 @@ pool), one dependent disk, one independent disk attached by ref.
 | Scale-down after quiet | stop load, wait `scale_down_window` | IOPS lowered, never below `min_iops` |
 | No flapping | alternating bursts around the threshold | Changes ≤ expected given hysteresis and cooldown |
 | VM cap detection | load both disks simultaneously past 6000 aggregate | `VM_IOPS_CAP_REACHED`, no write |
-| Bandwidth-bound case | `fio bs=64k` — pins `%util` at 100 while ops read ~51% of limit | Saturation detected via latency/queue, **not** missed |
+| Bandwidth-bound case | `fio bs=64k` — pins guest `%util` at 100 and `bandwidth_utilization` at the ceiling while `iops_utilization` reads ~51% | Gate opens on bandwidth (ADR-008); saturation detected via latency/queue, **not** missed |
 | Dependent write path | drive the VM-owned disk | Change applied via VM path; all other fields unchanged |
 | Independent write path | drive the ref-attached disk | Change applied via disk path |
 | Cold start | restart mid-load | No action until window full |

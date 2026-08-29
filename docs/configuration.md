@@ -51,7 +51,7 @@ policy:
       scale_down_window: 30m
 
     saturation:
-      iops_utilization_threshold: 0.98   # GATE, not a trigger
+      utilization_threshold: 0.98        # GATE, not a trigger — IOPS or bandwidth, whichever is higher (ADR-008)
       queue_depth_threshold: 1
       latency:
         mode: relative                   # relative | absolute (absolute unimplemented in v1)
@@ -81,7 +81,7 @@ policy:
 |---|---|
 | `limits.min_iops` | Floor. 1000 is included in the disk's base price, so going lower is impossible and would save nothing. |
 | `limits.max_iops` | User ceiling. Clamped to 10000 and further to `3000 × vCPU` at runtime — **the platform does not enforce the VM cap**, the agent does. |
-| `saturation.iops_utilization_threshold` | Precondition only. A disk below it cannot be limit-starved, so signal checks are skipped. Never triggers a change on its own. |
+| `saturation.utilization_threshold` | Precondition only, checked against **whichever of IOPS or bandwidth utilization is higher** (ADR-008) — a disk below it on both cannot be limit-starved, so signal checks are skipped. Never triggers a change on its own. |
 | `saturation.queue_depth_threshold` | Units differ by source: operations in `local`, bytes in `fleet`. The agent will not compare across units. |
 | `saturation.latency.baseline_multiplier` | Relative to the disk's own baseline. An absolute threshold is wrong for everyone; acceptable latency is workload-specific. |
 | `target.scale_up_utilization` | Applied to estimated demand *after* saturation is confirmed: `target = demand / 0.85`. |
@@ -99,7 +99,7 @@ overrides it (ADR-006):
 
 ```yaml
 evaluation:  {scale_up_window: 5m,  scale_down_window: 30m}
-saturation:  {iops_utilization_threshold: 0.98, queue_depth_threshold: 1,
+saturation:  {utilization_threshold: 0.98, queue_depth_threshold: 1,
               latency: {mode: relative, baseline_multiplier: 1.5}}
 target:      {scale_up_utilization: 0.85, scale_down_utilization: 0.70}
 cooldown:    {scale_up: 5m,  scale_down: 30m}

@@ -37,6 +37,14 @@ Scale up only on **confirmed saturation**: utilization near the limit **as a pre
 least one independent saturation signal, sustained over a window. Compute the target from observed
 demand and a target utilization, not by stepping a percentage.
 
+> **Amended by ADR-008.** "Utilization near the limit" here was written, and first implemented in
+> `design.md`, as IOPS utilization alone. A large-block, throughput-heavy workload saturates NBS-PL2's
+> bandwidth ceiling well before it saturates IOPS count, so an IOPS-only precondition misses it
+> entirely — confirmed against this project's own bandwidth-bound E2E scenario, which the IOPS-only
+> gate could never reach. The precondition now checks whichever of IOPS or bandwidth utilization is
+> higher; the principle this ADR is actually about — utilization alone, on any resource, never
+> triggers a change — is unchanged.
+
 The objective is:
 
 ```
