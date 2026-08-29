@@ -453,19 +453,28 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "not a finite number",
 		},
 		{
-			name: "long collection_interval relative to the default windows is still valid",
+			name: "collection_interval longer than scale_up_window is rejected even though it fits scale_down_window",
 			mutate: func(c *Config) {
-				// Default scale_down_window is 30m (defaults.go's
-				// PresetBalanced). Before issue #7's SamplerCapacity fix,
-				// a 20m collection_interval would have floored to a
-				// capacity of 1 here and been rejected by
-				// validateSamplerCapacity. The corrected
-				// ceil(window/interval)+1+slack formula always yields at
-				// least 4 for any positive window/interval pair, so this
-				// is valid now — the buffer just takes longer to fill,
-				// which is not what this validation rule polices (see
-				// validateSamplerCapacity's own updated comment).
+				// Default scale_up_window is 5m, scale_down_window 30m
+				// (defaults.go's PresetBalanced). validateSamplerCapacity
+				// alone would not catch this: its ceil(window/interval)+
+				// 1+slack formula, checked only against the longer
+				// scale_down_window, always yields at least 4 for any
+				// positive window/interval pair — it cannot express "this
+				// interval is too long relative to a *specific* window" at
+				// all (ceil() of a positive ratio never drops below 1,
+				// however disproportionate the inputs). At most one real
+				// sample can ever fall inside a 5-minute trailing span
+				// when samples are 20 minutes apart, so scale_up_window
+				// could never become evaluable — pre-merge review finding.
 				c.Runtime.Metrics.CollectionInterval = durationPtr("20m")
+			},
+			wantSub: "scale_up_window",
+		},
+		{
+			name: "collection_interval within every configured window is valid",
+			mutate: func(c *Config) {
+				c.Runtime.Metrics.CollectionInterval = durationPtr("1m") // <= both 5m and 30m defaults
 			},
 			wantSub: "",
 		},
@@ -571,6 +580,68 @@ func TestValidateSamplerCapacity_directDefenseInDepth(t *testing.T) {
 	}
 	if !strings.Contains(errs[0].Error(), "collection_interval") {
 		t.Errorf("error = %v, want it to name collection_interval", errs[0])
+	}
+}
+
+// --- pre-merge review: validate collection_interval against EVERY
+// configured window, not just SamplerCapacity's single longest one ---
+
+func TestValidateCollectionIntervalAgainstWindows_rejectsTooLongForShortestWindow(t *testing.T) {
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
+			ScaleUpWindow: 5 * time.Minute, ScaleDownWindow: 30 * time.Minute,
+		}},
+		Runtime: ResolvedRuntime{CollectionInterval: 20 * time.Minute},
+	}
+	// SamplerCapacity itself stays comfortably large — it's sized against
+	// the 30m scale_down_window, not the 5m scale_up_window this interval
+	// actually breaks.
+	if got := rc.SamplerCapacity(); got < minSamplesForWindowMirror {
+		t.Fatalf("test setup: SamplerCapacity() = %d, want >= %d — this test is specifically about SamplerCapacity NOT catching the bug", got, minSamplesForWindowMirror)
+	}
+	if errs := validateSamplerCapacity(rc); len(errs) != 0 {
+		t.Fatalf("test setup: validateSamplerCapacity() = %v, want none — confirms it alone would have passed this config", errs)
+	}
+
+	errs := validateCollectionIntervalAgainstWindows(rc)
+	if len(errs) != 1 {
+		t.Fatalf("validateCollectionIntervalAgainstWindows() = %v, want exactly one error", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "scale_up_window") {
+		t.Errorf("error = %v, want it to name scale_up_window", errs[0])
+	}
+}
+
+func TestValidateCollectionIntervalAgainstWindows_catchesPerDiskOverride(t *testing.T) {
+	// The VM policy's own windows are fine; only a per-disk override is
+	// too short for the configured cadence — must still be caught.
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
+			ScaleUpWindow: 30 * time.Minute, ScaleDownWindow: 60 * time.Minute,
+		}},
+		DiskPolicies: map[string]ResolvedPolicy{
+			"fastdisk": {Advanced: ResolvedAdvanced{ScaleUpWindow: 2 * time.Minute, ScaleDownWindow: 60 * time.Minute}},
+		},
+		Runtime: ResolvedRuntime{CollectionInterval: 5 * time.Minute},
+	}
+	errs := validateCollectionIntervalAgainstWindows(rc)
+	if len(errs) != 1 {
+		t.Fatalf("validateCollectionIntervalAgainstWindows() = %v, want exactly one error", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "fastdisk") || !strings.Contains(errs[0].Error(), "scale_up_window") {
+		t.Errorf("error = %v, want it to name disk %q and scale_up_window", errs[0], "fastdisk")
+	}
+}
+
+func TestValidateCollectionIntervalAgainstWindows_equalToWindowIsValid(t *testing.T) {
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
+			ScaleUpWindow: 5 * time.Minute, ScaleDownWindow: 30 * time.Minute,
+		}},
+		Runtime: ResolvedRuntime{CollectionInterval: 5 * time.Minute}, // exactly equal, not longer
+	}
+	if errs := validateCollectionIntervalAgainstWindows(rc); len(errs) != 0 {
+		t.Errorf("validateCollectionIntervalAgainstWindows() = %v, want none — interval equal to (not longer than) a window is valid", errs)
 	}
 }
 

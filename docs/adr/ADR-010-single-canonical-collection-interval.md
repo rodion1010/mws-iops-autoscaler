@@ -155,3 +155,38 @@ exists on `Sample`) and removes an entire class of "window said full, wasn't rea
 6. [x] Tests: a jittered-but-continuous 31-sample series proves `trailingWindow`'s returned span always
        reaches `window` and `windowFull` reads it as full; a clean post-outage recovery segment whose
        natural span already reaches `window` proves the stale pre-outage predecessor is never pulled in.
+
+> **Refined a third time (2026-08-29, pre-merge review): `validateSamplerCapacity` checks the wrong
+> window, with a formula that structurally cannot check the right one.** It calls `SamplerCapacity()`,
+> which sizes ONE shared ring buffer against only the single *longest* `scale_down_window` across every
+> policy — correct for its own purpose (buffer sizing), but `Validate` then also used its result as a
+> stand-in for "can every configured window ever fill," which it cannot answer. `collection_interval:
+> 20m` against the default `scale_up_window: 5m` (with the default `scale_down_window: 30m` left alone)
+> passed validation: `SamplerCapacity()` computes `ceil(30m/20m)+1+2 = 5`, comfortably above the 3-sample
+> floor — even though at most one real sample can ever fall inside a 5-minute trailing span when samples
+> are 20 minutes apart, so `WindowFullUp` specifically could never become true for that disk, no matter
+> how long the agent ran.
+>
+> The deeper issue is that `ceil(window/interval)` — the term both `SamplerCapacity` and a naive
+> per-window reuse of the same formula would rely on — is mathematically incapable of expressing "this
+> interval is too long relative to this window" at all: `ceil()` of a positive ratio is always ≥ 1
+> regardless of how disproportionate the two are, so that term alone can never drive the formula's
+> output below `1+1+slack`. The correct test uses `floor`, not `ceil`: at exact cadence, a trailing
+> window of span `w` can contain more than one real sample only if at least one full `interval` fits
+> inside it, i.e. `interval <= window`. New `validateCollectionIntervalAgainstWindows` checks exactly
+> that, once per `scale_up_window`/`scale_down_window`, on the VM policy and every per-disk override —
+> independent of, and a genuine complement to, `validateSamplerCapacity`, which still guards the buffer
+> itself against the ring-buffer off-by-one this ADR's first refinement fixed.
+
+## Action Items (continued, second refinement)
+
+7. [x] `internal/config/validate.go`: `validateCollectionIntervalAgainstWindows` — floor-based, checked
+       against every individual window on the VM policy and every per-disk override, wired into
+       `Validate` alongside (not instead of) `validateSamplerCapacity`.
+8. [x] `docs/configuration.md` §8's validation-rules list synced.
+9. [x] Tests: a config whose `SamplerCapacity()`/`validateSamplerCapacity()` both pass while a shorter
+       window is still numerically unreachable; the same failure surfacing through a per-disk override
+       when the VM policy's own windows are fine; `interval == window` (not longer) accepted as the
+       boundary case. The pre-existing "long collection_interval... is still valid" test — written before
+       this refinement, under the same mistaken assumption `SamplerCapacity`'s output being large enough
+       was sufficient — updated to assert the rejection instead.

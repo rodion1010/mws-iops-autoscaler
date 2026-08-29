@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -45,6 +46,7 @@ func Validate(cfg *Config) error {
 	}
 	errs = append(errs, validateResolvedRuntime("runtime", resolved.Runtime)...)
 	errs = append(errs, validateSamplerCapacity(resolved)...)
+	errs = append(errs, validateCollectionIntervalAgainstWindows(resolved)...)
 
 	return errors.Join(errs...)
 }
@@ -79,6 +81,15 @@ const minSamplesForWindowMirror = 3
 // the backstop that catches a config that would otherwise silently never
 // become evaluable, without requiring every future change to that formula
 // to remember this invariant on its own.
+//
+// This alone is not sufficient (pre-merge review, ADR-010's third
+// refinement): SamplerCapacity sizes ONE buffer against only the single
+// longest scale_down_window across every policy, so a much shorter window
+// elsewhere — the VM policy's own scale_up_window, or a per-disk override
+// — can still be numerically unreachable at the same collection_interval
+// without this function ever detecting it. See
+// validateCollectionIntervalAgainstWindows, which checks that case
+// directly and independently, right below.
 func validateSamplerCapacity(resolved *ResolvedConfig) []error {
 	if capacity := resolved.SamplerCapacity(); capacity < minSamplesForWindowMirror {
 		return []error{fmt.Errorf(
@@ -87,6 +98,74 @@ func validateSamplerCapacity(resolved *ResolvedConfig) []error {
 			resolved.Runtime.CollectionInterval, capacity, minSamplesForWindowMirror)}
 	}
 	return nil
+}
+
+// validateCollectionIntervalAgainstWindows rejects a config whose
+// runtime.metrics.collection_interval cannot possibly produce
+// minSamplesForWindowMirror samples within one SPECIFIC configured window
+// — scale_up_window or scale_down_window, on the VM policy or any per-disk
+// override — not merely the single longest window
+// SamplerCapacity/validateSamplerCapacity checks (pre-merge review).
+// collection_interval: 20m against the default scale_up_window: 5m passed
+// validation before this: the buffer's total capacity (sized against the
+// far longer default scale_down_window: 30m) was comfortably large, but at
+// most one real sample can ever fall inside a 5-minute trailing span when
+// consecutive samples are 20 minutes apart — WindowFullUp could then never
+// become true for that disk, no matter how long the agent ran.
+//
+// validateSamplerCapacity's ceil(window/interval)+1+slack formula cannot
+// catch this on its own: ceil() of a positive ratio is always >= 1
+// regardless of how disproportionate collection_interval is to window, so
+// that formula's output is always comfortably above minSamplesForWindowMirror
+// however long collection_interval actually is — it answers a different
+// question (how many buffer slots keep a window that CAN fill from being
+// evicted too early) than this one (can this specific window numerically
+// ever fill at all). This function uses floor, not ceil: at exact cadence,
+// a trailing window of span w can contain more than one real sample only
+// if at least one full collection interval fits inside it, i.e.
+// collection_interval <= window. Above that, consecutive real samples are
+// farther apart than the window itself, so at most one can ever land
+// inside it — analyzer.windowFull's minSamplesForWindow floor (3) can then
+// never be reached for that disk, for that direction, regardless of how
+// long the agent runs.
+func validateCollectionIntervalAgainstWindows(resolved *ResolvedConfig) []error {
+	interval := resolved.Runtime.CollectionInterval
+	if interval <= 0 {
+		return nil // validateResolvedRuntime already rejects this
+	}
+
+	var errs []error
+	check := func(path, field string, window time.Duration) {
+		if window <= 0 {
+			return // validateAdvancedRanges already rejects this
+		}
+		if interval > window {
+			errs = append(errs, fmt.Errorf(
+				"runtime.metrics.collection_interval: %s is too long relative to %s.advanced.evaluation.%s (%s) — "+
+					"at most one sample could ever fall within that window, so it could never become evaluable",
+				interval, path, field, window))
+		}
+	}
+
+	check("policy", "scale_up_window", resolved.VMPolicy.Advanced.ScaleUpWindow)
+	check("policy", "scale_down_window", resolved.VMPolicy.Advanced.ScaleDownWindow)
+
+	// Sorted for deterministic error ordering (map iteration order is not
+	// stable in Go) — matters for test assertions and for a human reading
+	// the same error list twice getting the same order both times.
+	names := make([]string, 0, len(resolved.DiskPolicies))
+	for name := range resolved.DiskPolicies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p := resolved.DiskPolicies[name]
+		path := fmt.Sprintf("disks.selected[%s].policy", name)
+		check(path, "scale_up_window", p.Advanced.ScaleUpWindow)
+		check(path, "scale_down_window", p.Advanced.ScaleDownWindow)
+	}
+
+	return errs
 }
 
 // validateResolvedPolicy checks the range and cross-field rules that only

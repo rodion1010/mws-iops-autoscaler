@@ -384,6 +384,14 @@ value, and maintenance windows.
   (the same formula the orchestrator uses to actually size the buffer) must be ≥ 3, the Analyzer's own
   `minSamplesForWindow` floor (ADR-010); below that, `WindowFullUp`/`WindowFullDown` could never become
   true no matter how long the agent ran (issue #6)
+- `runtime.metrics.collection_interval` longer than any *individual* configured window — the VM
+  policy's own `scale_up_window`/`scale_down_window`, or a per-disk override's — even when
+  `SamplerCapacity()` above is comfortably large (pre-merge review). `SamplerCapacity()` sizes the
+  buffer against only the single *longest* window across every policy; a much shorter window elsewhere
+  can still be mathematically incapable of ever holding more than one real sample, since consecutive
+  samples land farther apart than the window itself. `collection_interval: 20m` against the default
+  `scale_up_window: 5m` is the concrete example: the buffer is plenty large (sized against the 30m
+  `scale_down_window`), but `WindowFullUp` specifically could still never become true
 - any of the float fields above that decode as `NaN` or `±Inf` — a bare range comparison like
   `v <= 0 || v > 1` silently lets `NaN` through (every comparison against `NaN` is `false`), so this is
   checked explicitly, separately from the range itself (issue #6)
