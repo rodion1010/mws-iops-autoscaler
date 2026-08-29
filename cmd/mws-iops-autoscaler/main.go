@@ -137,20 +137,27 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	readiness := &health.Readiness{}
 	readiness.SetConfigValid(true) // LoadAndValidate above already proved this
 
+	// Phase 1 (PRD §6) is local mode, scale-up only. This is the one place
+	// that capability gets decided (issue #14) — Phase 3 flips it here and
+	// nowhere else; both the Decider and the Agent's own defense-in-depth
+	// check read the same value, not two independently maintained copies.
+	const allowScaleDown = false
+
 	agent := &Agent{
-		cfg:       cfg,
-		resolved:  resolved,
-		vmName:    vmName,
-		dryRun:    dryRun,
-		client:    client,
-		sampler:   sampler,
-		analyzer:  analyzer.NewWindowAnalyzer(),
-		decider:   decider.NewPolicyDecider(),
-		actuator:  actuator.NewComputeActuator(client),
-		tracker:   tracker,
-		telemetry: reg,
-		journal:   journal.NewWriter(journalOut),
-		readiness: readiness,
+		cfg:            cfg,
+		resolved:       resolved,
+		vmName:         vmName,
+		dryRun:         dryRun,
+		allowScaleDown: allowScaleDown,
+		client:         client,
+		sampler:        sampler,
+		analyzer:       analyzer.NewWindowAnalyzer(),
+		decider:        decider.NewPolicyDecider(allowScaleDown),
+		actuator:       actuator.NewComputeActuator(client),
+		tracker:        tracker,
+		telemetry:      reg,
+		journal:        journal.NewWriter(journalOut),
+		readiness:      readiness,
 	}
 
 	mux := http.NewServeMux()

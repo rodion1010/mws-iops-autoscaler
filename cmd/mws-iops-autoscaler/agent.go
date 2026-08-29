@@ -34,6 +34,16 @@ type Agent struct {
 	vmName   string
 	dryRun   bool
 
+	// allowScaleDown is defense in depth for issue #14's Phase 1 gate:
+	// PolicyDecider already refuses to ever return ActionScaleDown when
+	// its own allowScaleDown is false, so this check should never fire in
+	// practice — but Decider is an interface, and Agent must not simply
+	// trust whatever implementation it was handed to have gotten the gate
+	// right. Set from the same single constructor argument as the
+	// Decider's own (main.go) — one capability, not two independently
+	// maintained copies of it.
+	allowScaleDown bool
+
 	client    compute.Client
 	sampler   *metrics.Sampler
 	analyzer  *analyzer.WindowAnalyzer
@@ -184,6 +194,17 @@ func (a *Agent) reconcile(ctx context.Context) {
 
 func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.Decision, now time.Time) {
 	diskID := m.Disk.DiskName
+
+	if d.Action == decider.ActionScaleDown && !a.allowScaleDown {
+		// Defense in depth (issue #14) — PolicyDecider should never
+		// produce this, so reaching here means the Decider implementation
+		// itself disagrees with this process's own phase gate. Refuse
+		// loudly rather than writing, and make it visible the same way
+		// any other write-blocking outcome is.
+		log.Printf("actuate %s (%s): refusing ActionScaleDown — scale-down is disabled in this build (issue #14)", diskID, m.Disk.DeviceName)
+		return
+	}
+
 	target := actuator.Target{
 		VMName:     a.vmName,
 		DeviceName: m.Disk.DeviceName,

@@ -26,14 +26,26 @@ const billingStepIOPS = 100
 // internal/analyzer's constants.
 const queueGrowthThreshold = 0.01
 
-// PolicyDecider implements Decider. It holds no state of its own — every
+// PolicyDecider implements Decider. It holds no per-decision state — every
 // input Decide needs (current value, cooldown/budget state, wall clock) is
-// an explicit parameter, so it is safe to share and trivial to test.
-type PolicyDecider struct{}
+// an explicit parameter, so it is safe to share and trivial to test. The
+// one thing it does hold is allowScaleDown: a build-time capability, not a
+// per-call policy value, deliberately (issue #14) — Phase 1 is scale-up
+// only (PRD §6), and that must not depend on any user-tunable threshold
+// happening to never trigger scale-down. Phase 3 flips exactly this one
+// constructor argument; nothing else about Decide changes.
+type PolicyDecider struct {
+	allowScaleDown bool
+}
 
-func NewPolicyDecider() *PolicyDecider { return &PolicyDecider{} }
+// NewPolicyDecider is the single, reviewable point where bidirectional
+// actuation gets enabled (issue #14's "one explicit, reviewable enablement
+// point"). Phase 1 callers must pass false.
+func NewPolicyDecider(allowScaleDown bool) *PolicyDecider {
+	return &PolicyDecider{allowScaleDown: allowScaleDown}
+}
 
-func (PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision {
+func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision {
 	base := Decision{
 		DiskID:  diskID,
 		Current: current,
@@ -79,10 +91,20 @@ func (PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, v
 		return withReason(base, ActionScaleUp, "saturated")
 
 	case a.Underutilized:
+		// Checked first, before cooldown/guardrails: with the shipped Phase
+		// 1 configuration, a quiet full down-window must never reach any
+		// write path, full stop — not "reach it but then get clamped by
+		// something else." The candidate demand is still computed and
+		// surfaced (issue #14: "optionally retaining the candidate
+		// recommendation for observability") so the journal/metrics show
+		// what *would* have happened, without it ever becoming a target.
+		base.Demand = a.IOPSP95Down
+		if !pd.allowScaleDown {
+			return withReason(base, ActionNoAction, "scale_down_disabled")
+		}
 		if now.Sub(state.LastChangeDown) < p.CooldownScaleDown {
 			return withReason(base, ActionNoAction, "cooldown_scale_down")
 		}
-		base.Demand = a.IOPSP95Down
 		raw := a.IOPSP95Down / p.ScaleDownUtilization
 		target, changed := guardrails(raw, current, ceiling, p.MinIOPS, p.MaxScaleDownRatio, p.MinChangeIOPS)
 		if !changed || target >= current {
