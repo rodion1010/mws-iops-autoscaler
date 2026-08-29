@@ -54,6 +54,8 @@ reproducible and reviewable.
 
 **Acceptance Criteria:**
 - [ ] YAML config with schema validation; unknown keys are an error, not silently ignored
+- [ ] `apiVersion`/`kind` are checked against the values this build supports, and a second
+      `---`-separated document in the same file is rejected rather than silently dropped
 - [ ] Every tunable in FR-13 is settable; omitted values fall back to documented defaults
 - [ ] `--validate-config` exits non-zero with a human-readable message on invalid input
 - [ ] Secrets (IAM token, API key) are read from env or file path, never inline in the config

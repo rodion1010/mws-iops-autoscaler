@@ -324,6 +324,11 @@ value, and maintenance windows.
 
 `--validate-config` must reject, with a message naming the field:
 
+- `apiVersion` anything other than `autoscaling.mws.cloud/v1alpha1`
+- `kind` anything other than `IOPSAutoScaler` for `mode: local` (`IOPSAutoScalerFleet` is §6.3's
+  fleet-mode kind, unreachable here since `mode: local` is required in this build)
+- more than one YAML document in the file (a second `---`-separated document is silently dropped by
+  a naive single-document decode, not merged or rejected)
 - `disks.mode` anything other than `auto-discovery` or `selected`
 - `mode: auto-discovery` with `disks.selected` set, or `mode: selected` with `disks.exclude` set —
   each field belongs to exactly one strategy (§4.2)

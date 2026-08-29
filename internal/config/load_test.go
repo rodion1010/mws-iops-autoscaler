@@ -83,6 +83,61 @@ runtime: {}
 	}
 }
 
+func TestLoad_wrongAPIVersionRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeFile(t, path, `
+apiVersion: autoscaling.mws.cloud/v1
+kind: IOPSAutoScaler
+mode: local
+policy: {limits: {min_iops: 1000, max_iops: 10000}}
+disks: {mode: auto-discovery}
+runtime: {}
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with an unsupported apiVersion")
+	}
+}
+
+func TestLoad_wrongKindRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeFile(t, path, `
+apiVersion: autoscaling.mws.cloud/v1alpha1
+kind: IOPSAutoScalerFleet
+mode: local
+policy: {limits: {min_iops: 1000, max_iops: 10000}}
+disks: {mode: auto-discovery}
+runtime: {}
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with kind: IOPSAutoScalerFleet under mode: local")
+	}
+}
+
+func TestLoad_multiDocumentRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeFile(t, path, `
+apiVersion: autoscaling.mws.cloud/v1alpha1
+kind: IOPSAutoScaler
+mode: local
+policy: {limits: {min_iops: 1000, max_iops: 10000}}
+disks: {mode: auto-discovery}
+runtime: {}
+---
+apiVersion: autoscaling.mws.cloud/v1alpha1
+kind: IOPSAutoScaler
+mode: local
+policy: {limits: {min_iops: 3000, max_iops: 10000}}
+disks: {mode: auto-discovery}
+runtime: {}
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded on a file with two YAML documents — the second was silently dropped")
+	}
+}
+
 func TestLoad_supersededDeviceSelector(t *testing.T) {
 	// ADR-004: the `device:` and `disk_id:` selectors from the first
 	// configuration.md draft must stay rejected — as unknown keys, not as a
