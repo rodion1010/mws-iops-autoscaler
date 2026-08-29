@@ -72,6 +72,13 @@ type Decision struct {
 	Target  int64 // == Current when Action is ActionNoAction or ActionVMCapReached
 	Demand  float64
 	Inputs  analyzer.Analysis // full evidence, for the journal
+
+	// VMHeadroomIOPS and BudgetRemaining are carried forward from vm/state
+	// (§4.6, ADR-013) so a journal/metrics consumer (M5) doesn't need
+	// those inputs threaded through separately just to report on them —
+	// Decide already computed/received them.
+	VMHeadroomIOPS  int64
+	BudgetRemaining int
 }
 
 // Decider is implemented by PolicyDecider (decider.go); an interface so

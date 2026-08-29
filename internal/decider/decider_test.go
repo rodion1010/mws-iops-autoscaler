@@ -185,6 +185,19 @@ func TestDecide_neitherSignalIsNoAction(t *testing.T) {
 	}
 }
 
+func TestDecide_vmHeadroomAndBudgetRemainingAlwaysSet(t *testing.T) {
+	d := NewPolicyDecider()
+	vm := VMState{IOPSPool: 6000, SiblingP95IOPS: 1500}
+	state := GuardrailState{ResizeInProgress: true, ChangesInLast24h: 10}
+	got := d.Decide("disk1", 1000, analyzer.Analysis{}, vm, testPolicy, state, epoch)
+	if got.VMHeadroomIOPS != 4500 {
+		t.Errorf("VMHeadroomIOPS = %d, want 4500 (6000 - 1500), even on a resize_in_progress NoAction", got.VMHeadroomIOPS)
+	}
+	if want := testPolicy.MaxChangesPer24h - 10; got.BudgetRemaining != want {
+		t.Errorf("BudgetRemaining = %d, want %d", got.BudgetRemaining, want)
+	}
+}
+
 func TestDecide_diskIDAndCurrentSetEvenOnNoAction(t *testing.T) {
 	d := NewPolicyDecider()
 	got := d.Decide("disk-xyz", 3000, analyzer.Analysis{}, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)

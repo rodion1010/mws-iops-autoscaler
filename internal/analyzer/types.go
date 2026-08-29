@@ -63,8 +63,11 @@ type Analysis struct {
 	// Latest-sample snapshot, for the journal — not what Saturated/
 	// Underutilized are computed from (each re-evaluates its own signal
 	// against every sample in its own window, not just this one).
+	Source               metrics.SourceKind
 	IOPSUtilization      float64
 	BandwidthUtilization float64
+	ReadOps              float64
+	WriteOps             float64
 	QueueDepth           metrics.QueueDepth
 	ReadLatency          LatencyStat // p95 over ScaleUpWindow
 	WriteLatency         LatencyStat
@@ -75,6 +78,15 @@ type Analysis struct {
 
 	WindowFullUp   bool // span ≥ ScaleUpWindow (ADR-010)
 	WindowFullDown bool // span ≥ ScaleDownWindow
+
+	// WindowFillUpRatio/WindowFillDownRatio are the same span-vs-window
+	// comparison as WindowFullUp/Down, but as a fraction (capped at 1.0)
+	// rather than a threshold boolean — for observability
+	// (window_fill_ratio, design.md §7.1), not decision logic. Decide
+	// never reads these; it reads the booleans, which are exact ≥
+	// comparisons, not a rounded fraction.
+	WindowFillUpRatio   float64
+	WindowFillDownRatio float64
 
 	Saturated     bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
 	Underutilized bool // every signal quiet AND sustained over ScaleDownWindow (US-010); false if !WindowFullDown

@@ -67,9 +67,14 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 
 	out.WindowFullUp = windowFull(samples, p.ScaleUpWindow)
 	out.WindowFullDown = windowFull(samples, p.ScaleDownWindow)
+	out.WindowFillUpRatio = fillRatio(samples, p.ScaleUpWindow)
+	out.WindowFillDownRatio = fillRatio(samples, p.ScaleDownWindow)
 
+	out.Source = newest.Source
 	out.IOPSUtilization = iopsUtilization(newest, specIOPS)
 	out.BandwidthUtilization = bandwidthUtilization(newest, specIOPS)
+	out.ReadOps = newest.ReadOps
+	out.WriteOps = newest.WriteOps
 	out.QueueDepth = newest.QueueDepth
 
 	out.ReadLatency = LatencyStat{P95: percentile(readLatencies(upWindow), 0.95), Kind: LatencyWindowedAvg}
@@ -179,6 +184,28 @@ func windowFull(samples []metrics.Sample, window time.Duration) bool {
 	}
 	span := samples[len(samples)-1].Timestamp.Sub(samples[0].Timestamp)
 	return span >= window
+}
+
+// fillRatio is windowFull's fraction form, for observability
+// (window_fill_ratio) — capped at 1.0 rather than uncapped, since "more
+// than full" isn't a meaningful signal to export. Does not apply
+// minSamplesForWindow's floor: that floor exists to keep windowFull from
+// declaring readiness on a degenerate two-point span, a decision-logic
+// concern; the fill ratio is a plain progress indicator and stays
+// proportional even below that floor.
+func fillRatio(samples []metrics.Sample, window time.Duration) float64 {
+	if len(samples) == 0 || window <= 0 {
+		return 0
+	}
+	span := samples[len(samples)-1].Timestamp.Sub(samples[0].Timestamp)
+	ratio := span.Seconds() / window.Seconds()
+	if ratio > 1 {
+		ratio = 1
+	}
+	if ratio < 0 {
+		ratio = 0
+	}
+	return ratio
 }
 
 func iopsUtilization(s metrics.Sample, specIOPS int64) float64 {

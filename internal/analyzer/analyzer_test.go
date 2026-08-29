@@ -319,6 +319,42 @@ func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
 	}
 }
 
+func TestAnalyze_sourceAndPerOpOpsAndFillRatio(t *testing.T) {
+	a := NewWindowAnalyzer()
+	// 4 samples spanning 3 minutes -> 3/5 = 0.6 of ScaleUpWindow(5m),
+	// 3/30 = 0.1 of ScaleDownWindow(30m).
+	samples := []metrics.Sample{
+		sampleAt(0, 300, 200, 0, 0, 0, time.Millisecond, time.Millisecond),
+		sampleAt(1, 300, 200, 0, 0, 0, time.Millisecond, time.Millisecond),
+		sampleAt(2, 300, 200, 0, 0, 0, time.Millisecond, time.Millisecond),
+		sampleAt(3, 300, 200, 0, 0, 0, time.Millisecond, time.Millisecond),
+	}
+	got := a.Analyze("disk1", samples, testPolicy, specIOPS)
+	if got.Source != metrics.SourceGuest {
+		t.Errorf("Source = %v, want %v", got.Source, metrics.SourceGuest)
+	}
+	if got.ReadOps != 300 || got.WriteOps != 200 {
+		t.Errorf("ReadOps/WriteOps = %v/%v, want 300/200 (latest sample)", got.ReadOps, got.WriteOps)
+	}
+	if diff := got.WindowFillUpRatio - 0.6; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("WindowFillUpRatio = %v, want 0.6", got.WindowFillUpRatio)
+	}
+	if diff := got.WindowFillDownRatio - 0.1; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("WindowFillDownRatio = %v, want 0.1", got.WindowFillDownRatio)
+	}
+}
+
+func TestAnalyze_fillRatioCappedAtOne(t *testing.T) {
+	a := NewWindowAnalyzer()
+	got := a.Analyze("disk1", quietDownWindow(), testPolicy, specIOPS) // span == ScaleDownWindow exactly
+	if got.WindowFillUpRatio != 1 {
+		t.Errorf("WindowFillUpRatio = %v, want 1 (span exceeds ScaleUpWindow)", got.WindowFillUpRatio)
+	}
+	if got.WindowFillDownRatio != 1 {
+		t.Errorf("WindowFillDownRatio = %v, want 1 (span exactly equals ScaleDownWindow)", got.WindowFillDownRatio)
+	}
+}
+
 func TestAnalyze_nonPositiveSpecIOPSIsDefensive(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)

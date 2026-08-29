@@ -34,7 +34,19 @@ type PolicyDecider struct{}
 func NewPolicyDecider() *PolicyDecider { return &PolicyDecider{} }
 
 func (PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision {
-	base := Decision{DiskID: diskID, Current: current, Target: current, Inputs: a}
+	base := Decision{
+		DiskID:  diskID,
+		Current: current,
+		Target:  current,
+		Inputs:  a,
+		// VM-level (§4.6), independent of this disk's own policy.limits —
+		// distinct from ceiling below, which folds policy/platform bounds
+		// in too. BudgetRemaining is set on every path, including
+		// resize_in_progress: it describes the disk's standing budget, not
+		// something this cycle's action consumed.
+		VMHeadroomIOPS:  vm.IOPSPool - int64(vm.SiblingP95IOPS),
+		BudgetRemaining: p.MaxChangesPer24h - state.ChangesInLast24h,
+	}
 
 	if state.ResizeInProgress {
 		return withReason(base, ActionNoAction, "resize_in_progress")

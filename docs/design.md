@@ -644,12 +644,19 @@ type Actuator interface {
 
 type Decision struct {
     DiskID  string
-    Action  Action // ScaleUp | ScaleDown | NoAction | VMCapReached
+    Action  Action // scale_up | scale_down | no_action | vm_cap_reached — snake_case,
+                    // same convention as Reason, since both feed the same machine-parseable journal (§7.2)
     Reason  string // machine-parseable
     Current int64
-    Target  int64  // == Current when Action is NoAction or VMCapReached
+    Target  int64  // == Current when Action is no_action or vm_cap_reached
     Demand  float64
     Inputs  Analysis // full evidence, for the journal
+
+    // Carried forward from vm/state (§4.6, ADR-013) so a journal/metrics
+    // consumer (M5) doesn't need those inputs threaded through separately
+    // just to report on them — Decide already computed/received them.
+    VMHeadroomIOPS  int64
+    BudgetRemaining int
 }
 ```
 
@@ -734,7 +741,7 @@ iops_autoscaler_disk_provisioned_iops{disk,vm,class}          gauge
 iops_autoscaler_disk_observed_iops{disk,vm,op}                gauge
 iops_autoscaler_disk_utilization_ratio{disk,vm}               gauge
 iops_autoscaler_disk_estimated_demand_iops{disk,vm}           gauge
-iops_autoscaler_disk_latency_baseline_seconds{disk,vm,op}     gauge
+iops_autoscaler_disk_latency_baseline_seconds{disk,vm}        gauge
 iops_autoscaler_disk_saturated{disk,vm}                       gauge 0|1
 iops_autoscaler_decisions_total{action,reason}                counter
 iops_autoscaler_writes_total{path,outcome}                    counter   path=disk|vm
@@ -747,6 +754,17 @@ iops_autoscaler_window_fill_ratio{disk,direction}             gauge
 iops_autoscaler_change_budget_remaining{disk}                 gauge
 iops_autoscaler_cost_delta_iops_hours{disk}                   counter
 ```
+
+`disk_latency_baseline_seconds` has no `{op}` label, unlike `disk_observed_iops` — the baseline (§4.4) is
+one combined low-percentile over both read and write latencies, not tracked separately per operation
+(ADR-011's `LatencyStat` is per-op for the *trigger* comparison, but the baseline itself is not); an
+`{op}` label here would imply a distinction the value doesn't actually carry.
+
+M5 wires every metric above except `writes_total`, `write_duration_seconds` (no Actuator exists yet to
+report a write outcome — M6), and `cost_delta_iops_hours` (needs a billing-rate model not designed
+anywhere yet) — registering a metric with nothing real to report would repeat the exact
+`*_quota_utilization`-reads-zero trap CLAUDE.md documents as a platform bug, not something to imitate.
+Those three are added when their producing subsystem exists.
 
 `metric_source` and `staleness` are there because ADR-001 accepts two sources: when `local` and
 `fleet` disagree, the first question is which source fed the decision and how stale it was.
@@ -762,17 +780,24 @@ Every reconcile emits one structured record per disk, including no-action:
 {
   "ts": "2026-08-28T15:04:05Z",
   "disk": "db-data", "vm": "database-01", "class": "dependent",
-  "action": "NoAction",
+  "action": "no_action",
   "reason": "saturation_gate_not_met",
-  "current_iops": 5000,
+  "current_iops": 5000, "target_iops": 5000, "demand_iops": 0,
   "utilization": 0.62,
   "queue_depth": {"value": 0, "unit": "ops"},
-  "p95_read_latency_ms": 1.2, "latency_baseline_ms": 1.1,
-  "vm_headroom_iops": 4200,
-  "window_fill": 1.0,
+  "p95_read_latency_ms": 1.2, "p95_write_latency_ms": 0.9, "latency_baseline_ms": 1.1,
+  "vm_headroom_iops": 4200, "budget_remaining": 47,
+  "window_fill_up": 1.0, "window_fill_down": 1.0,
   "source": "guest"
 }
 ```
+
+`action`/`reason` are snake_case throughout, matching `Reason`'s own "machine-parseable" requirement —
+one casing convention across the whole record, not `Action` in one case and `Reason` in another.
+`target_iops`/`demand_iops` equal `current_iops`/`0` on a `no_action` record like this one, which is
+why the original draft of this example omitted them; a `scale_up`/`scale_down` record needs both
+visible. `window_fill_up`/`window_fill_down` are separate because they're independent windows
+(ADR-010) — a disk can be full on one and not the other.
 
 This is the primary calibration input for the `--dry-run` harness (§8.5) — thresholds are tuned from
 these records, not from reasoning.
