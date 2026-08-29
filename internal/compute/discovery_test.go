@@ -20,9 +20,12 @@ func TestDiscover_classifiesAndResolvesGuestPath(t *testing.T) {
 	c.disks["iops-test-vm-boot"] = &Disk{Name: "iops-test-vm-boot", SpecIOPS: 1000, BaseIOPS: 1000, TotalIOPS: 1000}
 	c.disks["iops-test-vm-data"] = &Disk{Name: "iops-test-vm-data", SpecIOPS: 3000, BaseIOPS: 1000, ExtraIOPS: 2000, TotalIOPS: 3000}
 
-	vm, err := Discover(context.Background(), c, "iops-test-vm")
+	vm, skipped, err := Discover(context.Background(), c, "iops-test-vm")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %+v, want none", skipped)
 	}
 
 	if vm.VCPUCount != 2 {
@@ -56,33 +59,35 @@ func TestDiscover_classifiesAndResolvesGuestPath(t *testing.T) {
 	}
 }
 
-func TestDiscover_unresolvableDiskSkippedNotFatal(t *testing.T) {
+func TestDiscover_unresolvableDiskExcludedNotFatal(t *testing.T) {
 	c := newFakeClient()
 	c.vms["vm-1"] = &VirtualMachine{
 		Name:   "vm-1",
 		VMType: "base-2-8",
 		Disks: []StorageDisk{
 			{Alias: "gone", DeviceName: "gone", Class: ClassIndependent, DiskName: "does-not-exist"},
+			{Alias: "ok", DeviceName: "ok", Class: ClassIndependent, DiskName: "resolves-fine"},
 		},
 	}
 	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["resolves-fine"] = &Disk{Name: "resolves-fine", SpecIOPS: 2000}
 	// Deliberately no entry in c.disks for "does-not-exist".
 
-	vm, err := Discover(context.Background(), c, "vm-1")
+	vm, skipped, err := Discover(context.Background(), c, "vm-1")
 	if err != nil {
 		t.Fatalf("Discover: %v, want no error — an unresolvable disk is skipped, not fatal (US-002)", err)
 	}
-	if len(vm.Disks) != 1 {
-		t.Fatalf("len(Disks) = %d, want 1 (the disk stays in the list, just without IOPS filled in)", len(vm.Disks))
+	if len(vm.Disks) != 1 || vm.Disks[0].Alias != "ok" {
+		t.Fatalf("Disks = %+v, want only the resolvable disk — an unresolvable one must be excluded from the managed set, not kept with IOPS==0", vm.Disks)
 	}
-	if vm.Disks[0].IOPS != 0 {
-		t.Errorf("IOPS = %d, want 0 (never populated)", vm.Disks[0].IOPS)
+	if len(skipped) != 1 || skipped[0].Alias != "gone" || skipped[0].DiskName != "does-not-exist" || skipped[0].Reason == nil {
+		t.Fatalf("skipped = %+v, want one entry naming the gone disk and a reason", skipped)
 	}
 }
 
 func TestDiscover_missingVMErrors(t *testing.T) {
 	c := newFakeClient()
-	if _, err := Discover(context.Background(), c, "does-not-exist"); err == nil {
+	if _, _, err := Discover(context.Background(), c, "does-not-exist"); err == nil {
 		t.Fatal("Discover succeeded for a VM the client does not know about")
 	}
 }
@@ -90,7 +95,7 @@ func TestDiscover_missingVMErrors(t *testing.T) {
 func TestDiscover_missingVmTypeErrors(t *testing.T) {
 	c := newFakeClient()
 	c.vms["vm-1"] = &VirtualMachine{Name: "vm-1", VMType: "unknown-type"}
-	if _, err := Discover(context.Background(), c, "vm-1"); err == nil {
+	if _, _, err := Discover(context.Background(), c, "vm-1"); err == nil {
 		t.Fatal("Discover succeeded with an unresolvable VM type")
 	}
 }
