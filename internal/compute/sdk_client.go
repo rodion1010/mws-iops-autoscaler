@@ -7,13 +7,11 @@ import (
 
 	"go.mws.cloud/go-sdk/mws"
 	mwserrors "go.mws.cloud/go-sdk/mws/errors"
-	"go.mws.cloud/go-sdk/pkg/apimodels/units/bytesize"
 	"go.mws.cloud/go-sdk/pkg/optional"
 	commonmodel "go.mws.cloud/go-sdk/service/common/model"
 	sdkclient "go.mws.cloud/go-sdk/service/compute/client"
 	"go.mws.cloud/go-sdk/service/compute/model"
 	computesdk "go.mws.cloud/go-sdk/service/compute/sdk"
-	computeref "go.mws.cloud/go-sdk/service/resources/references/compute"
 )
 
 // sdkClient implements Client against the real Compute API via
@@ -180,63 +178,27 @@ func (c *sdkClient) UpdateIndependentDisk(ctx context.Context, req IndependentUp
 	return out, nil
 }
 
+// UpdateDependentDisk sends the minimal safe partial update: every current
+// attachment alias, in the current order (Upsert treats a missing existing
+// collection element as a delete — MWS API openapi.gen.yaml's complex-
+// collection merge rules), with no field on any of them except
+// TargetAlias's spec.iops. name/boot/deviceName are immutable on update and
+// the API accepts them omitted entirely; only the collection key (name) is
+// sent, never a value round-tripped through a response→domain→request
+// translation that could drift from what the platform considers current.
 func (c *sdkClient) UpdateDependentDisk(ctx context.Context, req DependentUpdateRequest) (*VirtualMachine, error) {
-	disks := make([]model.UpdateStorageDiskSpecOrRefWithAttachmentsRequest, len(req.Disks))
-	for i, d := range req.Disks {
-		entry := model.UpdateStorageDiskSpecOrRefWithAttachmentsRequest{
-			Name: optional.NewOptional(d.Alias),
-			Boot: optional.NewOptional(d.Boot),
-		}
-		if d.DeviceName != "" {
-			entry.DeviceName = optional.NewOptional(d.DeviceName)
-		}
+	if req.Etag == "" {
+		return nil, fmt.Errorf("update dependent disk %q: empty etag — refusing to write without optimistic concurrency", req.VMName)
+	}
 
-		switch d.Class {
-		case ClassIndependent:
-			ref, err := computeref.NewDiskRef(c.project, d.DiskName)
-			if err != nil {
-				return nil, fmt.Errorf("build disk ref for %q: %w", d.DiskName, err)
-			}
-			entry.Disk = optional.NewOptional(model.UpdateStorageDiskSpecOrRefRequest{Ref: optional.NewOptional(ref)})
-		case ClassDependent:
-			diskType, err := computeref.NewDiskTypeRef(d.DiskType)
-			if err != nil {
-				return nil, fmt.Errorf("build disk type ref for %q: %w", d.Alias, err)
-			}
-			size, err := bytesize.ParseString(d.SizeRaw)
-			if err != nil {
-				return nil, fmt.Errorf("parse size for %q: %w", d.Alias, err)
-			}
-			entry.Disk = optional.NewOptional(model.UpdateStorageDiskSpecOrRefRequest{
-				Spec: optional.NewOptionalNil(model.UpdateStorageDiskSpecRequest{
-					DiskType: optional.NewOptional(diskType),
-					Size:     optional.NewOptional(size),
-					Iops:     optional.NewOptional(model.Iops(d.IOPS)),
-				}),
-			})
-		}
-
-		disks[i] = entry
+	body, err := buildDependentUpdateBody(req)
+	if err != nil {
+		return nil, fmt.Errorf("update dependent disk %q: %w", req.VMName, err)
 	}
 
 	var idemKey *string
 	if req.IdempotencyKey != "" {
 		idemKey = &req.IdempotencyKey
-	}
-
-	body := model.UpdateVirtualMachineRequest{
-		Spec: optional.NewOptional(model.UpdateVirtualMachineSpecRequest{
-			Storage: optional.NewOptional(model.UpdateStorageSpecRequest{
-				Disks: optional.NewOptional(disks),
-			}),
-		}),
-	}
-	if req.Etag != "" {
-		body.Metadata = optional.NewOptionalNil(model.UpdateVirtualMachineMetadataRequest{
-			UpdateTypedResourceMetadataRequest: commonmodel.UpdateTypedResourceMetadataRequest{
-				Etag: optional.NewOptional(req.Etag),
-			},
-		})
 	}
 
 	resp, err := c.vm.UpdateVirtualMachine(ctx, sdkclient.UpdateVirtualMachineRequest{
@@ -256,4 +218,43 @@ func (c *sdkClient) UpdateDependentDisk(ctx context.Context, req DependentUpdate
 	// callers verify the applied value against the same shape either path
 	// returns.
 	return translateVMResponse(req.VMName, resp)
+}
+
+// buildDependentUpdateBody is the pure part of UpdateDependentDisk — no
+// network, no *sdkClient — so the wire shape (issue #3's actual safety
+// claim) can be asserted directly against a marshaled body in tests instead
+// of only by code review.
+func buildDependentUpdateBody(req DependentUpdateRequest) (model.UpdateVirtualMachineRequest, error) {
+	disks := make([]model.UpdateStorageDiskSpecOrRefWithAttachmentsRequest, len(req.Aliases))
+	found := false
+	for i, alias := range req.Aliases {
+		entry := model.UpdateStorageDiskSpecOrRefWithAttachmentsRequest{
+			Name: optional.NewOptional(alias),
+		}
+		if alias == req.TargetAlias {
+			found = true
+			entry.Disk = optional.NewOptional(model.UpdateStorageDiskSpecOrRefRequest{
+				Spec: optional.NewOptionalNil(model.UpdateStorageDiskSpecRequest{
+					Iops: optional.NewOptional(model.Iops(req.TargetIOPS)),
+				}),
+			})
+		}
+		disks[i] = entry
+	}
+	if !found {
+		return model.UpdateVirtualMachineRequest{}, fmt.Errorf("target alias %q not present in Aliases", req.TargetAlias)
+	}
+
+	return model.UpdateVirtualMachineRequest{
+		Metadata: optional.NewOptionalNil(model.UpdateVirtualMachineMetadataRequest{
+			UpdateTypedResourceMetadataRequest: commonmodel.UpdateTypedResourceMetadataRequest{
+				Etag: optional.NewOptional(req.Etag),
+			},
+		}),
+		Spec: optional.NewOptional(model.UpdateVirtualMachineSpecRequest{
+			Storage: optional.NewOptional(model.UpdateStorageSpecRequest{
+				Disks: optional.NewOptional(disks),
+			}),
+		}),
+	}, nil
 }

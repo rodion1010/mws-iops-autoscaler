@@ -18,13 +18,17 @@ type Client interface {
 	// UpdateIndependentDisk writes spec.iops on a standalone disk via
 	// UpdateDisk (?updateOnly=true) — nothing else in the spec is touched.
 	UpdateIndependentDisk(ctx context.Context, req IndependentUpdateRequest) (*Disk, error)
-	// UpdateDependentDisk resends a VM's full storage.disks[] array with
-	// exactly one entry's iops changed (US-011a) — the caller
+	// UpdateDependentDisk resends the VM's storage attachment collection by
+	// alias, in order — every alias present, so none is dropped from the
+	// collection (Upsert treats an omitted existing element as a delete) —
+	// but carrying no field for any of them except TargetAlias's new IOPS
+	// (US-011a). name/boot/deviceName are immutable on update and the API
+	// accepts them omitted; sending back a value resent through a lossy
+	// response→domain→request translation risks a mismatch the platform
+	// would reject or, worse, silently accept as a change. The caller
 	// (UpdateDependentDiskIOPS) is responsible for having just re-read the
-	// VM fresh and mutated exactly one entry, so what reaches here is
-	// already "everything byte-identical except one iops" (design.md §4.7).
-	// This method does not fetch or diff on its own — that would risk
-	// operating on stale data.
+	// VM fresh to build Aliases/Etag — this method does not fetch or diff
+	// on its own, which would risk operating on stale data.
 	UpdateDependentDisk(ctx context.Context, req DependentUpdateRequest) (*VirtualMachine, error)
 }
 
@@ -38,10 +42,14 @@ type IndependentUpdateRequest struct {
 	IdempotencyKey string
 }
 
-// DependentUpdateRequest carries the full storage.disks[] array to resend.
+// DependentUpdateRequest is a minimal partial VM update: every current
+// attachment alias, in order, so the collection stays intact, with only
+// TargetAlias carrying a change — spec.iops on TargetAlias, nothing else.
 type DependentUpdateRequest struct {
 	VMName         string
-	Etag           string // optimistic concurrency; a conflict aborts, never forces (US-011a)
-	Disks          []StorageDisk
+	Etag           string // mandatory: never write without optimistic concurrency (US-011a)
+	Aliases        []string
+	TargetAlias    string
+	TargetIOPS     int64
 	IdempotencyKey string
 }

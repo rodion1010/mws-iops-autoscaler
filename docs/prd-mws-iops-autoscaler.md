@@ -264,10 +264,13 @@ unused headroom.
 **Description:** As the agent, I need to change IOPS on a VM-owned disk, which the disk API refuses.
 
 **Acceptance Criteria:**
-- [ ] Reads the VM, capturing `etag`
-- [ ] Mutates exactly one entry in `spec.storage.disks[]`, resending `diskType` and `size` unchanged
-- [ ] Asserts every other field is byte-identical to what was read; aborts the write if not
-- [ ] Sends `etag` and an idempotency key; an etag conflict aborts and retries next cycle, never forces
+- [ ] Reads the VM, capturing `etag` and every disk's alias
+- [ ] Sends a minimal partial body: every alias present (Upsert deletes an omitted collection element),
+      but carrying nothing beyond `name` except the target alias's new `iops` — immutable fields
+      (`boot`/`deviceName`/`diskType`/`size`) are never resent, since the API accepts them omitted
+      entirely (ADR-009)
+- [ ] Sends `etag` and an idempotency key; refuses to write with an empty etag; an etag conflict
+      aborts and retries next cycle, never forces
 - [ ] Verifies the applied value from the response
 - [ ] Covered by a concurrent-modification test
 - [ ] Typecheck/lint passes
@@ -388,9 +391,10 @@ needs, per mode, so that I do not have to grant it broad rights.
   with `400`. The agent must still clamp and round locally — to avoid wasting a round trip, and
   because the OpenAPI schema declares no bounds, so this validation is server behaviour rather than
   a contract.
-- FR-15d: Dependent disks are written through `vm update --storage-disks`: read the VM, mutate one
-  entry, resend with `etag` and an idempotency key, and assert every other field round-trips
-  unchanged. Independent disks use the single-field disk path (FR-15).
+- FR-15d: Dependent disks are written through `vm update --storage-disks`: read the VM, then send a
+  minimal partial body — every current alias present (an omitted collection element is deleted by
+  Upsert), carrying nothing but `name` except the target alias's new `iops` — with `etag` and an
+  idempotency key (ADR-009). Independent disks use the single-field disk path (FR-15).
 - FR-15b: A disk **owned** by its VM (created inside the VM spec; `metadata.usages` contains `own`)
   cannot be modified through the disk API — the platform returns `403` naming the VM resource. This
   is an ownership constraint, not a permissions one: an independent disk attached by `ref` to the

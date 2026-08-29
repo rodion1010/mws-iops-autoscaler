@@ -81,7 +81,19 @@ func (f *fakeClient) UpdateDependentDisk(_ context.Context, req DependentUpdateR
 	if !ok {
 		return nil, fmt.Errorf("fake: VM %q not found", req.VMName)
 	}
-	vm.Disks = append([]StorageDisk(nil), req.Disks...)
+	if req.Etag == "" {
+		return nil, fmt.Errorf("fake: empty etag")
+	}
+	found := false
+	for i, d := range vm.Disks {
+		if d.Alias == req.TargetAlias {
+			vm.Disks[i].IOPS = req.TargetIOPS
+			found = true
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("fake: target alias %q not found on VM %q", req.TargetAlias, req.VMName)
+	}
 	cp := *vm
 	cp.Disks = append([]StorageDisk(nil), vm.Disks...)
 	return &cp, nil

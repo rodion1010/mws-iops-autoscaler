@@ -50,29 +50,36 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 	if err != nil {
 		return 0, fmt.Errorf("update dependent disk: re-read VM %q: %w", vmName, err)
 	}
+	if vm.Etag == "" {
+		return 0, fmt.Errorf("update dependent disk: VM %q has no etag — refusing to write without optimistic concurrency", vmName)
+	}
 
-	disks := make([]StorageDisk, len(vm.Disks))
-	copy(disks, vm.Disks)
-
-	targetIdx := -1
-	for i, d := range disks {
+	// Every current alias travels in the request, in order — Upsert treats
+	// an existing collection element missing from the request as a delete,
+	// so dropping one to "only touch the target" would detach every other
+	// disk on the VM. Only the target's alias carries a change.
+	aliases := make([]string, len(vm.Disks))
+	targetAlias := ""
+	for i, d := range vm.Disks {
+		aliases[i] = d.Alias
 		if d.DeviceName != deviceName {
 			continue
 		}
 		if d.Class != ClassDependent {
 			return 0, fmt.Errorf("update dependent disk: device_name %q on VM %q is independent, not dependent", deviceName, vmName)
 		}
-		targetIdx = i
+		targetAlias = d.Alias
 	}
-	if targetIdx == -1 {
+	if targetAlias == "" {
 		return 0, fmt.Errorf("update dependent disk: device_name %q not found on VM %q", deviceName, vmName)
 	}
-	disks[targetIdx].IOPS = iops
 
 	updated, err := c.UpdateDependentDisk(ctx, DependentUpdateRequest{
 		VMName:         vmName,
 		Etag:           vm.Etag,
-		Disks:          disks,
+		Aliases:        aliases,
+		TargetAlias:    targetAlias,
+		TargetIOPS:     iops,
 		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {

@@ -309,11 +309,24 @@ Idempotency-Key: <uuid>
 **Dependent disk** — read-modify-write through the VM, which is the riskier path:
 
 ```
-GET  .../virtualMachines/{vm}                   capture etag
-  mutate exactly one entry in spec.storage.disks[]
-  assert every other field byte-identical to what was read
+GET  .../virtualMachines/{vm}                   capture etag, every disk's alias (name)
+  build a minimal partial body: every alias, in order, carrying nothing but its name —
+  except the target alias, which additionally carries spec.iops
 POST .../virtualMachines/{vm}                   send etag, Idempotency-Key
 ```
+
+Every alias must still be present, because Upsert treats an existing `storage.disks[]` element
+missing from the request as a delete — dropping an entry to "only touch the target" would detach
+every other disk on the VM (issue #3). But no entry, including the target, carries anything beyond
+its collection key (`name`) plus the one field actually changing. Earlier drafts of this path
+round-tripped a full disk spec — `boot`, `deviceName`, `diskType`, `size` — reconstructed from the
+GET response and resent as an assertion that nothing else had changed. That is strictly worse than
+omitting those fields: `name`/`boot`/`deviceName`/`diskType` are immutable on update and the API
+accepts them omitted entirely (CLAUDE.md "DiskSpecRequest mutability"), so a value resent through a
+lossy response→domain→request translation risks a mismatch the platform would reject or, worse,
+silently accept as an unintended change. Sending the collection key alone carries the same
+concurrency guarantee (the etag) without manufacturing a value for a field the write never intended
+to touch.
 
 `UpdateVirtualMachine` has no `validateOnly` — confirmed against the generated SDK client, which has
 no such field on this request (unlike `UpdateDiskRequest`, which does). **This path has no
@@ -438,7 +451,7 @@ exposing them.
 | NFR-1 | Decision latency after sustained saturation | `local` ≤ 60 s; `fleet` ≤ 5 min | Guest samples at 1–10 s; platform floor is ~135 s (30 s publish + 60 s window + 62–90 s lag) |
 | NFR-2 | Reconcile cost | O(disks); one metrics call per project per cycle | Metrics API is per-project, not per-disk |
 | NFR-3 | Memory | ≤ 32 MB for 100 disks | Ring buffers are fixed-size; ~360 samples/disk at 10 s over 60 min |
-| NFR-4 | Blast radius | One `spec.iops` field, one disk, per write | Everything else round-trips unchanged |
+| NFR-4 | Blast radius | One `spec.iops` field, one disk, per write | Nothing else is sent as a value — immutable fields are omitted, not round-tripped (ADR-009) |
 | NFR-5 | Safety | Never write outside `[1000, min(10000, 3000×vCPU)]`, always ×100 | Platform enforces disk bounds but **not** the VM cap |
 | NFR-6 | Change rate | ≤ `max_changes_per_24h` per disk (default 48) | Runaway guard; billing is per-minute so this is not a cost constraint |
 | NFR-7 | Network resilience | Retry with backoff + jitter; idempotency key on every write | Measured: `SSL_ERROR_SYSCALL` and 10–15 s stalls are routine on this network |
