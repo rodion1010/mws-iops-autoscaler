@@ -44,7 +44,8 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
 - Reactive control loop, two modes (`local`, `fleet`).
 - Both disk classes: independent via disk API, dependent via VM spec (ADR-003).
 - Presets (`balanced` / `performance` / `cost`) as the user-facing surface.
-- Observe-only, scale-up-only, and bidirectional rollout stages.
+- Rollout stages: scale-up-only (with `--dry-run` as the pre-live validation step, not a
+  separate release), then bidirectional (ADR-005 amends ADR-002's original staging).
 
 **Out of scope (v1)**
 - Forecasting, seasonality, predictive pre-scaling.
@@ -203,6 +204,12 @@ uses `DiskRef.MetricLabel()` rather than the config form.
 
 Every branch — including `no_action` — emits a structured decision record with its inputs. "Why
 didn't it scale?" must always be answerable from the log alone.
+
+Comparison mode (US-005b) runs this loop twice per disk in `local` mode — once per `MetricSource` —
+producing two independent `Decision`s per cycle. Only the `Guest`-sourced branch ever reaches
+`actuate()`; the `Platform`-sourced branch always ends in `no_action` regardless of what it computed,
+and both are journaled. No new field is needed on `Decision` for this — `Sample.Source` already flows
+through into `Analysis`, so the journal attributes each decision by source from data it already has.
 
 ### 4.4 Saturation detection
 
@@ -568,33 +575,53 @@ validated until it has survived this.**
 ### 9.1 Milestones
 
 Product-facing phasing — what ships, in what order, and why — lives in the PRD, §6 "Release Phases".
-This table is the engineering sequencing underneath it; the **Phase** column is the mapping.
+This table is the engineering sequencing underneath it; the **Phase** column is the mapping. Ordering
+rationale (local complete before fleet exists at all; platform metrics validated in `local` before
+`fleet` depends on them exclusively) is ADR-005.
 
 | M | Deliverable | Depends on | Phase (PRD §6) |
 |---|---|---|---|
 | **M0** | Repo skeleton, config schema + resolver, `--validate-config` | — | 1 |
-| **M1** | Compute API client (discovery, classification, both write paths behind a flag) | M0 | 1 |
+| **M1** | Compute API client (discovery, classification, both write paths) | M0 | 1 |
 | **M2** | `MetricSource`: guest implementation + Sampler | M0 | 1 |
 | **M3** | Analyzer: windows, percentiles, baselines, saturation | M2 | 1 |
 | **M4** | Decider + Guardrails; `--dry-run` via `ValidateOnly` | M1, M3 | 1 |
 | **M5** | Observability: metrics, decision journal, health endpoints | M4 | 1 |
-| **M6** | **Observe-only release.** E2E scenarios green in `local` mode | M5 | 1 (exit) |
-| **M7** | Platform `MetricSource` → `fleet` mode; project/VM/disk inheritance | M2, M6 | 3 |
-| **M8** | Scale-up enabled; soak and chaos | M6 | 2 |
-| **M9** | Bidirectional; presets calibrated from M6/M8 telemetry | M8 | 4 |
-| **M10** | Packaging: static binary, systemd unit, `.deb`, container image | M9 | 5 |
+| **M6** | **MVP release.** Scale-up actuation enabled (validated live via `--dry-run` first); binary + systemd + `.deb` | M5 | 1 (exit) |
+| **M7** | Platform `MetricSource` (`PlatformSource`), usable standalone in `local` mode | M2 | 2 |
+| **M8** | Comparison (shadow) mode: `Guest` + `Platform` run concurrently, journaled, divergence surfaced | M6, M7 | 2 (exit) |
+| **M9** | Scale-down decision; presets calibrated from M6–M8 telemetry | M6 | 3 (exit) |
+| **M10** | Fleet discovery, project/VM/disk inheritance, container image | M7, M9 | 4 (exit) |
+| **M11** | Further fleet capabilities and optimizations | M10 | 5 |
 
-M7 (Phase 3) depends only on M2 and M6, not on M8 — it can run in parallel with M8/M9, or before them.
-The table lists it after M6 for readability; the dependency column is the actual constraint.
+`fleet` mode (M10) is built last and inherits an already-proven `PlatformSource` (M7-M8) and an
+already-proven bidirectional `Decider` (M9) — it adds only discovery scope, config inheritance, and
+the container deployment shape, nothing decision-related.
 
 ### 9.2 Sequencing rationale
 
-`local` mode ships first (M6) because it has fewer moving parts — no metrics credential, no network
-in the control loop — and because the guest source is the one with the signals needed to validate the
-demand estimator. `fleet` follows once the decision logic is proven.
+**`local` mode ships complete — including bidirectional scaling — before `fleet` mode is built at
+all** (M0–M9 precede M10). See ADR-005 for the full comparison against the alternative orderings.
+In short: it maximizes value delivered per phase, and it means `fleet` is built on top of a metric
+source and a decision engine that have already run against real load, rather than being the first
+place either does.
 
-Observe-only (M6) precedes any writing. The estimators in §4.5 are unvalidated; shipping them
-directly to actuation would be guessing with someone's money.
+**Scale-up actuation is folded into the MVP itself (M6)**, not gated behind a separate observe-only
+release. `--dry-run` (US-013) remains available and is validated against the live test environment
+before the flag is flipped to live — that validation is now a step inside M6, not a numbered phase of
+its own, because scale-up's blast radius is bounded: it can only add capacity, and any overspend is
+visible and reversible on the very next cycle. The estimators in §4.5 are still unvalidated at M6,
+but the cost of that being wrong in the *up* direction is bounded in a way it is not in the *down*
+direction.
+
+**Scale-down (M9) waits until scale-up has run live.** Its failure mode is real, not just wasteful: a
+wrong scale-down throttles the workload. It also gets to reuse M6–M8 telemetry for calibration
+instead of guessing thresholds cold.
+
+**Platform metrics (M7) are built and exercised in `local` mode (M8, shadow/comparison against the
+trusted guest source) before `fleet` mode exists.** `fleet` has no guest fallback — if the platform
+source were validated for the first time there, a bad decision would have no cheaper environment to
+have caught it in first.
 
 ### 9.3 Definition of done per milestone
 

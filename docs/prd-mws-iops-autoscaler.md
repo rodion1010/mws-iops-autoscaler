@@ -119,8 +119,9 @@ opt in broadly or narrowly.
 - [ ] Typecheck/lint passes
 
 ### US-005: Metric source — platform monitoring API
-**Description:** As the decider, I need disk metrics from the MWS monitoring API so that fleet mode
-works without touching guests.
+**Description:** As the decider, I need disk metrics from the MWS monitoring API. `fleet` mode
+requires this source exclusively (no guest access); `local` mode can opt into it too (ADR-001), which
+is how it gets validated before `fleet` depends on it with no fallback (US-005b).
 
 **Acceptance Criteria:**
 - [ ] Fetches from `monitoring.mwsapis.ru` using the API key and `monitoring.metricExporter` role
@@ -147,6 +148,24 @@ the moment they start working, without a rewrite, because the NBS team has commi
 - [ ] Treating a zero `quota_utilization` as "unavailable" is deliberate and commented: today the
       metric is always zero, so zero cannot be distinguished from a genuinely idle disk. Once the
       fix ships, revisit — an idle disk will legitimately report 0
+- [ ] Typecheck/lint passes
+
+### US-005b: Metric source comparison (shadow) mode
+**Description:** As an operator, I want `local` mode to run platform metrics alongside guest metrics,
+with the platform side never driving actuation, so that I can see how much the two sources disagree
+on real load before `fleet` mode has to depend on the platform source with no guest fallback at all.
+
+**Acceptance Criteria:**
+- [ ] `local` mode can enable `GuestSource` and `PlatformSource` concurrently; `GuestSource` remains
+      the only one eligible for actuation regardless of this mode's setting
+- [ ] Each source keeps its own window state and latency baseline — the two are not portable
+      (ADR-001) — and is analyzed and decided independently
+- [ ] Both `Decision`s are recorded in the decision journal every cycle, tagged by source, whether or
+      not actuation is enabled
+- [ ] Divergence — a different `Action`, or a `Target` differing by more than a configurable
+      threshold — is surfaced as its own log line and metric, not left for a human to diff by hand
+- [ ] Comparison mode is the one case where `local` mode needs the `monitoring.metricExporter` role;
+      documented against US-016
 - [ ] Typecheck/lint passes
 
 ### US-006: Metric source — local `/proc/diskstats`
@@ -279,15 +298,22 @@ unused headroom.
 - [ ] Every applied change is logged at info level with before/after values
 - [ ] Typecheck/lint passes
 
-### US-015: Packaging
-**Description:** As an operator, I want to install the agent in either mode without fighting
-dependencies.
+### US-015: Packaging — binary
+**Description:** As an operator, I want to install the agent on a VM without fighting dependencies.
 
 **Acceptance Criteria:**
 - [ ] Single statically linked Go binary, no runtime dependencies in the guest
 - [ ] systemd unit file provided
 - [ ] `.deb` package build target
-- [ ] Container image for fleet mode
+- [ ] Typecheck/lint passes
+
+### US-015a: Packaging — container image
+**Description:** As an operator running `fleet` mode, I want a container image, because a central
+controller is naturally run that way rather than installed on a host.
+
+**Acceptance Criteria:**
+- [ ] Container image, built from the same static binary as US-015
+- [ ] Documented deployment example against the test environment (`CLAUDE.md`, "Test environment")
 - [ ] Typecheck/lint passes
 
 ---
@@ -297,7 +323,9 @@ dependencies.
 needs, per mode, so that I do not have to grant it broad rights.
 
 **Acceptance Criteria:**
-- [ ] README documents the minimum role set for `local` mode and for `fleet` mode separately
+- [ ] README documents the minimum role set for `local` mode and for `fleet` mode separately, and
+      notes that `local` mode needs the `monitoring.metricExporter` role only when comparison mode
+      (US-005b) is enabled — otherwise it needs no metrics credential at all
 - [ ] Documents the read-only subset for running with `--dry-run`, so the agent can be evaluated
       before it is trusted to write
 - [ ] Startup performs a permission preflight: verifies it can list disks, read the VM type, and
@@ -424,93 +452,92 @@ needs, per mode, so that I do not have to grant it broad rights.
 ## 6. Release Phases
 
 The User Stories in §3 are not one delivery — they group into five phases. Each phase is shippable
-and independently useful; nothing here is "half a feature." The order follows the sequencing already
-established in `docs/design.md` §9.2 (observe-only before any write; local mode before fleet, because
-it has fewer moving parts and is where the demand estimator gets validated) — this section makes that
-same order explicit in product terms and pins which user stories land in which phase. `docs/design.md`
-§9.1 maps each phase onto its engineering milestones (`M`).
+and independently useful; nothing here is "half a feature." `docs/design.md` §9.1 maps each phase
+onto its engineering milestones (`M`); the ordering rationale — **local mode ships complete before
+fleet mode is built at all** — is recorded in ADR-005.
 
 **Rule:** a story moves between phases only by editing this table — not by quietly slipping scope
 into whichever phase is being coded at the time.
 
-### Phase 1 — Observe & Recommend (MVP)
+### Phase 1 — MVP: local mode, scale-up, binary
 
-**Goal:** prove the demand estimator is correct before it is trusted with money or availability.
-Nothing in this phase writes to a disk.
+**Goal:** a genuinely useful agent on day one — it discovers its own VM's disks and actually raises
+their IOPS limit when they saturate. Scale-up only: it is the direction with bounded blast radius
+(it can only add capacity, and any overspend is visible and reversible on the very next cycle), so
+this phase does not need a separate observe-only release to earn trust — `--dry-run` (US-013) stays
+available as the validation step an operator takes before flipping to live, folded into this phase
+rather than gating a phase of its own.
 
 | Story | What it delivers |
 |---|---|
 | US-001 | Config file, parsed and validated |
 | US-002 | On-VM disk discovery (`local` mode) |
-| US-004a | Classify each disk dependent / independent (classification only — no write path used yet) |
+| US-004a | Classify each disk dependent / independent |
 | US-004 | `all` / `all_except` / `explicit` disk selection |
 | US-006 | Guest metric source (`/proc/diskstats`) |
 | US-007 | Sliding-window evaluator |
-| US-008 | Scale-up decision — **computed, never applied** |
+| US-008 | Scale-up decision |
 | US-009 | VM pool saturation guard |
-| US-013 | Dry-run mode — this phase *is* dry-run; nothing else runs it any other way |
-| US-014 | Observability: decision journal, metrics, logs. Load-bearing here — the only output of this phase is an explained recommendation |
+| US-011 | Apply the change — independent disks |
+| US-011a | Apply the change — dependent disks |
+| US-012 | Rate limiting and change budget |
+| US-013 | Dry-run mode |
+| US-014 | Observability: decision journal, metrics, logs |
+| US-016 | Least-privilege service-account guidance |
+| US-015 | Binary, systemd unit, `.deb` |
 
-**Out:** fleet mode, platform metrics, scale-down, any actual write, packaging beyond a dev binary.
+**Out:** scale-down, platform metrics, fleet mode, container image.
 
-**Exit criterion:** E2E scenarios green in `local` mode; the decision journal explains every
-recommendation it makes. = design.md M0–M6.
+**Exit criterion:** `local`-mode E2E green with real scale-up writes; soak holds budget/cooldown
+under sustained load; installs from a binary or `.deb`, no source checkout. = design.md M0–M6.
 
-### Phase 2 — Actuate (local mode, scale-up only)
+### Phase 2 — Platform metrics, validated in local mode
 
-**Goal:** spend real money for the first time, in the direction that can only add capacity, never
-take it away — the reversible half of the decision first.
-
-| Story | What it delivers |
-|---|---|
-| US-011 | Apply the change — independent disks (`UpdateDisk`) |
-| US-011a | Apply the change — dependent disks (`vm update --storage-disks`) |
-| US-012 | Rate limiting and change budget — now load-bearing, not just logged |
-| US-016 | Least-privilege service-account guidance — the write role is needed starting here |
-
-**Out:** scale-down (still), fleet mode.
-
-**Exit criterion:** soak test green; budget and cooldown hold under sustained load; no runaway spend.
-= design.md M8 (scale-up half).
-
-### Phase 3 — Fleet mode
-
-**Goal:** the same decision logic, running centrally against many VMs.
+**Goal:** build the metric source `fleet` mode will later depend on exclusively, and prove it against
+real load while a trusted fallback (guest) is still right there to check it against.
 
 | Story | What it delivers |
 |---|---|
-| US-003 | Fleet disk discovery across named VMs |
 | US-005 | Platform monitoring metric source |
-| US-005a | Adopt improved platform metrics as the NBS team ships them (`*_quota_utilization`, op-denominated queue depth) |
-| — | Project → VM → disk policy inheritance (`docs/configuration.md` §5) |
+| US-005a | Adopt improved platform metrics as the NBS team ships them |
+| US-005b | Comparison (shadow) mode — guest and platform run concurrently, only guest ever actuates, both decisions are journaled, divergence surfaced |
 
-**Note:** this phase depends only on Phase 1 (design.md: M7 depends on M2, M6 — not on M8). It can be
-built in parallel with Phase 2, or before it. It is listed third here for a readable linear roadmap,
-not because it is gated behind Phase 2.
+**Exit criterion:** comparison mode running against the live test environment; divergence between
+guest and platform decisions is understood, not just logged. = design.md M7–M8.
 
-**Exit criterion:** the fleet E2E scenario is green with the same guardrails, platform metrics
-substituted for guest. = design.md M7.
+### Phase 3 — Bidirectional (local mode)
 
-### Phase 4 — Bidirectional, calibrated
-
-**Goal:** close the loop — scale down too — and replace guessed thresholds with calibrated ones.
+**Goal:** close the loop in the environment that is cheapest to get right — scale down too.
+Deferred to its own phase because its failure mode is the real one: a wrong scale-down throttles the
+workload, unlike a wrong scale-up which only overspends.
 
 | Story | What it delivers |
 |---|---|
 | US-010 | Scale-down decision |
-| — | Preset thresholds calibrated from Phase 1–3 telemetry (design.md §8.5 calibration harness) |
+| — | Preset thresholds calibrated from Phase 1–2 telemetry (design.md §8.5 calibration harness) |
 
-**Exit criterion:** soak and chaos tests green with scale-down enabled. = design.md M9.
+**Exit criterion:** soak and chaos tests green with scale-down enabled, `local` mode. = design.md M9.
 
-### Phase 5 — Distribution
+### Phase 4 — Fleet mode, container
 
-**Goal:** something a team other than this one can install without reading the source.
+**Goal:** extend the now-proven bidirectional logic and the now-validated platform metric source to
+many VMs from one place. Nothing decision-related is new here — only discovery scope, config
+inheritance, and the deployment shape.
 
 | Story | What it delivers |
 |---|---|
-| US-015 | Static binary, systemd unit, `.deb`, container image |
+| US-003 | Fleet disk discovery across named VMs |
+| — | Project → VM → disk policy inheritance (`docs/configuration.md` §5) |
+| US-015a | Container image |
 
-**Exit criterion:** install from a package on a clean host, no source checkout. = design.md M10.
+**Exit criterion:** fleet E2E green, bidirectional from day one, deployable as a container.
+= design.md M10.
+
+### Phase 5 — Further fleet capabilities
+
+**Goal:** not yet broken into stories — deliberately left open rather than scheduled, per
+`docs/TODO.md`'s own rule. Likely candidates: fleet-scale soak/chaos, multi-project scheduling,
+cost/budget reporting across a fleet. = design.md M11.
 
 ---
 

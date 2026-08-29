@@ -174,6 +174,13 @@ Thresholds cannot be validated by reasoning, so the rollout is staged:
 3. **Bidirectional** — add conservative scale-down.
 4. **Predictive** — only once there is history worth predicting from.
 
+> **Amended by ADR-005.** Steps 1 and 2 above are no longer separate *releases* — scale-up actuation
+> ships in the MVP itself, with observe-only (`--dry-run`) kept as the validation an operator runs
+> before flipping to live, not a release gate. Steps 3 and 4 are unaffected: bidirectional still
+> follows scale-up-only, and predictive is still out of scope for v1 entirely. The calibration
+> purpose of observe-only (this section's whole point) is unchanged — only its packaging as a
+> separate numbered release is revised.
+
 ## Action Items
 
 1. [ ] Implement saturation detection with utilization as a gate, not a trigger.
