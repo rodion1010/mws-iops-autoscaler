@@ -340,3 +340,15 @@ value, and maintenance windows.
 - `mode: fleet` with `metrics.source: guest` (impossible — no guest access)
 - `scale_down_window < scale_up_window` (a scale-down faster than scale-up invites flapping)
 - `cooldown.scale_up > scale_up_window` (the agent could never act)
+- any `advanced.evaluation` interval ≤ 0, or a `cooldown` duration < 0
+- `saturation.utilization_threshold`, `target.scale_up_utilization`, or `target.scale_down_utilization`
+  outside `(0, 1]`
+- `saturation.queue_depth_threshold` < 0
+- `saturation.latency.mode` anything other than `relative` or `absolute`
+- `saturation.latency.baseline_multiplier` ≤ 0
+- `step.min_change_iops` ≤ 0 or not a multiple of 100
+- `step.max_scale_up_ratio` ≤ 1 (it would never actually scale up)
+- `step.max_scale_down_ratio` outside `(0, 1)`
+- `budget.max_changes_per_24h` ≤ 0
+- any `runtime.metrics.collection_interval`, `runtime.controller.reconcile_interval`, or
+  `runtime.controller.discovery_interval` ≤ 0

@@ -198,6 +198,153 @@ func TestValidate_rules(t *testing.T) {
 			},
 			wantSub: "mode is \"selected\" but the list is empty",
 		},
+		{
+			name: "zero collection_interval",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Evaluation: &EvaluationSpec{CollectionInterval: durationPtr("0s")},
+				}
+			},
+			wantSub: "evaluation.collection_interval",
+		},
+		{
+			name: "negative scale_up_window",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Evaluation: &EvaluationSpec{ScaleUpWindow: negativeDurationPtr(t, "5m")},
+				}
+			},
+			wantSub: "evaluation.scale_up_window",
+		},
+		{
+			name: "negative cooldown.scale_down",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:  boolPtr(true),
+					Cooldown: &CooldownSpec{ScaleDown: negativeDurationPtr(t, "5m")},
+				}
+			},
+			wantSub: "cooldown.scale_down",
+		},
+		{
+			name: "utilization_threshold of zero",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(0)},
+				}
+			},
+			wantSub: "saturation.utilization_threshold",
+		},
+		{
+			name: "utilization_threshold above 1",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(1.5)},
+				}
+			},
+			wantSub: "saturation.utilization_threshold",
+		},
+		{
+			name: "scale_up_utilization of zero",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Target:  &TargetSpec{ScaleUpUtilization: floatPtr(0)},
+				}
+			},
+			wantSub: "target.scale_up_utilization",
+		},
+		{
+			name: "negative queue_depth_threshold",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(-1)},
+				}
+			},
+			wantSub: "saturation.queue_depth_threshold",
+		},
+		{
+			name: "unknown latency.mode",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{Latency: &LatencySpec{Mode: strPtr("eventual")}},
+				}
+			},
+			wantSub: "latency.mode",
+		},
+		{
+			name: "zero latency.baseline_multiplier",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{Latency: &LatencySpec{BaselineMultiplier: floatPtr(0)}},
+				}
+			},
+			wantSub: "latency.baseline_multiplier",
+		},
+		{
+			name: "min_change_iops not a multiple of 100",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Step:    &StepSpec{MinChangeIOPS: intPtr(150)},
+				}
+			},
+			wantSub: "step.min_change_iops",
+		},
+		{
+			name: "zero min_change_iops",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Step:    &StepSpec{MinChangeIOPS: intPtr(0)},
+				}
+			},
+			wantSub: "step.min_change_iops",
+		},
+		{
+			name: "max_scale_up_ratio at or below 1",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Step:    &StepSpec{MaxScaleUpRatio: floatPtr(1)},
+				}
+			},
+			wantSub: "step.max_scale_up_ratio",
+		},
+		{
+			name: "max_scale_down_ratio at or above 1",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Step:    &StepSpec{MaxScaleDownRatio: floatPtr(1)},
+				}
+			},
+			wantSub: "step.max_scale_down_ratio",
+		},
+		{
+			name: "zero max_changes_per_24h",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Budget:  &BudgetSpec{MaxChangesPer24h: intPtr(0)},
+				}
+			},
+			wantSub: "budget.max_changes_per_24h",
+		},
+		{
+			name: "zero runtime collection_interval",
+			mutate: func(c *Config) {
+				c.Runtime.Metrics.CollectionInterval = durationPtr("0s")
+			},
+			wantSub: "runtime.metrics.collection_interval",
+		},
 	}
 
 	for _, tc := range cases {
@@ -245,8 +392,10 @@ func TestValidate_perDiskAdvancedGate(t *testing.T) {
 	}
 }
 
-func intPtr(i int) *int    { return &i }
-func boolPtr(b bool) *bool { return &b }
+func intPtr(i int) *int           { return &i }
+func boolPtr(b bool) *bool        { return &b }
+func floatPtr(f float64) *float64 { return &f }
+func strPtr(s string) *string     { return &s }
 
 func durationPtr(s string) *Duration {
 	d, err := time.ParseDuration(s)
@@ -254,6 +403,18 @@ func durationPtr(s string) *Duration {
 		panic(err)
 	}
 	dd := Duration(d)
+	return &dd
+}
+
+// negativeDurationPtr returns -d, since Duration's own YAML-facing type has
+// no negative-literal parse form worth adding just for this test.
+func negativeDurationPtr(t *testing.T, s string) *Duration {
+	t.Helper()
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		t.Fatalf("parse duration %q: %v", s, err)
+	}
+	dd := Duration(-d)
 	return &dd
 }
 

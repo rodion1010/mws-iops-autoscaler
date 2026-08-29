@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // Validate checks cfg against every rule in docs/configuration.md §8 and
@@ -41,6 +42,7 @@ func Validate(cfg *Config) error {
 	for name, rp := range resolved.DiskPolicies {
 		errs = append(errs, validateResolvedPolicy(fmt.Sprintf("disks.selected[%s].policy", name), rp)...)
 	}
+	errs = append(errs, validateResolvedRuntime("runtime", resolved.Runtime)...)
 
 	return errors.Join(errs...)
 }
@@ -77,6 +79,89 @@ func validateResolvedPolicy(path string, rp ResolvedPolicy) []error {
 			path, rp.Advanced.CooldownScaleUp, rp.Advanced.ScaleUpWindow))
 	}
 
+	errs = append(errs, validateAdvancedRanges(path, rp.Advanced)...)
+
+	return errs
+}
+
+// validateAdvancedRanges checks every advanced field against the finite
+// range or enum its meaning actually admits (issue #6) — everything here
+// previously passed Validate silently, including a threshold of 0 (a gate
+// that never opens or a target that permits zero headroom) and negative
+// durations/counts.
+func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
+	var errs []error
+
+	positive := func(field string, d time.Duration) {
+		if d <= 0 {
+			errs = append(errs, fmt.Errorf("%s.advanced.%s: %s must be greater than zero", path, field, d))
+		}
+	}
+	positive("evaluation.collection_interval", a.CollectionInterval)
+	positive("evaluation.scale_up_window", a.ScaleUpWindow)
+	positive("evaluation.scale_down_window", a.ScaleDownWindow)
+
+	nonNegativeDuration := func(field string, d time.Duration) {
+		if d < 0 {
+			errs = append(errs, fmt.Errorf("%s.advanced.%s: %s must not be negative", path, field, d))
+		}
+	}
+	nonNegativeDuration("cooldown.scale_up", a.CooldownScaleUp)
+	nonNegativeDuration("cooldown.scale_down", a.CooldownScaleDown)
+
+	fraction := func(field string, v float64) {
+		if v <= 0 || v > 1 {
+			errs = append(errs, fmt.Errorf("%s.advanced.%s: %v must be greater than 0 and at most 1", path, field, v))
+		}
+	}
+	fraction("saturation.utilization_threshold", a.UtilizationThreshold)
+	fraction("target.scale_up_utilization", a.ScaleUpUtilization)
+	fraction("target.scale_down_utilization", a.ScaleDownUtilization)
+
+	if a.QueueDepthThreshold < 0 {
+		errs = append(errs, fmt.Errorf("%s.advanced.saturation.queue_depth_threshold: %v must not be negative", path, a.QueueDepthThreshold))
+	}
+
+	if a.LatencyMode != "relative" && a.LatencyMode != "absolute" {
+		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.mode: %q is neither \"relative\" nor \"absolute\"", path, a.LatencyMode))
+	}
+	if a.LatencyBaselineMultiplier <= 0 {
+		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.baseline_multiplier: %v must be greater than zero", path, a.LatencyBaselineMultiplier))
+	}
+
+	if a.MinChangeIOPS <= 0 {
+		errs = append(errs, fmt.Errorf("%s.advanced.step.min_change_iops: %d must be greater than zero", path, a.MinChangeIOPS))
+	} else if a.MinChangeIOPS%BillingStepIOPS != 0 {
+		errs = append(errs, fmt.Errorf("%s.advanced.step.min_change_iops: %d is not a multiple of %d", path, a.MinChangeIOPS, BillingStepIOPS))
+	}
+	if a.MaxScaleUpRatio <= 1 {
+		errs = append(errs, fmt.Errorf("%s.advanced.step.max_scale_up_ratio: %v must be greater than 1 — otherwise it never actually scales up", path, a.MaxScaleUpRatio))
+	}
+	if a.MaxScaleDownRatio <= 0 || a.MaxScaleDownRatio >= 1 {
+		errs = append(errs, fmt.Errorf("%s.advanced.step.max_scale_down_ratio: %v must be greater than 0 and less than 1", path, a.MaxScaleDownRatio))
+	}
+
+	if a.MaxChangesPer24h <= 0 {
+		errs = append(errs, fmt.Errorf("%s.advanced.budget.max_changes_per_24h: %d must be greater than zero", path, a.MaxChangesPer24h))
+	}
+
+	return errs
+}
+
+// validateResolvedRuntime checks the runtime block's intervals — all three
+// are durations the controller schedules on, so zero or negative silently
+// breaks scheduling rather than failing validation.
+func validateResolvedRuntime(path string, r ResolvedRuntime) []error {
+	var errs []error
+	if r.CollectionInterval <= 0 {
+		errs = append(errs, fmt.Errorf("%s.metrics.collection_interval: %s must be greater than zero", path, r.CollectionInterval))
+	}
+	if r.ReconcileInterval <= 0 {
+		errs = append(errs, fmt.Errorf("%s.controller.reconcile_interval: %s must be greater than zero", path, r.ReconcileInterval))
+	}
+	if r.DiscoveryInterval <= 0 {
+		errs = append(errs, fmt.Errorf("%s.controller.discovery_interval: %s must be greater than zero", path, r.DiscoveryInterval))
+	}
 	return errs
 }
 
