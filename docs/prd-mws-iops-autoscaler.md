@@ -341,6 +341,13 @@ unused headroom.
 - [ ] A budget persistence failure at any point — reservation, confirmation, or release, not only at
       startup — permanently disables further writes for that process's lifetime and is surfaced on
       `/readyz` and `/metrics`, not merely logged (issue #10)
+- [ ] A write attempt's own error is never sufficient by itself to release its budget reservation — the
+      error does not prove the change never landed (the platform may have applied it before the
+      response reached the agent). The agent must re-read live state and resolve the reservation from
+      that: matches the pre-write value → release; matches the intended target → confirm (and adopt the
+      value the same way a verified success would); anything else, including a failed read, stays
+      pending until the next restart's reconciliation. A dry run is exempt — it never reaches a call
+      that could ambiguously succeed, so its error always releases
 - [ ] Budget and cooldowns are configurable
 - [ ] Typecheck/lint passes
 

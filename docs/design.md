@@ -1239,6 +1239,21 @@ milestone introduces.
   bad line anywhere but the very last one (which can only be an in-progress append torn by a crash,
   recoverable by dropping it) refuses to start rather than silently skip the line and understate the
   count.
+
+  **The same three-way resolution also applies mid-run, immediately after a failed write, not only at
+  startup.** A non-dry-run `actuator.Apply` error does not prove the change never landed — the platform
+  may have applied it before the response reached this process. Releasing on the error alone, as an
+  earlier version of this logic did, violates `Budget.Release`'s own contract (live state verified to
+  still match the reservation's `Before`) and can silently undercount a change that actually happened.
+  `Agent.resolveReservationAfterWriteFailure` re-reads live state the same way startup reconciliation
+  does and resolves from that: live equal to `Target` confirms the reservation *and* adopts the value
+  into `a.managed`/`disk_provisioned_iops` exactly as a verified success would (issue #16/#19 — the next
+  cycle must decide from reality, not a stale `Current`); live equal to `Before` releases it; anything
+  else, including a failed read, leaves it pending until the next restart's reconciliation. A dry run is
+  exempt from this — it never reaches a mutating call that could ambiguously succeed (an independent
+  disk's dry run goes through the platform's own `validateOnly`, contractually non-mutating even on
+  error; a dependent disk's dry run returns before `UpdateDependentDisk` is ever called, ADR-007) — so a
+  dry-run error still releases unconditionally.
 - **Leader election.** Two `fleet` agents on the same project would both act. v1 documents
   "run one"; a lease is the fix if it becomes real.
 - **Absolute latency thresholds.** Relative-to-baseline only in v1; `latency.mode: absolute` is in the

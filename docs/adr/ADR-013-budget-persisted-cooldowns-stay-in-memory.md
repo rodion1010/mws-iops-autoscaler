@@ -150,3 +150,35 @@ nothing else bounds its loss; cooldowns don't, once validated symmetrically.
        (recovered), compaction never dropping a pending entry, a Reserve/Confirm failure flipping
        `Healthy()` false and forcing `budget_exhausted`, and Agent-level reconciliation for all four
        outcomes (confirmed, released, ambiguous-stays-pending, disk-no-longer-managed-stays-pending).
+
+> **Refined again (2026-08-29, pre-merge review): a write's own error is not proof it never landed.**
+> `actuate()`'s error branch released the reservation unconditionally — the comment reasoning at the
+> time claimed this was "safe without a fresh read: an actuator error means Apply's own pre-write
+> checks already refused before calling the platform, or the platform call itself failed outright —
+> neither leaves live state at `d.Target`." That reasoning is false for the one case it matters most:
+> the actual mutating call (`UpdateDisk`/`UpdateVirtualMachine`) can fail on the client side — timeout,
+> connection reset, a lost response — *after* the platform has already applied it server-side. Releasing
+> in that case violates `Budget.Release`'s own documented precondition (live state verified to still
+> match `Before`) and silently undercounts a real, applied change against the hard cap — reopening
+> exactly the gap `Reserve`-before-write exists to close, just moved from "process crash" to "any failed
+> write call."
+>
+> `Agent.resolveReservationAfterWriteFailure` now applies startup reconciliation's own three-way
+> resolution mid-run, immediately after any non-dry-run write error, instead of trusting the error:
+> live current equal to `Target` confirms the reservation and adopts the value into `a.managed`/
+> `disk_provisioned_iops` exactly as a verified success would (the next cycle must decide from reality,
+> not a stale `Current`); equal to `Before` releases it — the one outcome where `Release`'s contract is
+> actually satisfied; anything else, including a failed live read itself, leaves it pending until the
+> next restart's reconciliation, the same fail-closed default `reconcilePendingBudget`'s own `default:`
+> case already uses. A dry run is deliberately exempt and still releases unconditionally on error: an
+> independent disk's dry run goes through the platform's own `validateOnly`, which by contract never
+> mutates regardless of whether the response is lost, and a dependent disk's dry run returns before
+> `UpdateDependentDisk` is ever called at all (ADR-007 — no server-side dry run exists for that path) —
+> neither can produce the ambiguity this refinement exists to close.
+
+9. [x] `cmd/mws-iops-autoscaler/agent.go`: `resolveReservationAfterWriteFailure` resolves a real write's
+       reservation from a fresh live read after any error, reusing `liveCurrentIOPS`; dry-run errors
+       still release unconditionally.
+10. [x] Tests: a failed write whose live state matches `Before` (released), matches `Target` (confirmed
+        and adopted despite the error), matches neither (stays pending), and a failed live-state read
+        itself (stays pending) — plus a dedicated dry-run-error-always-releases test.

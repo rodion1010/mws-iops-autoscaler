@@ -386,17 +386,33 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	applied, err := a.actuator.Apply(ctx, d, target, a.dryRun, idempotencyKey)
 	a.tracker.EndResize(diskID)
 	if err != nil {
-		// The write did not land (or, for a dry run, was never meant to)
-		// — release the reservation. Live state was never touched by this
-		// attempt in either case, so releasing against d.Current (the
-		// same Before value just reserved with) is safe without a fresh
-		// read: an actuator error means Apply's own pre-write checks
-		// already refused before calling the platform, or the platform
-		// call itself failed outright — neither leaves live state at
-		// d.Target.
-		if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
-			log.Printf("actuate %s (%s): failed to release the budget reservation after a failed write: %v", diskID, m.Disk.DeviceName, rerr)
+		if a.dryRun {
+			// A dry run can never ambiguously succeed server-side: an
+			// independent disk's error comes from the platform's own
+			// validateOnly call, which by contract never mutates even if
+			// the response is lost; a dependent disk's write function
+			// returns before ever calling UpdateDependentDisk at all
+			// (ADR-007, no server-side dry run exists for it). Safe to
+			// release unconditionally — there is no live state to check.
+			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
+				log.Printf("actuate %s (%s): failed to release the dry-run budget reservation after an error: %v", diskID, m.Disk.DeviceName, rerr)
+			}
+			log.Printf("actuate %s (%s): %v", diskID, m.Disk.DeviceName, err)
+			return
 		}
+
+		// A real write's error does not prove the change never landed —
+		// the platform may have applied it before the response reached
+		// this process (timeout, connection reset, etc). Releasing
+		// against d.Current here without checking would reopen exactly
+		// the undercounting gap ReserveChange-before-write exists to
+		// close: Budget.Release's own contract requires live state
+		// verified to still match Before, which an error alone can never
+		// establish. Resolve the reservation from a fresh live read
+		// instead — the same three-way resolution reconcilePendingBudget
+		// already applies at startup for an identically ambiguous
+		// situation.
+		a.resolveReservationAfterWriteFailure(ctx, m, d, idempotencyKey, now)
 
 		if errors.Is(err, compute.ErrConcurrentModification) {
 			// The write path already refused to touch anything (issue
@@ -456,6 +472,63 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	}
 	a.tracker.RecordChange(diskID, d.Action == decider.ActionScaleUp, now)
 	log.Printf("%s %s: %d -> %d (%s)", d.Action, m.Disk.DeviceName, d.Current, applied.IOPS, d.Reason)
+}
+
+// resolveReservationAfterWriteFailure re-reads diskID's live IOPS after a
+// real (non-dry-run) actuator.Apply error and resolves idempotencyKey's
+// reservation from that reading alone — never from the error, which cannot
+// distinguish "nothing was applied" from "applied, but the response never
+// reached this process." Exactly the same three-way resolution
+// reconcilePendingBudget already applies at startup for an identically
+// ambiguous situation (a crash instead of a single failed call), so this
+// reuses its logic rather than inventing a second one:
+//
+//   - live == d.Target: the write landed despite the error. Adopted into
+//     a.managed and confirmed the same way a verified success already is
+//     (issue #16) — the next cycle's decision must see reality, not a
+//     stale Current, and the reservation must count as the real change it
+//     was, not sit wrongly released.
+//   - live == d.Current: conclusively never landed. Released — this is
+//     the one case Budget.Release's own contract (live verified to still
+//     match Before) is actually satisfied.
+//   - anything else, including a failed read itself: left pending,
+//     fail closed. The live value cannot be explained by this attempt
+//     alone (most likely an unrelated external change, or the error
+//     genuinely was mid-write) — resolving it via reconcilePendingBudget
+//     at the next restart, not guessed at here.
+func (a *Agent) resolveReservationAfterWriteFailure(ctx context.Context, m registry.ManagedDisk, d decider.Decision, idempotencyKey string, now time.Time) {
+	diskID := m.Disk.DiskName
+
+	live, err := a.liveCurrentIOPS(ctx, m)
+	if err != nil {
+		log.Printf("actuate %s (%s): failed to read live state after a write error — leaving the budget reservation pending (fail closed): %v", diskID, m.Disk.DeviceName, err)
+		return
+	}
+
+	switch live {
+	case d.Target:
+		a.mu.Lock()
+		for i := range a.managed {
+			if a.managed[i].Disk.DiskName == diskID {
+				a.managed[i].Disk.IOPS = live
+				break
+			}
+		}
+		a.mu.Unlock()
+		a.telemetry.RecordAppliedIOPS(diskID, a.vmName, string(m.Disk.Class), live)
+		if cerr := a.tracker.ConfirmChange(idempotencyKey); cerr != nil {
+			log.Printf("actuate %s (%s): failed to durably confirm a write that landed despite the error: %v", diskID, m.Disk.DeviceName, cerr)
+		}
+		a.tracker.RecordChange(diskID, d.Action == decider.ActionScaleUp, now)
+		log.Printf("actuate %s (%s): write reported an error but live state confirms it landed (%d -> %d) — confirmed, not released", diskID, m.Disk.DeviceName, d.Current, live)
+	case d.Current:
+		if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
+			log.Printf("actuate %s (%s): failed to release a reservation confirmed never to have landed: %v", diskID, m.Disk.DeviceName, rerr)
+		}
+	default:
+		log.Printf("actuate %s (%s): live IOPS (%d) after a write error matches neither the reservation's before (%d) nor target (%d) — leaving it pending (fail closed, ambiguous)",
+			diskID, m.Disk.DeviceName, live, d.Current, d.Target)
+	}
 }
 
 // reconcilePendingBudget resolves every budget reservation a previous run

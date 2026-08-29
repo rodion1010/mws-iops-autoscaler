@@ -252,6 +252,9 @@ func TestActuate_telemetry_dryRunNeverMovesProvisionedIOPS(t *testing.T) {
 func TestActuate_telemetry_failedWriteNeverMovesProvisionedIOPS(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
 	a, _ := newTestAgent(t, true, act)
+	a.client = &stubClient{disks: map[string]*compute.Disk{
+		"vm-1-data": {Name: "vm-1-data", SpecIOPS: 1000}, // live still matches Current
+	}}
 
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.telemetry.RecordDecision(a.vmName, string(independentDisk().Disk.Class), d)
@@ -599,9 +602,16 @@ func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
 	}
 }
 
-func TestActuate_releasesReservationOnWriteFailure(t *testing.T) {
+// --- issue: don't release the budget reservation on a bare actuator error
+// — a real write's error does not prove nothing landed, so the reservation
+// must be resolved from a fresh live read instead. ---
+
+func TestActuate_writeFailure_liveStillAtBefore_releases(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
 	a, tracker := newTestAgent(t, true, act)
+	a.client = &stubClient{disks: map[string]*compute.Disk{
+		"vm-1-data": {Name: "vm-1-data", SpecIOPS: 1000}, // live still matches Before
+	}}
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
@@ -609,10 +619,89 @@ func TestActuate_releasesReservationOnWriteFailure(t *testing.T) {
 		t.Fatalf("Actuator.Apply called %d times, want 1", len(act.calls))
 	}
 	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 0 {
-		t.Errorf("ChangesInLast24h = %d, want 0 — a failed write's reservation must be released, not left counted", got)
+		t.Errorf("ChangesInLast24h = %d, want 0 — live state confirmed the write never landed, so it must be released", got)
 	}
 	if len(tracker.PendingChanges()) != 0 {
 		t.Errorf("PendingChanges() = %+v, want none after a released reservation", tracker.PendingChanges())
+	}
+}
+
+func TestActuate_writeFailure_liveAtTarget_confirmsNotReleases(t *testing.T) {
+	// The platform may have applied the change before the response reached
+	// this process (timeout, connection reset). A bare error must not
+	// release a reservation that actually landed — that would silently
+	// undercount a real change against the 24h cap.
+	act := &erroringActuatorRecording{err: errors.New("simulated: response lost after the request landed")}
+	a, tracker := newTestAgent(t, true, act)
+	a.managed = []registry.ManagedDisk{independentDisk()}
+	a.client = &stubClient{disks: map[string]*compute.Disk{
+		"vm-1-data": {Name: "vm-1-data", SpecIOPS: 2000}, // live already at Target
+	}}
+	now := time.Now()
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, now)
+
+	if got := tracker.State("vm-1-data", now).ChangesInLast24h; got != 1 {
+		t.Errorf("ChangesInLast24h = %d, want 1 — a write confirmed landed via live state must still count", got)
+	}
+	if len(tracker.PendingChanges()) != 0 {
+		t.Errorf("PendingChanges() = %+v, want none — the reservation must be Confirmed, not left Pending", tracker.PendingChanges())
+	}
+	if got := tracker.State("vm-1-data", now).LastChangeUp; got.IsZero() {
+		t.Error("cooldown was not started for a write confirmed landed via live state")
+	}
+	if got := a.managed[0].Disk.IOPS; got != 2000 {
+		t.Errorf("managed disk IOPS = %d, want 2000 — the live value must be adopted even though Apply itself errored", got)
+	}
+}
+
+func TestActuate_writeFailure_liveAmbiguous_staysPending(t *testing.T) {
+	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
+	a, tracker := newTestAgent(t, true, act)
+	a.client = &stubClient{disks: map[string]*compute.Disk{
+		"vm-1-data": {Name: "vm-1-data", SpecIOPS: 5000}, // matches neither Before nor Target
+	}}
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 1 {
+		t.Errorf("ChangesInLast24h = %d, want 1 — an unexplained live value must stay pending (fail closed), not be released", got)
+	}
+	if len(tracker.PendingChanges()) != 1 {
+		t.Errorf("PendingChanges() = %+v, want exactly one still-pending reservation", tracker.PendingChanges())
+	}
+}
+
+func TestActuate_writeFailure_liveReadFails_staysPending(t *testing.T) {
+	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
+	a, tracker := newTestAgent(t, true, act)
+	a.client = &stubClient{disks: map[string]*compute.Disk{}} // GetDisk fails: "stub: unused"
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 1 {
+		t.Errorf("ChangesInLast24h = %d, want 1 — a failed live-state read must leave the reservation pending, not release it", got)
+	}
+	if len(tracker.PendingChanges()) != 1 {
+		t.Errorf("PendingChanges() = %+v, want exactly one still-pending reservation", tracker.PendingChanges())
+	}
+}
+
+func TestActuate_dryRunErrorAlwaysReleases(t *testing.T) {
+	// A dry run's error can never be ambiguous (no mutating call is ever
+	// reached), so it must release unconditionally without needing — or
+	// attempting — a live-state read.
+	act := &erroringActuatorRecording{err: errors.New("simulated dry-run validation failure")}
+	a, tracker := newTestAgent(t, true, act)
+	a.dryRun = true
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 0 {
+		t.Errorf("ChangesInLast24h = %d, want 0 — a dry-run error must always release, never stay pending", got)
+	}
+	if len(tracker.PendingChanges()) != 0 {
+		t.Errorf("PendingChanges() = %+v, want none", tracker.PendingChanges())
 	}
 }
 
