@@ -20,8 +20,13 @@ type Sampler struct {
 }
 
 // NewSampler builds a Sampler over source, keeping up to capacity samples
-// per disk. capacity is the caller's responsibility to size — typically the
-// longest configured window divided by the collection interval.
+// per disk. capacity is the caller's responsibility to size — not simply
+// the longest configured window divided by the collection interval: N
+// samples at exact cadence span only (N-1) × interval end to end, so that
+// naive division always comes up one sample short of ever spanning the
+// window (issue #7). config.ResolvedConfig.SamplerCapacity is the
+// canonical formula; the production orchestrator (cmd/mws-iops-autoscaler)
+// always calls it rather than computing capacity itself.
 func NewSampler(source MetricSource, capacity int) (*Sampler, error) {
 	if capacity <= 0 {
 		return nil, fmt.Errorf("sampler: capacity must be positive, got %d", capacity)

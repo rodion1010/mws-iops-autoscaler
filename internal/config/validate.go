@@ -68,6 +68,17 @@ const minSamplesForWindowMirror = 3
 // for any disk, for any window, no matter how long the agent runs: the
 // ring buffer would evict down to fewer samples than analyzer.Analyze's
 // own minimum before a window could ever fill.
+//
+// SamplerCapacity's own corrected formula (issue #7, reopened:
+// ceil(window/interval) + 1 + samplerCapacitySlackSamples) means this can
+// no longer actually fire for any positive window and interval — the
+// formula's own minimum output is 1+1+2=4, already above this function's
+// floor of 3. Kept anyway as defense in depth (this codebase's established
+// pattern — see e.g. Agent's own allowScaleDown double-check): if
+// SamplerCapacity's formula or its slack constant ever changes, this stays
+// the backstop that catches a config that would otherwise silently never
+// become evaluable, without requiring every future change to that formula
+// to remember this invariant on its own.
 func validateSamplerCapacity(resolved *ResolvedConfig) []error {
 	if capacity := resolved.SamplerCapacity(); capacity < minSamplesForWindowMirror {
 		return []error{fmt.Errorf(

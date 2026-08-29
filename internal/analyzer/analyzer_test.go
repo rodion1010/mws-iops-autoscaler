@@ -508,6 +508,69 @@ func TestReadWriteLatencies_excludeInactiveSamples(t *testing.T) {
 	}
 }
 
+// --- issue #7 (reopened): buffer slack + gap-aware window coverage ---
+
+func TestWindowFull_toleratesJitterWithinMaxGap(t *testing.T) {
+	// Real ticks are never perfectly evenly spaced. Gaps of 55s/65s around
+	// a nominal 60s cadence, all comfortably under a 90s maxGap, must still
+	// read as a full, sustained window — jitter is not the same failure
+	// mode as a genuine outage.
+	base := epoch
+	offsets := []time.Duration{0, 55 * time.Second, 120 * time.Second, 175 * time.Second, 240 * time.Second, 300 * time.Second}
+	samples := make([]metrics.Sample, 0, len(offsets))
+	for _, off := range offsets {
+		samples = append(samples, metrics.Sample{DiskID: "disk1", Timestamp: base.Add(off), Source: metrics.SourceGuest})
+	}
+	if !windowFull(samples, 5*time.Minute, 90*time.Second) {
+		t.Error("windowFull = false, want true — jitter within maxGap must not read as a coverage gap")
+	}
+}
+
+func TestWindowFull_sparseSpanButBelowMinSamplesIsNotFull(t *testing.T) {
+	// Only 2 samples, but their span alone already covers the window —
+	// minSamplesForWindow's floor must still block this: a window this
+	// sparse carries almost no real information despite "technically"
+	// spanning the right amount of wall-clock time.
+	samples := []metrics.Sample{
+		{DiskID: "disk1", Timestamp: epoch, Source: metrics.SourceGuest},
+		{DiskID: "disk1", Timestamp: epoch.Add(5 * time.Minute), Source: metrics.SourceGuest},
+	}
+	if windowFull(samples, 5*time.Minute, time.Hour) {
+		t.Error("windowFull = true, want false — 2 samples must never satisfy the minSamplesForWindow floor regardless of span")
+	}
+}
+
+func TestAnalyze_recoversAfterLongOutageWithoutPoisoningFromOldHistory(t *testing.T) {
+	// The buffer still retains history from before a long collection
+	// outage — that alone must not prevent WindowFullUp from becoming
+	// true again once enough contiguous, fresh samples have accumulated.
+	// This is exactly what trailingWindow + windowFull(upWindow, ...)
+	// (rather than windowFull(samples, ...) on the whole buffer) is
+	// supposed to guarantee.
+	a := NewWindowAnalyzer()
+
+	var samples []metrics.Sample
+	// Old segment, minutes 0-2 — clustered together, long before the gap.
+	for m := 0; m <= 2; m++ {
+		samples = append(samples, sampleAt(m, 100, 0, 0, 0, 0, time.Millisecond, time.Millisecond))
+	}
+	// A long outage follows (implicit: the next sample jumps to minute 100
+	// — a ~98-minute gap), then a clean, contiguous recovery: minutes
+	// 100-105, exactly spanning the 5-minute ScaleUpWindow with no
+	// internal gaps.
+	for m := 100; m <= 105; m++ {
+		samples = append(samples, sampleAt(m, 100, 0, 0, 0, 0, time.Millisecond, time.Millisecond))
+	}
+
+	policy := testPolicy
+	policy.MaxSampleGap = 2 * time.Minute // tolerates the recovered segment's 1-minute cadence, not the ~98-minute outage
+	got := a.Analyze("disk1", samples, policy, specIOPS, asOf(samples))
+
+	if !got.WindowFullUp {
+		t.Error("WindowFullUp = false, want true — the trailing slice is a clean, gap-free 5-minute window; old pre-outage history sitting deeper in the buffer must not block it")
+	}
+}
+
 func TestAnalyze_baselineNotEstablishedFromIdleWindow(t *testing.T) {
 	// A full up-window where nothing was ever active in either direction —
 	// currentBaseline must decline to establish (issue #9), not freeze a

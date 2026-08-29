@@ -106,5 +106,23 @@ exists on `Sample`) and removes an entire class of "window said full, wasn't rea
        (`internal/config/defaults.go`, `resolve.go`).
 3. [x] Confirm strict decoding rejects `evaluation.collection_interval` as an unknown key
        (`internal/config/load_test.go`).
-4. [ ] When the Analyzer (M3) implements `window_not_full`, compute it from `Sample.Timestamp` span
+4. [x] When the Analyzer (M3) implements `window_not_full`, compute it from `Sample.Timestamp` span
        against `policy.advanced.evaluation.scale_up_window` / `scale_down_window` — not a count.
+
+> **Refined by the M3/M6 implementation (2026-08-29, issue #7 reopened):** two gaps surfaced in the
+> MVP review that this ADR's text didn't anticipate. First, "compute from timestamp span" turned out
+> to need feeding `windowFull` the already-sliced trailing window (`trailingWindow(samples, window)`),
+> not the whole retained buffer — calling it on the full buffer let the minimum-sample-count condition
+> be satisfied by samples outside the window actually being evaluated. Second, span-based readiness
+> alone doesn't reject a large *internal* gap (a missed collection cycle, a temporary outage that later
+> recovered) sitting inside an otherwise span-satisfying window — `windowFull` now also checks that no
+> two consecutive samples inside the window are farther apart than a new `EvaluationPolicy.MaxSampleGap`.
+> Separately, the ring-buffer capacity formula this ADR's own text estimates as "the longest configured
+> window divided by the collection interval" (§context, `NewSampler`'s own doc comment) has an
+> off-by-one: N samples at exact cadence span only `(N-1) × interval` end to end, so a
+> `floor(window/interval)`-sized buffer is always one sample short of ever spanning the configured
+> window — with the default 30-minute scale-down window and a 1-minute cadence, a capacity-30 buffer
+> could span at most 29 minutes, permanently blocking `WindowFullDown`. `config.ResolvedConfig.SamplerCapacity()`
+> now computes `ceil(window/interval) + 1 + slack` instead. See `internal/analyzer/analyzer.go`'s
+> `windowFull`/`trailingWindow`, `internal/config/resolve.go`'s `SamplerCapacity`, and ADR-014 (the
+> related `now`-driven staleness work from the same review pass) for the current state.

@@ -453,23 +453,19 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "not a finite number",
 		},
 		{
-			name: "collection_interval too long for the default windows to ever fill",
+			name: "long collection_interval relative to the default windows is still valid",
 			mutate: func(c *Config) {
 				// Default scale_down_window is 30m (defaults.go's
-				// PresetBalanced); a 20m collection_interval yields a
-				// sampler capacity of only floor(30m/20m) = 1, below the
-				// 3-sample floor windowFull requires — the window could
-				// never become full no matter how long the agent ran.
+				// PresetBalanced). Before issue #7's SamplerCapacity fix,
+				// a 20m collection_interval would have floored to a
+				// capacity of 1 here and been rejected by
+				// validateSamplerCapacity. The corrected
+				// ceil(window/interval)+1+slack formula always yields at
+				// least 4 for any positive window/interval pair, so this
+				// is valid now — the buffer just takes longer to fill,
+				// which is not what this validation rule polices (see
+				// validateSamplerCapacity's own updated comment).
 				c.Runtime.Metrics.CollectionInterval = durationPtr("20m")
-			},
-			wantSub: "collection_interval",
-		},
-		{
-			name: "collection_interval exactly at the boundary is valid",
-			mutate: func(c *Config) {
-				// scale_down_window=30m / minSamplesForWindowMirror(3) = 10m
-				// exactly — capacity floors to exactly 3, the minimum.
-				c.Runtime.Metrics.CollectionInterval = durationPtr("10m")
 			},
 			wantSub: "",
 		},
@@ -544,6 +540,38 @@ func negativeDurationPtr(t *testing.T, s string) *Duration {
 	}
 	dd := Duration(-d)
 	return &dd
+}
+
+func TestValidateSamplerCapacity_directDefenseInDepth(t *testing.T) {
+	// SamplerCapacity's own corrected formula (issue #7) can no longer
+	// actually produce a value below minSamplesForWindowMirror through any
+	// real config — this exercises validateSamplerCapacity directly
+	// against a hand-built ResolvedConfig to prove the backstop itself
+	// still works, independent of whether today's formula can reach it.
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{ScaleDownWindow: 5 * time.Minute}},
+		Runtime:  ResolvedRuntime{CollectionInterval: time.Minute},
+	}
+	if got := rc.SamplerCapacity(); got < minSamplesForWindowMirror {
+		t.Fatalf("test setup: SamplerCapacity() = %d, want >= %d so this test isn't accidentally exercising the real bug", got, minSamplesForWindowMirror)
+	}
+	if errs := validateSamplerCapacity(rc); len(errs) != 0 {
+		t.Fatalf("validateSamplerCapacity() = %v, want none for a sufficient capacity", errs)
+	}
+
+	// Force the defensive branch a real config can no longer reach: a
+	// zero window collapses SamplerCapacity to its floor of 1.
+	rc.VMPolicy.Advanced.ScaleDownWindow = 0
+	if got := rc.SamplerCapacity(); got != 1 {
+		t.Fatalf("test setup: SamplerCapacity() = %d, want 1 with a zero window", got)
+	}
+	errs := validateSamplerCapacity(rc)
+	if len(errs) != 1 {
+		t.Fatalf("validateSamplerCapacity() = %v, want exactly one error", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "collection_interval") {
+		t.Errorf("error = %v, want it to name collection_interval", errs[0])
+	}
 }
 
 func TestValidate_platformSourceWithKeyConfigured(t *testing.T) {
