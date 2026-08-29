@@ -280,11 +280,15 @@ unused headroom.
 
 **Acceptance Criteria:**
 - [ ] `--dry-run` performs discovery, metric collection, and decisions but applies no change
-- [ ] Each decision is sent with **`ValidateOnly=true`**, so the platform runs its real validation
-      (bounds, 100-IOPS step, permissions) without mutating — a dry run that catches genuine
-      rejections rather than only printing intent
-- [ ] Prints each decision with the values that drove it, the resulting IOPS delta, and the
-      platform's validation verdict
+- [ ] **Independent disks:** each decision is sent with `ValidateOnly=true` (`UpdateDisk` supports
+      it), so the platform runs its real validation (bounds, 100-IOPS step, permissions) without
+      mutating — a dry run that catches genuine rejections rather than only printing intent
+- [ ] **Dependent disks:** no equivalent exists — `UpdateVirtualMachine` has no `validateOnly` (ADR-007).
+      The report states the computed decision and the agent's own client-side checks (range, step,
+      VM pool guard), and is labelled as such — not presented as a server-confirmed verdict
+- [ ] Prints each decision with the values that drove it, the resulting IOPS delta, and — per disk —
+      either the platform's validation verdict (independent) or "computed, not server-checked"
+      (dependent)
 - [ ] Exits cleanly after a configurable number of evaluation cycles
 - [ ] Typecheck/lint passes
 

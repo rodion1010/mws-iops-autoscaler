@@ -304,6 +304,12 @@ GET  .../virtualMachines/{vm}                   capture etag
 POST .../virtualMachines/{vm}                   send etag, Idempotency-Key
 ```
 
+`UpdateVirtualMachine` has no `validateOnly` — confirmed against the generated SDK client, which has
+no such field on this request (unlike `UpdateDiskRequest`, which does). **This path has no
+server-side dry-run** (ADR-007): `--dry-run` can report the computed decision and the agent's own
+client-side checks for a dependent disk, but not a platform-confirmed verdict the way it can for an
+independent one.
+
 Both paths verify the applied value from the response. A write whose response does not carry the
 requested value is a failure, not a success — in-memory state must never claim a change that did not
 land.
@@ -549,7 +555,7 @@ pool), one dependent disk, one independent disk attached by ref.
 | Dependent write path | drive the VM-owned disk | Change applied via VM path; all other fields unchanged |
 | Independent write path | drive the ref-attached disk | Change applied via disk path |
 | Cold start | restart mid-load | No action until window full |
-| Dry run | `--dry-run` under load | `ValidateOnly` used; zero mutations; verdicts reported |
+| Dry run | `--dry-run` under load, both classes | Independent: `ValidateOnly` used, server verdict. Dependent: computed verdict only (ADR-007). Zero mutations either way |
 
 The bandwidth-bound scenario is the one that catches a whole class of bugs: a naive IOPS-only
 controller sees 513/1000 and concludes there is headroom, while the disk is at 100% utilization with
