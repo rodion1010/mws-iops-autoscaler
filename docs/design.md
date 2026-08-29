@@ -327,9 +327,11 @@ without a queue signal is what makes this coarser than guest's throttling detect
 reason `local` prefers the guest (ADR-001) — it is not a statement about the latency figure's own
 accuracy.
 
-**Honesty note.** These estimators are unvalidated. They are the reason the rollout starts
-observe-only: the first stage exists specifically to check whether the estimate matches what actually
-happened after a manual resize.
+**Honesty note.** These estimators are unvalidated. They are why `--dry-run` (US-013) is run against
+the live test environment as a validation step inside M6 before actuation is flipped on — not a
+separate observe-only release gating the MVP (ADR-005 amends ADR-002 on this point) — checking
+whether the estimate matches what actually happened after a manual resize before the estimator is
+ever allowed to act on its own.
 
 ### 4.6 VM headroom
 
@@ -618,8 +620,8 @@ Every reconcile emits one structured record per disk, including no-action:
 }
 ```
 
-This is the primary calibration input for the observe-only stage — thresholds are tuned from these
-records, not from reasoning.
+This is the primary calibration input for the `--dry-run` harness (§8.5) — thresholds are tuned from
+these records, not from reasoning.
 
 ### 7.3 Health and alerting
 
@@ -700,12 +702,14 @@ controller sees 513/1000 and concludes there is headroom, while the disk is at 1
   sane, no unbounded memory growth, no budget exhaustion under normal load.
 - **Chaos:** random injected API failures at 20% — assert no double-applies and no state divergence.
 
-### 8.5 Calibration harness (observe-only)
+### 8.5 Calibration harness (`--dry-run`)
 
-Not a test but the mechanism that makes the defaults defensible: run in observe-only against real
-workloads, record every decision that *would* have been made plus what the load did next, then tune
-thresholds against that corpus. **No default in `docs/configuration.md` should be treated as
-validated until it has survived this.**
+Not a test but the mechanism that makes the defaults defensible: run `--dry-run` (US-013) against
+real workloads, record every decision that *would* have been made plus what the load did next, then
+tune thresholds against that corpus. This is the same validation step §9.2 folds into M6 before
+actuation is flipped on — a mechanism used once as a gate before GA, and again wherever recalibration
+is needed — not a separate observe-only release phase of its own (ADR-005). **No default in
+`docs/configuration.md` should be treated as validated until it has survived this.**
 
 ---
 
