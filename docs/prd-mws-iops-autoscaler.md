@@ -337,7 +337,7 @@ needs, per mode, so that I do not have to grant it broad rights.
   the documented `spec.disks.totalIops` is `null` on every type and cannot be used. The disk-level
   half (1000–10000, step 100) is enforced server-side, but the VM-pool half is not (FR-15c), so this
   check cannot be delegated to request validation.
-- FR-13: The following must be configurable, with the defaults in §6: window length, percentile,
+- FR-13: The following must be configurable, with the defaults in §7: window length, percentile,
   utilization threshold, step, and cooldown — each independently for up and down; plus floor,
   ceiling override, discovery interval, and 24 h change budget.
 - FR-14: When a disk is saturated and the VM pool (`3000 × vcpuCount`) is also saturated, the agent must
@@ -418,12 +418,103 @@ needs, per mode, so that I do not have to grant it broad rights.
 - **Predictive or ML-driven scaling.** The dynamic range is only 10×; a reactive state machine is
   sufficient.
 - **A UI.** Configuration is a file; observation is logs and Prometheus metrics.
-- **Managing dependent disks in MVP.** They require a full read-modify-write through the VM object
-  and are deferred (see OQ-3).
 
 ---
 
-## 6. Default Configuration
+## 6. Release Phases
+
+The User Stories in §3 are not one delivery — they group into five phases. Each phase is shippable
+and independently useful; nothing here is "half a feature." The order follows the sequencing already
+established in `docs/design.md` §9.2 (observe-only before any write; local mode before fleet, because
+it has fewer moving parts and is where the demand estimator gets validated) — this section makes that
+same order explicit in product terms and pins which user stories land in which phase. `docs/design.md`
+§9.1 maps each phase onto its engineering milestones (`M`).
+
+**Rule:** a story moves between phases only by editing this table — not by quietly slipping scope
+into whichever phase is being coded at the time.
+
+### Phase 1 — Observe & Recommend (MVP)
+
+**Goal:** prove the demand estimator is correct before it is trusted with money or availability.
+Nothing in this phase writes to a disk.
+
+| Story | What it delivers |
+|---|---|
+| US-001 | Config file, parsed and validated |
+| US-002 | On-VM disk discovery (`local` mode) |
+| US-004a | Classify each disk dependent / independent (classification only — no write path used yet) |
+| US-004 | `all` / `all_except` / `explicit` disk selection |
+| US-006 | Guest metric source (`/proc/diskstats`) |
+| US-007 | Sliding-window evaluator |
+| US-008 | Scale-up decision — **computed, never applied** |
+| US-009 | VM pool saturation guard |
+| US-013 | Dry-run mode — this phase *is* dry-run; nothing else runs it any other way |
+| US-014 | Observability: decision journal, metrics, logs. Load-bearing here — the only output of this phase is an explained recommendation |
+
+**Out:** fleet mode, platform metrics, scale-down, any actual write, packaging beyond a dev binary.
+
+**Exit criterion:** E2E scenarios green in `local` mode; the decision journal explains every
+recommendation it makes. = design.md M0–M6.
+
+### Phase 2 — Actuate (local mode, scale-up only)
+
+**Goal:** spend real money for the first time, in the direction that can only add capacity, never
+take it away — the reversible half of the decision first.
+
+| Story | What it delivers |
+|---|---|
+| US-011 | Apply the change — independent disks (`UpdateDisk`) |
+| US-011a | Apply the change — dependent disks (`vm update --storage-disks`) |
+| US-012 | Rate limiting and change budget — now load-bearing, not just logged |
+| US-016 | Least-privilege service-account guidance — the write role is needed starting here |
+
+**Out:** scale-down (still), fleet mode.
+
+**Exit criterion:** soak test green; budget and cooldown hold under sustained load; no runaway spend.
+= design.md M8 (scale-up half).
+
+### Phase 3 — Fleet mode
+
+**Goal:** the same decision logic, running centrally against many VMs.
+
+| Story | What it delivers |
+|---|---|
+| US-003 | Fleet disk discovery across named VMs |
+| US-005 | Platform monitoring metric source |
+| US-005a | Adopt improved platform metrics as the NBS team ships them (`*_quota_utilization`, op-denominated queue depth) |
+| — | Project → VM → disk policy inheritance (`docs/configuration.md` §5) |
+
+**Note:** this phase depends only on Phase 1 (design.md: M7 depends on M2, M6 — not on M8). It can be
+built in parallel with Phase 2, or before it. It is listed third here for a readable linear roadmap,
+not because it is gated behind Phase 2.
+
+**Exit criterion:** the fleet E2E scenario is green with the same guardrails, platform metrics
+substituted for guest. = design.md M7.
+
+### Phase 4 — Bidirectional, calibrated
+
+**Goal:** close the loop — scale down too — and replace guessed thresholds with calibrated ones.
+
+| Story | What it delivers |
+|---|---|
+| US-010 | Scale-down decision |
+| — | Preset thresholds calibrated from Phase 1–3 telemetry (design.md §8.5 calibration harness) |
+
+**Exit criterion:** soak and chaos tests green with scale-down enabled. = design.md M9.
+
+### Phase 5 — Distribution
+
+**Goal:** something a team other than this one can install without reading the source.
+
+| Story | What it delivers |
+|---|---|
+| US-015 | Static binary, systemd unit, `.deb`, container image |
+
+**Exit criterion:** install from a package on a clean host, no source checkout. = design.md M10.
+
+---
+
+## 7. Default Configuration
 
 The user-facing surface is a **preset**, plus limits, plus disk selection. Controller internals are
 `advanced` and opt-in. Full model, preset values and examples: `docs/configuration.md`.
@@ -471,7 +562,7 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
 
 ---
 
-## 7. Technical Considerations
+## 8. Technical Considerations
 
 - **Language and delivery:** single statically linked Go binary; systemd unit, `.deb`, and container
   image from one artifact. This mirrors `gpu-metrics-exporter`, which the MWS team already ships this
@@ -502,7 +593,7 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
 
 ---
 
-## 8. Success Metrics
+## 9. Success Metrics
 
 - **Saturation reduction:** time spent in a confirmed-saturated state (queueing or latency above
   baseline while at the limit) falls by ≥ 50% versus a static limit on the same workload. Measured
@@ -517,21 +608,24 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
 
 ---
 
-## 9. Open Questions
+## 10. Open Questions
 
-**Closed since first draft:** guest device mapping (deterministic via `deviceName`, §7) and the
+**Closed since first draft:** guest device mapping (deterministic via `deviceName`, §8) and the
 `DiskSpecRequest` schema with per-field mutability. `local` mode is no longer blocked.
 
-- **OQ-2 — Metric names and labels in the Prometheus export.** The docs describe metrics in prose;
-  no exported names are published. Also unresolved: the `<service>` path value for Compute, and
-  whether a **read** queue metric exists (only write queue is documented). One request to
-  `monitoring.mwsapis.ru` on a live project settles all three. **Blocks the decider.**
+- **OQ-2 — resolved.** Measured against a live project. `<service>` = `compute`; the full metric
+  name and label set is recorded in `CLAUDE.md` ("Prometheus export — measured"). No read queue
+  metric exists — only `compute_vm_disk_write_queue_length`; read-heavy saturation in `fleet` rests
+  on latency alone (design.md §10, item 4).
 - **OQ-3 — resolved.** Dependent disks are supported via the VM write path (ADR-003, US-011a). They
   are not excluded, and boot disks are therefore in scope. A dependent disk can also be converted to
   independent (`spec-to-ref`), but that is one-way and changes deletion semantics, so the agent only
   ever *recommends* it.
-- **OQ-4 — Metric publication lag and granularity in the API.** The documented 15 s refers to console
-  graphs. This sets the achievable floor on window length and cooldown.
+- **OQ-4 — resolved.** Measured against a live project (`CLAUDE.md`, "Timing, measured"):
+  publication every 30 s, a 60 s trailing averaging window, 62–90 s publication lag (mean 75 s).
+  Worst case detection latency ≈ 135 s — the hard floor on window length; the 15 s figure in the docs
+  is the console refresh, not the API's granularity. All configured windows (§7) already clear this
+  floor.
 - **OQ-5 — Platform rate limits on disk modification.** Undocumented. Determines whether the 24 h
   change budget needs to be lower.
 - **OQ-6 — resolved.** The platform accepts and bills. See FR-15c.

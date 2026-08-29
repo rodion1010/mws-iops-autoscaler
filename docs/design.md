@@ -567,19 +567,25 @@ validated until it has survived this.**
 
 ### 9.1 Milestones
 
-| M | Deliverable | Depends on |
-|---|---|---|
-| **M0** | Repo skeleton, config schema + resolver, `--validate-config` | — |
-| **M1** | Compute API client (discovery, classification, both write paths behind a flag) | M0 |
-| **M2** | `MetricSource`: guest implementation + Sampler | M0 |
-| **M3** | Analyzer: windows, percentiles, baselines, saturation | M2 |
-| **M4** | Decider + Guardrails; `--dry-run` via `ValidateOnly` | M1, M3 |
-| **M5** | Observability: metrics, decision journal, health endpoints | M4 |
-| **M6** | **Observe-only release.** E2E scenarios green in `local` mode | M5 |
-| **M7** | Platform `MetricSource` → `fleet` mode; project/VM/disk inheritance | M2, M6 |
-| **M8** | Scale-up enabled; soak and chaos | M6 |
-| **M9** | Bidirectional; presets calibrated from M6/M8 telemetry | M8 |
-| **M10** | Packaging: static binary, systemd unit, `.deb`, container image | M9 |
+Product-facing phasing — what ships, in what order, and why — lives in the PRD, §6 "Release Phases".
+This table is the engineering sequencing underneath it; the **Phase** column is the mapping.
+
+| M | Deliverable | Depends on | Phase (PRD §6) |
+|---|---|---|---|
+| **M0** | Repo skeleton, config schema + resolver, `--validate-config` | — | 1 |
+| **M1** | Compute API client (discovery, classification, both write paths behind a flag) | M0 | 1 |
+| **M2** | `MetricSource`: guest implementation + Sampler | M0 | 1 |
+| **M3** | Analyzer: windows, percentiles, baselines, saturation | M2 | 1 |
+| **M4** | Decider + Guardrails; `--dry-run` via `ValidateOnly` | M1, M3 | 1 |
+| **M5** | Observability: metrics, decision journal, health endpoints | M4 | 1 |
+| **M6** | **Observe-only release.** E2E scenarios green in `local` mode | M5 | 1 (exit) |
+| **M7** | Platform `MetricSource` → `fleet` mode; project/VM/disk inheritance | M2, M6 | 3 |
+| **M8** | Scale-up enabled; soak and chaos | M6 | 2 |
+| **M9** | Bidirectional; presets calibrated from M6/M8 telemetry | M8 | 4 |
+| **M10** | Packaging: static binary, systemd unit, `.deb`, container image | M9 | 5 |
+
+M7 (Phase 3) depends only on M2 and M6, not on M8 — it can run in parallel with M8/M9, or before them.
+The table lists it after M6 for readability; the dependency column is the actual constraint.
 
 ### 9.2 Sequencing rationale
 
