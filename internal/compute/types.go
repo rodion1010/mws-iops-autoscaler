@@ -80,7 +80,8 @@ type VmType struct {
 // Disk is a standalone disk resource as read from the Compute API.
 type Disk struct {
 	Name     string
-	SpecIOPS int64 // spec.iops — current provisioned limit
+	SpecIOPS int64  // spec.iops — current provisioned limit
+	Etag     string // metadata.etag — optimistic-concurrency precondition for UpdateDisk (issue #16)
 
 	// status.iops breakdown — observability only, not load-bearing yet.
 	BaseIOPS, ExtraIOPS, TotalIOPS int64

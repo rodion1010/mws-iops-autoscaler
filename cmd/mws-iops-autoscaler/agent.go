@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -265,6 +266,21 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	applied, err := a.actuator.Apply(ctx, d, target, a.dryRun, uuid.NewString())
 	a.tracker.EndResize(diskID)
 	if err != nil {
+		if errors.Is(err, compute.ErrConcurrentModification) {
+			// The write path already refused to touch anything (issue
+			// #16) — the live value moved since this Decision's snapshot
+			// was taken, so d.Target is no longer meaningful. Force a
+			// rediscovery now rather than waiting up to DiscoveryInterval,
+			// so the next reconcile cycle decides again from a snapshot no
+			// older than this moment, instead of retrying the same stale
+			// target. A rediscovery failure here is already logged by
+			// discover() itself; nothing more to do about it in this path.
+			log.Printf("actuate %s (%s): %v — forcing rediscovery before the next decision", diskID, m.Disk.DeviceName, err)
+			if derr := a.discover(ctx); derr != nil {
+				log.Printf("actuate %s (%s): rediscovery after conflict failed: %v", diskID, m.Disk.DeviceName, derr)
+			}
+			return
+		}
 		log.Printf("actuate %s (%s): %v", diskID, m.Disk.DeviceName, err)
 		return
 	}
@@ -273,6 +289,19 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 		log.Printf("[dry-run] %s %s: %d -> %d (%s)", d.Action, m.Disk.DeviceName, d.Current, applied.IOPS, d.Reason)
 		return
 	}
+
+	// Adopt the verified applied value immediately (issue #16) — waiting
+	// for the next discover() to notice would leave a.managed's Current
+	// stale for up to DiscoveryInterval, exactly the same class of gap
+	// this issue exists to close for external changes.
+	a.mu.Lock()
+	for i := range a.managed {
+		if a.managed[i].Disk.DiskName == diskID {
+			a.managed[i].Disk.IOPS = applied.IOPS
+			break
+		}
+	}
+	a.mu.Unlock()
 
 	if err := a.tracker.RecordChange(diskID, d.Action == decider.ActionScaleUp, now); err != nil {
 		// The in-memory cooldown already took effect (Tracker.RecordChange

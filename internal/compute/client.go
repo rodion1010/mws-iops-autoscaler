@@ -32,13 +32,15 @@ type Client interface {
 	UpdateDependentDisk(ctx context.Context, req DependentUpdateRequest) (*VirtualMachine, error)
 }
 
-// IndependentUpdateRequest is a partial update: only Iops is sent
-// (docs/configuration.md; CLAUDE.md "DiskSpecRequest mutability" — iops has
-// no immutability note, everything else does).
+// IndependentUpdateRequest is a partial update: only Iops (plus the
+// optimistic-concurrency Etag, issue #16) is sent (docs/configuration.md;
+// CLAUDE.md "DiskSpecRequest mutability" — iops has no immutability note,
+// everything else does).
 type IndependentUpdateRequest struct {
 	DiskName       string
 	IOPS           int64
-	ValidateOnly   bool // US-013 dry-run — independent disks only; the VM update endpoint has no equivalent (see write.go)
+	Etag           string // mandatory: never write without optimistic concurrency, mirroring DependentUpdateRequest.Etag (issue #16)
+	ValidateOnly   bool   // US-013 dry-run — independent disks only; the VM update endpoint has no equivalent (see write.go)
 	IdempotencyKey string
 }
 

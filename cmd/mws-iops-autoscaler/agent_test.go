@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/rodion1010/mws-iops-autoscaler/internal/actuator"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/analyzer"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/compute"
+	"github.com/rodion1010/mws-iops-autoscaler/internal/config"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/decider"
+	"github.com/rodion1010/mws-iops-autoscaler/internal/health"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/journal"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/metrics"
 	"github.com/rodion1010/mws-iops-autoscaler/internal/registry"
@@ -101,6 +105,128 @@ func TestActuate_allowScaleDownTrueReachesActuator(t *testing.T) {
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 	if len(act.calls) != 1 {
 		t.Errorf("Actuator.Apply called %d times, want 1 when scale-down is explicitly allowed", len(act.calls))
+	}
+}
+
+// stubClient is a minimal compute.Client for exercising discover() end to
+// end in a test — it only needs to satisfy whatever a trivial
+// auto-discovery VM with no disks touches.
+type stubClient struct {
+	getVMCalls int
+	vm         *compute.VirtualMachine
+}
+
+func (s *stubClient) GetVirtualMachine(_ context.Context, _ string) (*compute.VirtualMachine, error) {
+	s.getVMCalls++
+	cp := *s.vm
+	return &cp, nil
+}
+func (s *stubClient) GetVmType(_ context.Context, _ string) (*compute.VmType, error) {
+	return &compute.VmType{VCPUCount: 2}, nil
+}
+func (s *stubClient) GetDisk(_ context.Context, _ string) (*compute.Disk, error) {
+	return nil, errors.New("stub: unused")
+}
+func (s *stubClient) UpdateIndependentDisk(_ context.Context, _ compute.IndependentUpdateRequest) (*compute.Disk, error) {
+	return nil, errors.New("stub: unused")
+}
+func (s *stubClient) UpdateDependentDisk(_ context.Context, _ compute.DependentUpdateRequest) (*compute.VirtualMachine, error) {
+	return nil, errors.New("stub: unused")
+}
+
+// erroringActuator always fails with a caller-supplied error — used to
+// simulate the write path refusing a stale/conflicting Decision.
+type erroringActuator struct{ err error }
+
+func (e erroringActuator) Apply(context.Context, decider.Decision, actuator.Target, bool, string) (actuator.Applied, error) {
+	return actuator.Applied{}, e.err
+}
+
+// newDiscoverableTestAgent is newTestAgent plus everything discover()
+// itself needs (client/cfg/resolved/sampler/readiness) — for tests that
+// must observe discover() actually running, not just that actuate()
+// returned without error.
+func newDiscoverableTestAgent(t *testing.T, act actuator.Actuator, client compute.Client) *Agent {
+	t.Helper()
+	budget, err := state.LoadBudget(t.TempDir() + "/budget.jsonl")
+	if err != nil {
+		t.Fatalf("LoadBudget: %v", err)
+	}
+	sampler, err := metrics.NewSampler(emptySource{}, 10)
+	if err != nil {
+		t.Fatalf("NewSampler: %v", err)
+	}
+	return &Agent{
+		vmName:         "vm-1",
+		allowScaleDown: true,
+		cfg:            &config.Config{Disks: config.DisksSpec{Mode: "auto-discovery"}},
+		resolved:       &config.ResolvedConfig{},
+		client:         client,
+		sampler:        sampler,
+		actuator:       act,
+		tracker:        state.NewTracker(budget),
+		telemetry:      telemetry.NewRegistry(),
+		journal:        journal.NewWriter(discard{}),
+		readiness:      &health.Readiness{},
+	}
+}
+
+func TestActuate_successAdoptsAppliedValueImmediately(t *testing.T) {
+	// issue #16: a successful write must not leave a.managed's Current
+	// stale until the next discover() — actuate() adopts the verified
+	// applied value itself.
+	act := &recordingActuator{}
+	a, _ := newTestAgent(t, true, act)
+	a.managed = []registry.ManagedDisk{independentDisk()}
+
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := a.managed[0].Disk.IOPS; got != 2000 {
+		t.Errorf("managed disk IOPS after a successful write = %d, want 2000 (the applied value, adopted immediately)", got)
+	}
+}
+
+func TestActuate_conflictNeverUpdatesManagedAndForcesRediscovery(t *testing.T) {
+	// issue #16: a concurrent-modification conflict must never write
+	// anything into a.managed (there is nothing verified to adopt), and
+	// must force a fresh discover() rather than leave the stale snapshot
+	// in place until the next scheduled DiscoveryInterval tick.
+	client := &stubClient{vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1"}}
+	conflictErr := fmt.Errorf("update independent disk %q: %w (expected current 1000, live 5000)", "vm-1-data", compute.ErrConcurrentModification)
+	act := erroringActuator{err: conflictErr}
+	a := newDiscoverableTestAgent(t, act, client)
+	a.managed = []registry.ManagedDisk{independentDisk()}
+
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	// The stub VM has no disks at all, so a successful forced rediscovery
+	// replaces the stale single-disk snapshot with an empty one — proof
+	// that discover() actually ran and overwrote a.managed, not just that
+	// GetVirtualMachine was called.
+	if len(a.managed) != 0 {
+		t.Errorf("managed = %+v, want empty — forced rediscovery must replace the stale snapshot with a fresh one, never leave the conflicting entry in place", a.managed)
+	}
+	if client.getVMCalls != 1 {
+		t.Errorf("GetVirtualMachine called %d times, want 1 — a conflict must force rediscovery, not wait for the next scheduled cycle", client.getVMCalls)
+	}
+	if a.lastDiscoverySuccess.IsZero() {
+		t.Error("lastDiscoverySuccess still zero after the forced rediscovery — it should have succeeded")
+	}
+}
+
+func TestActuate_nonConflictErrorDoesNotForceRediscovery(t *testing.T) {
+	client := &stubClient{vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1"}}
+	act := erroringActuator{err: errors.New("some other transient failure")}
+	a := newDiscoverableTestAgent(t, act, client)
+	a.managed = []registry.ManagedDisk{independentDisk()}
+
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if client.getVMCalls != 0 {
+		t.Errorf("GetVirtualMachine called %d times, want 0 — only a concurrent-modification conflict should force rediscovery", client.getVMCalls)
 	}
 }
 

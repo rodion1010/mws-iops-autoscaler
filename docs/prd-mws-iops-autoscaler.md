@@ -268,8 +268,12 @@ unused headroom.
 - [ ] Uses the SDK's `DiskSugared.UpdateDisk` — it already targets
       `POST .../disks/{disk}?updateOnly=true`, so the agent never hand-rolls the HTTP call and can
       never accidentally create a disk
-- [ ] Sends only `spec.iops`; every other field left unset (`optional.Optional` makes this explicit)
+- [ ] Sends only `spec.iops` and `metadata.etag`; every other field left unset (`optional.Optional`
+      makes this explicit)
 - [ ] Sets `IdempotencyKey` on every write so a retry after a mid-flight failure cannot double-apply
+- [ ] Re-reads the disk immediately before writing; refuses to write with an empty etag; aborts —
+      never forces — when live `spec.iops` differs from the value the decision was computed from, in
+      either direction (issue #16)
 - [ ] Verifies the applied value from the response and reconciles against what was requested
 - [ ] Failures are retried with backoff and never leave in-memory state claiming success
 - [ ] Typecheck/lint passes
@@ -285,7 +289,13 @@ unused headroom.
       entirely (ADR-009)
 - [ ] Sends `etag` and an idempotency key; refuses to write with an empty etag; an etag conflict
       aborts and retries next cycle, never forces
+- [ ] Before building the write, checks the target disk's live IOPS (from the same fresh VM read)
+      against the value the decision was computed from; aborts — never forces — on a mismatch or a
+      target that would cross the live value in the wrong direction (issue #16)
 - [ ] Verifies the applied value from the response
+- [ ] A conflict on either disk class forces an immediate rediscovery rather than waiting for the next
+      scheduled cycle, and a successful write's verified value is adopted into the agent's own
+      current-value snapshot immediately (issue #16)
 - [ ] Covered by a concurrent-modification test
 - [ ] Typecheck/lint passes
 

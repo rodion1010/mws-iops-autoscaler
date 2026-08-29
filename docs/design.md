@@ -393,13 +393,46 @@ either. The guardrail is the only thing preventing billed-but-unusable IOPS.
 
 ### 4.7 Actuation
 
-**Independent disk** — single-field partial update, no read-modify-write:
+**Both write paths are conditional, not unconditional (issue #16).** A Decision's `Target` is only
+meaningful relative to the `Current` it was computed from — every guardrail in §4.5/§4.6 clamps
+around that specific value. If the live value has moved since the Decision's snapshot was taken (an
+operator or another controller changed it, or the agent's own previous write already did), applying
+`Target` as an absolute value can silently undo an external increase or, in the other direction,
+silently re-widen a value someone had deliberately narrowed. So immediately before every write, both
+paths re-read the live resource, and abort — never force — if what they find doesn't match what the
+Decision expected:
 
 ```
+if live.current != decision.current:                 abort (ErrConcurrentModification)
+if target crosses live.current in the wrong direction: abort (ErrConcurrentModification)  ← defensive,
+                                                         redundant with the check above in the
+                                                         ordinary case, kept independent so it still
+                                                         holds if that check is ever loosened
+```
+
+The re-read's own etag is what actually travels on the write — never one carried from an earlier
+Discover — so the optimistic-concurrency precondition compares against state no older than the write
+itself. On `ErrConcurrentModification` the orchestrator (`Agent.actuate`) forces an immediate
+rediscovery rather than waiting for the next scheduled `DiscoveryInterval` tick, so the next reconcile
+cycle decides again from a snapshot no older than the conflict — never a forced retry of the stale
+target. A successful write's verified applied value is adopted into the Agent's own current-value
+snapshot immediately, for the same reason: waiting for the next discovery would leave it stale for up
+to `DiscoveryInterval`, the exact class of gap this issue exists to close. See ADR-015.
+
+**Independent disk** — a pre-write `GetDisk` for the fresh etag/live-current check above, then a
+single-field partial update, still no read-modify-write of the write body itself:
+
+```
+GET  compute.mwsapis.ru/compute/v1/projects/{p}/disks/{d}     capture etag, live spec.iops
 POST compute.mwsapis.ru/compute/v1/projects/{p}/disks/{d}?updateOnly=true
 Idempotency-Key: <uuid>
-{"spec": {"iops": N}}
+{"metadata": {"etag": "..."}, "spec": {"iops": N}}
 ```
+
+`validateOnly` (US-013's dry run) still exercises every check above — including the live-current
+comparison — and only skips the final mutating call; a dry run therefore reports a would-be conflict
+exactly like a real run would (issue #16's "dry-run exercises the same precondition checks without
+mutation").
 
 **Dependent disk** — read-modify-write through the VM, which is the riskier path:
 

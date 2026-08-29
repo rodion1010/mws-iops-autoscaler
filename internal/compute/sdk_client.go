@@ -135,6 +135,11 @@ func (c *sdkClient) GetDisk(ctx context.Context, name string) (*Disk, error) {
 	if iops, ok := resp.Spec.Iops.Get(); ok {
 		out.SpecIOPS = int64(iops)
 	}
+	if resp.Metadata.IsSet() {
+		if etag := resp.Metadata.Value.GetEtag(); etag != nil {
+			out.Etag = *etag
+		}
+	}
 	if resp.Status != nil && resp.Status.Iops != nil {
 		out.BaseIOPS = int64(resp.Status.Iops.Base)
 		out.ExtraIOPS = int64(resp.Status.Iops.Extra)
@@ -144,6 +149,10 @@ func (c *sdkClient) GetDisk(ctx context.Context, name string) (*Disk, error) {
 }
 
 func (c *sdkClient) UpdateIndependentDisk(ctx context.Context, req IndependentUpdateRequest) (*Disk, error) {
+	if req.Etag == "" {
+		return nil, fmt.Errorf("update independent disk %q: empty etag — refusing to write without optimistic concurrency", req.DiskName)
+	}
+
 	var validateOnly *bool
 	if req.ValidateOnly {
 		v := true
@@ -155,6 +164,9 @@ func (c *sdkClient) UpdateIndependentDisk(ctx context.Context, req IndependentUp
 	}
 
 	body := model.UpdateDiskRequest{
+		Metadata: optional.NewOptionalNil(commonmodel.UpdateCommonTypedResourceMetadataRequest{
+			Etag: optional.NewOptional(req.Etag),
+		}),
 		Spec: optional.NewOptional(model.UpdateDiskSpecRequest{
 			Iops: optional.NewOptional(model.Iops(req.IOPS)),
 		}),
@@ -168,6 +180,9 @@ func (c *sdkClient) UpdateIndependentDisk(ctx context.Context, req IndependentUp
 		Body:           body,
 	})
 	if err != nil {
+		if mwserrors.IsAPIErrorInvalidEtagKeyStatus(err) {
+			return nil, fmt.Errorf("etag conflict — disk changed since it was read, retry next cycle: %w", err)
+		}
 		return nil, err
 	}
 

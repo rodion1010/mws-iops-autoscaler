@@ -62,6 +62,9 @@ func (f *fakeClient) UpdateIndependentDisk(_ context.Context, req IndependentUpd
 	if !ok {
 		return nil, fmt.Errorf("fake: disk %q not found", req.DiskName)
 	}
+	if req.Etag == "" {
+		return nil, fmt.Errorf("fake: empty etag")
+	}
 	if req.ValidateOnly {
 		return d, nil // dry run: report current state, do not mutate
 	}
