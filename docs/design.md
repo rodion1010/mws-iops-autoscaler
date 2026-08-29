@@ -189,36 +189,45 @@ actually be honored (ADR-010).
  for each managed disk:
    if resize_in_progress(disk):        skip
    if in_cooldown(disk):               skip
-   if window_not_full(disk):           skip   ← cold start never acts
 
-   # window_not_full is timestamp-based, not a sample count (ADR-010):
-   #   newest_sample.Timestamp - oldest_sample.Timestamp < policy.evaluation.scale_up_window
-   # (scale_down_window for the down-check). A count derived from an assumed
-   # collection_interval would silently misjudge readiness under tick jitter
-   # or a missed sample — the timestamp span is what "full" actually means.
-   #
-   # There is deliberately no blanket "skip if baseline not established" here
-   # (ADR-012) — that gate used to block every decision on a disk saturated
-   # since startup forever, since a baseline could only be learned from a
-   # quiet sample the saturation itself prevented. Baseline availability now
-   # gates only the specific signal and demand form that need it, inside
-   # analyze() below.
+   # No blanket top-level "window not full" or "baseline not established"
+   # gate here — both are per-signal preconditions evaluated inside
+   # analyze()/saturated()/underutilized() below, not a single check before
+   # them. A blanket gate keyed to one window length is wrong either way:
+   # scale_down_window is always ≥ scale_up_window (§8 validation), so
+   # gating on the shorter window would let underutilized() run on an
+   # under-filled scale_down window, and gating on the longer one would
+   # delay every scale-up decision for no reason (ADR-010's "no blanket
+   # gate" principle, applied here the same way ADR-012 already applied it
+   # to the baseline). analyze() reports WindowFullUp/WindowFullDown
+   # (timestamp-span based, ADR-010) and BaselineEstablished (ADR-012)
+   # alongside its other fields; saturated() consumes WindowFullUp,
+   # underutilized() consumes WindowFullDown, each as one AND-term among
+   # their other preconditions — never a separate skip line.
 
-   m  = analyze(samples, policy.evaluation)
+   m  = analyze(disk.id, samples, policy.evaluation, disk.spec_iops)   // m.Saturated / m.Underutilized
+                                                                        // already fold in "sustained" (§4.4)
    vm = analyze_vm(sibling disks)
 
-   if saturated(m, policy):
+   if m.Saturated:
        if vm_headroom_insufficient(vm, disk):
            emit VM_IOPS_CAP_REACHED ; no write
        else:
-           target = guardrails(demand(m) / policy.target.scale_up_utilization)
+           target = guardrails(demand(m, policy) / policy.target.scale_up_utilization)
            if target > current: actuate(disk, target); start_cooldown(up)
-   elif underutilized(m, policy):
-       target = guardrails(p95_iops(m) / policy.target.scale_down_utilization)
+   elif m.Underutilized:
+       target = guardrails(m.IOPSP95Down / policy.target.scale_down_utilization)
        if target < current: actuate(disk, target); start_cooldown(down)
    else:
        no_action(reason)
 ```
+
+`demand()` is the Decider's job (§3.2 — "Demand estimate → raw target"), not the Analyzer's: it takes
+`Analysis` plus policy and produces a number to clamp, same as `m.IOPSP95Down` already is for
+scale-down. `Analysis` carries the *evidence* (queue depth, latency, throttle detection, window/
+baseline state, and the two verdict booleans); it does not carry a precomputed demand figure —
+keeping that split is what makes `demand()`'s two regimes (§4.5) unit-testable against a fixed
+`Analysis` without needing a real window of samples for every case.
 
 Every branch — including `no_action` — emits a structured decision record with its inputs. "Why
 didn't it scale?" must always be answerable from the log alone.
@@ -237,17 +246,31 @@ resource_gate :=
    OR bandwidth_utilization >= policy.saturation.utilization_threshold
 
 saturated :=
-      resource_gate
+      window_full_up
+  AND resource_gate
   AND ( queue_depth >= policy.saturation.queue_depth_threshold
      OR (baseline_established AND latency.P95 > baseline.P95 × policy.saturation.latency.baseline_multiplier)
      OR throttling_detected )
   AND sustained over policy.evaluation.scale_up_window
 ```
 
-The latency disjunct is conditional on `baseline_established` — it evaluates false, never blocks,
-when no baseline exists yet. `queue_depth` and `throttling_detected` need no baseline at all and can
-confirm saturation on their own (ADR-012) — this is what actually breaks the cold-start-while-
-saturated deadlock a blanket "skip until baseline exists" gate used to cause.
+`window_full_up` is `Analysis.WindowFullUp` — cold start never acts, expressed as one AND-term here
+rather than a separate skip line (this section's own reconcile pseudocode above). The latency
+disjunct is conditional on `baseline_established` — it evaluates false, never blocks, when no
+baseline exists yet. `queue_depth` and `throttling_detected` need no baseline at all and can confirm
+saturation on their own (ADR-012) — this is what actually breaks the cold-start-while-saturated
+deadlock a blanket "skip until baseline exists" gate used to cause.
+
+"Sustained over `scale_up_window`" is not one mechanism — each signal already carries its own notion
+of sustain, and none of them collapse to "check only the newest sample":
+- `resource_gate` and `queue_depth >= threshold` are point-in-time measures on every `Sample`
+  (utilization, `Sample.QueueDepth`) — sustained means every sample whose `Timestamp` falls within the
+  trailing `scale_up_window` independently clears the threshold, not just the newest one.
+- `latency.P95 > baseline.P95 × multiplier` is already a window-aggregate comparison by construction:
+  `latency.P95` is the percentile *over* the trailing `scale_up_window`, so an elevated value already
+  reflects sustained, not momentary, latency — there is no separate per-sample re-check to make.
+- `throttling_detected` (§4.5: `served_iops ≈ provisioned_limit AND queue_depth sustained > 0`)
+  carries sustain in its own definition the same way.
 
 `bandwidth_utilization = (read_bytes/s + write_bytes/s) / (spec.iops × 32768)` — NBS-PL2's fixed
 IOPS-to-bandwidth ratio (CLAUDE.md: `MB/s = IOPS × 32 / 1024`), using the exact measured bytes/IOPS
@@ -284,7 +307,11 @@ already uses for utilization and queue depth). `latency.P95` and `baseline.P95` 
 
 ### 4.5 Throttling detection and demand estimation
 
-This is the crux, and it is where `local` mode earns its keep.
+This is the crux, and it is where `local` mode earns its keep. Throttling detection is the
+Analyzer's job (`Analysis.ThrottleDetected`, M3) — it needs nothing beyond the sample window and
+`specIOPS`. Demand estimation is the Decider's (`demand()`, M4): it consumes `Analysis` (queue depth,
+latency, `ThrottleDetected`) plus policy to produce the figure `§4.3`'s `target = guardrails(demand(m,
+policy) / policy.target.scale_up_utilization)` clamps.
 
 **The problem.** At the limit the IOPS counter pins and stops carrying information. A disk reading
 1000/1000 might want 1100 or 10000. Scaling by a fixed percentage is guesswork.
@@ -481,30 +508,59 @@ type LatencyStat struct {
     Kind LatencyStatKind
 }
 
-// Analysis is the Analyzer's output: everything the Decider and the
-// journal need, computed once per disk per cycle. ReadLatency/WriteLatency
-// carry LatencyWindowedAvg for guest always, and for platform whenever no
-// fresh histogram is available; LatencyHistogram for platform when one is
-// (ADR-011). Baseline is frozen against updates while the disk is
-// saturated (§4.4) — BaselineEstablished is a separate state question
-// (do we have one yet) from Baseline.Kind (how it was computed); establishing
-// it is never blocked by saturation, only revising it is (ADR-012).
+// Analysis is the Analyzer's output: the evidence and verdict the Decider
+// and the journal need, computed once per disk per cycle. Saturated and
+// Underutilized are the "saturation verdict" §3.2 assigns to the Analyzer —
+// each already folds in its own "sustained over window" evaluation (§4.4),
+// so the reconcile loop's `if saturated(m, policy)` is just `if
+// m.Saturated`. Everything else on Analysis is the evidence *behind* that
+// verdict, for the journal and for the Decider's demand estimate (§4.5) —
+// Analysis itself carries no demand figure ("Demand estimate → raw target"
+// is the Decider's job, §3.2), so the two regimes in §4.5 stay
+// unit-testable against a fixed Analysis without a real sample window for
+// every case. ReadLatency/WriteLatency/Baseline carry LatencyWindowedAvg
+// today, always — M3 has no histogram source to read (Sample carries no
+// histogram data; that arrives with PlatformSource in M7). Baseline is
+// frozen against updates while the disk is saturated (§4.4) —
+// BaselineEstablished is a separate state question (do we have one yet)
+// from Baseline.Kind (how it was computed); establishing it is never
+// blocked by saturation, only revising it is (ADR-012).
 type Analysis struct {
-    DiskID               string
+    DiskID string
+
+    // Latest-sample snapshot, for the journal — not what Saturated/
+    // Underutilized are computed from (each re-evaluates its own signal
+    // against every sample in its own window, not just this one).
     IOPSUtilization      float64
     BandwidthUtilization float64
     QueueDepth           QueueDepth
-    ReadLatency          LatencyStat
+    ReadLatency          LatencyStat // p95 over scale_up_window
     WriteLatency         LatencyStat
-    Baseline             LatencyStat
-    BaselineEstablished  bool
     ThrottleDetected     bool
-    Demand               float64
-    WindowFull           bool // timestamp-span based, not a count (ADR-010)
+
+    Baseline            LatencyStat // low percentile over the full buffered history
+    BaselineEstablished bool
+
+    WindowFullUp   bool // span ≥ scale_up_window (ADR-010)
+    WindowFullDown bool // span ≥ scale_down_window
+
+    Saturated     bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
+    Underutilized bool // every signal quiet AND sustained over scale_down_window (US-010); false if !WindowFullDown
+
+    IOPSP95Down float64 // p95 served ops/s over scale_down_window — the Decider's p95_iops(m) input (§4.3)
 }
 
 type Analyzer interface {
-    Analyze(samples []Sample, p EvaluationPolicy) Analysis
+    // diskID is explicit rather than read from samples[0].DiskID — the
+    // empty-window case (§8.1's own test matrix: "Empty, partial, exactly-
+    // full...") has no samples to read it from, and Analysis.DiskID must
+    // still identify which disk produced a "no data yet" result.
+    // specIOPS is the disk's current provisioned limit (Discover, M1) —
+    // needed for iops_utilization, bandwidth_utilization (ADR-008), and
+    // throttling_detected's "served ≈ provisioned_limit" comparison (§4.5).
+    // It is live disk state, not a policy value, so it is not part of
+    // EvaluationPolicy.
+    Analyze(diskID string, samples []Sample, p EvaluationPolicy, specIOPS int64) Analysis
 }
 
 type Decider interface {
