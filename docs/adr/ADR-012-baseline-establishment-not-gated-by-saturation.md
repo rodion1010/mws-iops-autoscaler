@@ -87,6 +87,14 @@ establishes the baseline from this same window regardless of saturation, the ver
 available. This is a single-cycle `NoAction`, matching NFR-9's "must not act on partial evidence"
 intent, not the permanent deadlock the blanket gate produced.
 
+> **Refined by M4's implementation (2026-08-29):** this corner turned out not to be reachable at all.
+> `Analyze` (M3) establishes the baseline the *same* cycle `WindowFullUp` first becomes true, and
+> `Saturated` already requires `WindowFullUp` — so `Saturated ⟹ BaselineEstablished` by construction,
+> with no cycle in between where one holds and not the other. `demand()`'s `unavailable` branch stays
+> in the Decider as a defensive guard against dividing by zero (a hand-built `Analysis` in a
+> Decider-only unit test could still violate the invariant), but the real pipeline never exercises it.
+> See design.md §4.5/§5.2.
+
 `Analysis` (ADR-011) gets one more field: `BaselineEstablished bool`, distinct from `LatencyStat`'s
 `Kind` — establishment is a state question ("do we have one yet"), `Kind` is a derivation-method
 question ("how was this percentile computed"), and conflating them would make one field answer two

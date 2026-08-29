@@ -187,23 +187,22 @@ actually be honored (ADR-010).
 
 ```
  for each managed disk:
-   if resize_in_progress(disk):        skip
-   if in_cooldown(disk):               skip
+   if resize_in_progress(disk):        skip   ← one in-flight write blocks either direction
 
-   # No blanket top-level "window not full" or "baseline not established"
-   # gate here — both are per-signal preconditions evaluated inside
-   # analyze()/saturated()/underutilized() below, not a single check before
-   # them. A blanket gate keyed to one window length is wrong either way:
-   # scale_down_window is always ≥ scale_up_window (§8 validation), so
-   # gating on the shorter window would let underutilized() run on an
-   # under-filled scale_down window, and gating on the longer one would
-   # delay every scale-up decision for no reason (ADR-010's "no blanket
-   # gate" principle, applied here the same way ADR-012 already applied it
-   # to the baseline). analyze() reports WindowFullUp/WindowFullDown
-   # (timestamp-span based, ADR-010) and BaselineEstablished (ADR-012)
-   # alongside its other fields; saturated() consumes WindowFullUp,
-   # underutilized() consumes WindowFullDown, each as one AND-term among
-   # their other preconditions — never a separate skip line.
+   # No blanket top-level "window not full", "baseline not established", or
+   # "in cooldown" gate here — each is a per-direction precondition checked
+   # inside its own branch below, not a single check before both branches.
+   # A blanket gate keyed to one direction's value is wrong for the same
+   # reason in all three cases: cooldown.scale_up and cooldown.scale_down
+   # are independently configurable (US-012) — a disk in scale-up cooldown
+   # only must remain eligible for scale-down, and a blanket skip on either
+   # cooldown being active would block the other direction for no reason.
+   # (Same principle as ADR-010's WindowFullUp/WindowFullDown split and
+   # ADR-012's baseline fix — a two-direction concept never collapses to
+   # one flag.) analyze() reports WindowFullUp/WindowFullDown and
+   # BaselineEstablished alongside its other fields; m.Saturated consumes
+   # WindowFullUp, m.Underutilized consumes WindowFullDown, each as one
+   # AND-term among their own preconditions.
 
    m  = analyze(disk.id, samples, policy.evaluation, disk.spec_iops)   // m.Saturated / m.Underutilized
                                                                         // already fold in "sustained" (§4.4)
@@ -212,12 +211,19 @@ actually be honored (ADR-010).
    if m.Saturated:
        if vm_headroom_insufficient(vm, disk):
            emit VM_IOPS_CAP_REACHED ; no write
+       elif in_cooldown(disk, up):
+           no_action("cooldown_scale_up")
        else:
-           target = guardrails(demand(m, policy) / policy.target.scale_up_utilization)
+           target = guardrails(demand(m, policy) / policy.target.scale_up_utilization, disk, vm, up)
            if target > current: actuate(disk, target); start_cooldown(up)
+           else: no_action("target_not_above_current")
    elif m.Underutilized:
-       target = guardrails(m.IOPSP95Down / policy.target.scale_down_utilization)
-       if target < current: actuate(disk, target); start_cooldown(down)
+       if in_cooldown(disk, down):
+           no_action("cooldown_scale_down")
+       else:
+           target = guardrails(m.IOPSP95Down / policy.target.scale_down_utilization, disk, vm, down)
+           if target < current: actuate(disk, target); start_cooldown(down)
+           else: no_action("target_not_below_current")
    else:
        no_action(reason)
 ```
@@ -228,6 +234,14 @@ scale-down. `Analysis` carries the *evidence* (queue depth, latency, throttle de
 baseline state, and the two verdict booleans); it does not carry a precomputed demand figure —
 keeping that split is what makes `demand()`'s two regimes (§4.5) unit-testable against a fixed
 `Analysis` without needing a real window of samples for every case.
+
+`guardrails()` is the last line before any write (§3.2): clamp to `[policy.limits.min_iops,
+min(10000, policy.limits.max_iops, vm_headroom)]` (NFR-5, §4.6), round to a 100-IOPS multiple,
+apply `max_scale_up_ratio`/`max_scale_down_ratio` relative to `current`, and suppress a change smaller
+than `min_change_iops`. The 24h change budget (`max_changes_per_24h`, ADR-013) is checked once the
+guardrail-clamped target is known to actually differ from `current` — checking it earlier would count
+budget against a decision that guardrails might clamp back down to `current` anyway, i.e. a decision
+that was never going to write.
 
 Every branch — including `no_action` — emits a structured decision record with its inputs. "Why
 didn't it scale?" must always be answerable from the log alone.
@@ -548,6 +562,16 @@ type Analysis struct {
     Underutilized bool // every signal quiet AND sustained over scale_down_window (US-010); false if !WindowFullDown
 
     IOPSP95Down float64 // p95 served ops/s over scale_down_window — the Decider's p95_iops(m) input (§4.3)
+
+    // demand()'s (§4.5) two remaining inputs beyond what's above — both
+    // measured over ScaleUpWindow, since demand() is only ever called from
+    // the Saturated branch. ServedIOPS is exposed directly (not just
+    // IOPSUtilization, a ratio) so the Decider never needs specIOPS a
+    // second time. QueueGrowthRate is (newest−oldest queue depth) / elapsed
+    // seconds within the up-window — units match QueueDepth.Unit per
+    // second, so it sums directly with ServedIOPS in the open-workload form.
+    ServedIOPS      float64
+    QueueGrowthRate float64
 }
 
 type Analyzer interface {
@@ -563,8 +587,55 @@ type Analyzer interface {
     Analyze(diskID string, samples []Sample, p EvaluationPolicy, specIOPS int64) Analysis
 }
 
+// VMState is the sibling-disk headroom picture (§4.6) — pre-aggregated by
+// the caller (analyze_vm in §4.3's pseudocode, not this package): IOPSPool
+// and every other managed disk's own Analysis are already available from
+// the same reconcile cycle, so recomputing them inside Decide would just
+// be redoing work the caller already did.
+type VMState struct {
+    IOPSPool       int64   // 3000 × vCPU (Discover, M1) — not enforced by the platform
+    SiblingP95IOPS float64 // aggregate p95 IOPS of every other managed disk on this VM
+}
+
+// EffectivePolicy is the narrow slice of the resolved policy Decide needs —
+// a plain struct decoupled from internal/config, the same way
+// analyzer.EvaluationPolicy is (design.md §3.3); translating a resolved
+// policy into this shape is the orchestrator's job.
+type EffectivePolicy struct {
+    MinIOPS int64
+    MaxIOPS int64
+
+    ScaleUpUtilization   float64
+    ScaleDownUtilization float64
+
+    CooldownScaleUp   time.Duration
+    CooldownScaleDown time.Duration
+
+    MinChangeIOPS     int64
+    MaxScaleUpRatio   float64
+    MaxScaleDownRatio float64
+
+    MaxChangesPer24h int
+}
+
+// GuardrailState is cooldown/budget state as of now, resolved by the
+// caller from wherever it is tracked (ADR-013: the 24h counter is
+// persisted, cooldown timestamps are not) — Decide reads it, never owns
+// it, keeping this package pure like Analyzer (§3.3). ResizeInProgress
+// covers both directions: one in-flight write blocks either.
+type GuardrailState struct {
+    ResizeInProgress bool
+    LastChangeUp     time.Time // zero value = never
+    LastChangeDown   time.Time
+    ChangesInLast24h int
+}
+
 type Decider interface {
-    Decide(a Analysis, vm VMState, p EffectivePolicy) Decision
+    // diskID/current mirror Analyzer.Analyze's explicit-diskID rationale —
+    // Decision.DiskID/Current must be set even on an Analysis with no
+    // samples. now is explicit so cooldown math is testable without a real
+    // clock (the same reason GuestSource takes an injectable now func).
+    Decide(diskID string, current int64, a Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision
 }
 
 type Actuator interface {
@@ -572,15 +643,42 @@ type Actuator interface {
 }
 
 type Decision struct {
-    DiskID     string
-    Action     Action  // ScaleUp | ScaleDown | NoAction | VMCapReached
-    Reason     string  // machine-parseable
-    Current    int64
-    Target     int64
-    Demand     float64
-    Inputs     Analysis // full evidence, for the journal
+    DiskID  string
+    Action  Action // ScaleUp | ScaleDown | NoAction | VMCapReached
+    Reason  string // machine-parseable
+    Current int64
+    Target  int64  // == Current when Action is NoAction or VMCapReached
+    Demand  float64
+    Inputs  Analysis // full evidence, for the journal
 }
 ```
+
+`guardrails()` — folded into `Decide`, not a separate interface; the architecture diagram's separate
+Guardrails box (§3.2) is an internal step of `Decide`, not a second pluggable component — clamps to
+`[p.MinIOPS, min(10000, p.MaxIOPS, vm.IOPSPool − vm.SiblingP95IOPS)]` (NFR-5, §4.6), rounds to a
+100-IOPS multiple, applies `p.MaxScaleUpRatio`/`p.MaxScaleDownRatio` relative to `current`, and
+suppresses a change smaller than `p.MinChangeIOPS`. `state.ChangesInLast24h >= p.MaxChangesPer24h` is
+checked only once the guardrail-clamped target is known to actually differ from `current` — checking
+budget on a decision guardrails would clamp back to `current` anyway would count against a change that
+was never going to write.
+
+`demand()` (§4.5), only ever called from the Saturated branch:
+
+```
+regime  := a.QueueGrowthRate > queueGrowingThreshold ? open : closed
+
+demand  := open:   a.ServedIOPS + a.QueueGrowthRate
+           closed: a.BaselineEstablished
+                       ? a.ServedIOPS × (max(a.ReadLatency.P95, a.WriteLatency.P95) / a.Baseline.P95)
+                       : unavailable → NoAction("baseline_unavailable")
+```
+
+The closed-regime `unavailable` branch is defensive, not reachable through the real pipeline: `Analyze`
+(M3) always sets `BaselineEstablished` the same cycle `WindowFullUp` first becomes true, and
+`Saturated` already requires `WindowFullUp` — so by construction, `Saturated ⟹ BaselineEstablished`.
+ADR-012's "single reconcile cycle of `NoAction`" scenario is handled by that guarantee before `demand`
+is ever called, not inside it; the branch stays only because `Decide` must not divide by zero if ever
+handed an `Analysis` that violates the invariant (e.g. a hand-built one in a Decider-only unit test).
 
 `QueueDepth` carrying its unit in the type is deliberate. Guest gives operations, platform gives
 bytes; a silent mix would be a real and hard-to-spot bug.

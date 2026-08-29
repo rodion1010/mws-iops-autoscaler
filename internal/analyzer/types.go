@@ -80,6 +80,17 @@ type Analysis struct {
 	Underutilized bool // every signal quiet AND sustained over ScaleDownWindow (US-010); false if !WindowFullDown
 
 	IOPSP95Down float64 // p95 served ops/s over ScaleDownWindow — the Decider's p95_iops(m) input
+
+	// demand()'s (design.md §4.5) two remaining inputs beyond what's above
+	// — both measured over ScaleUpWindow, since demand() is only ever
+	// called from the Saturated branch. ServedIOPS is exposed directly
+	// (not just IOPSUtilization, a ratio) so the Decider never needs
+	// specIOPS a second time. QueueGrowthRate is (newest−oldest queue
+	// depth) / elapsed seconds within the up-window — units match
+	// QueueDepth.Unit per second, so it sums directly with ServedIOPS in
+	// the open-workload form.
+	ServedIOPS      float64
+	QueueGrowthRate float64
 }
 
 // Analyzer is implemented by WindowAnalyzer (analyzer.go); an interface so

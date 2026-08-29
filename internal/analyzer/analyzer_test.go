@@ -302,6 +302,23 @@ func TestAnalyze_notUnderutilizedWhenQueueBuiltUpMidWindow(t *testing.T) {
 	}
 }
 
+func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
+	a := NewWindowAnalyzer()
+	samples := make([]metrics.Sample, 0, 6)
+	for m := 0; m <= 5; m++ {
+		// Queue climbs by 1 per minute: 0,1,2,3,4,5 -> growth rate = 5 / 300s.
+		samples = append(samples, sampleAt(m, 300, 200, 0, 0, float64(m), time.Millisecond, time.Millisecond))
+	}
+	got := a.Analyze("disk1", samples, testPolicy, specIOPS)
+	if got.ServedIOPS != 500 {
+		t.Errorf("ServedIOPS = %v, want 500 (latest sample's ReadOps+WriteOps)", got.ServedIOPS)
+	}
+	wantRate := 5.0 / 300.0
+	if diff := got.QueueGrowthRate - wantRate; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("QueueGrowthRate = %v, want %v", got.QueueGrowthRate, wantRate)
+	}
+}
+
 func TestAnalyze_nonPositiveSpecIOPSIsDefensive(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)

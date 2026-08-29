@@ -103,6 +103,9 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 
 	out.IOPSP95Down = percentile95TotalOps(downWindow)
 
+	out.ServedIOPS = newest.ReadOps + newest.WriteOps
+	out.QueueGrowthRate = queueGrowthRate(upWindow)
+
 	// Freeze against updates while saturated (§4.4) — use this cycle's own
 	// verdict, computed above from the baseline as of *before* this
 	// update, so an update never retroactively changes the value that
@@ -261,6 +264,26 @@ func writeLatencies(window []metrics.Sample) []time.Duration {
 		out[i] = s.WriteLatAvg
 	}
 	return out
+}
+
+// queueGrowthRate is (newest−oldest queue depth) / elapsed seconds within
+// window — a simple endpoint slope, not a least-squares regression. With
+// as few as minSamplesForWindow points, a regression wouldn't be
+// meaningfully more accurate than the direct endpoint difference, and the
+// endpoint form is far easier to reason about and test. Zero (or negative,
+// for two samples with a non-monotonic timestamp — shouldn't happen given
+// Sampler's chronological contract, but division still needs a guard) for
+// a window that can't produce a rate.
+func queueGrowthRate(window []metrics.Sample) float64 {
+	if len(window) < 2 {
+		return 0
+	}
+	first, last := window[0], window[len(window)-1]
+	elapsed := last.Timestamp.Sub(first.Timestamp).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return (last.QueueDepth.Value - first.QueueDepth.Value) / elapsed
 }
 
 func percentile95TotalOps(window []metrics.Sample) float64 {
