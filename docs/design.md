@@ -4,6 +4,11 @@
 **Date:** 2026-08-28
 **Author:** generated with Claude Code, reviewed by Product Lead (NBS)
 
+**Derived from `docs/prd-mws-iops-autoscaler.md`, which is the primary document.** The PRD states the
+requirements; this document describes how they are met. It does not introduce, widen or drop a
+requirement on its own — when a design decision changes one, the PRD is amended in the same change
+(see the sync rule in `docs/README.md`).
+
 Companion documents: requirements in `docs/prd-mws-iops-autoscaler.md`, decisions in `docs/adr/`,
 measured platform behaviour in `CLAUDE.md`, configuration model in `docs/configuration.md`.
 
@@ -136,6 +141,7 @@ product risk lives.
    │    disk.spec present → DEPENDENT   (write via VM path)
    │    disk.ref  present → INDEPENDENT (write via disk path)
    ├─ read status.storage.disks[].deviceName → "mws-<name>"
+   │    strip the "mws-" prefix → the config identifier (ADR-004)
    │    local mode: resolve /dev/disk/by-id/mws-<name>, verify it exists
    └─ GET /compute/v1/vmTypes/{vmType}
         vm_iops_limit = 3000 × spec.cpu.vcpuCount
@@ -146,6 +152,9 @@ product risk lives.
    └─ spec.iops (current provisioned), status.iops {base, extra, total}
 
  apply selection strategy → managed set
+   match config selectors against DeviceName (unprefixed) — never a kernel device path,
+   which is assigned in discovery order and not stable across reboots (ADR-004)
+   fleet: the key is (instance, device_name); deviceName is unique per VM, not globally
  resolve EffectivePolicy per disk
 ```
 
@@ -164,7 +173,8 @@ or was resized externally is picked up here.
 
 `fleet` sampling is per-project, not per-disk: one HTTP call yields every disk in the project. Polling
 faster than the platform's 30 s publication interval yields duplicates — the sampler deduplicates on
-`metric_ts` rather than wall clock.
+`metric_ts` rather than wall clock. The `device_name` label carries the `mws-` prefix, so indexing
+uses `DiskRef.MetricLabel()` rather than the config form.
 
 ### 4.3 Reconcile (default 30 s)
 
@@ -315,6 +325,20 @@ returns `503` masking the real `403`.
 ### 5.2 Internal interfaces
 
 ```go
+// DiskRef is the identity of a managed disk, resolved once at discovery.
+// DeviceName is the single identifier shared by config, guest and metrics (ADR-004):
+// it is stored unprefixed, and the "mws-" prefix is applied when reading either side.
+type DiskRef struct {
+    DiskID     string // cloud resource name — used for API writes, never written in config
+    VMName     string // (VMName, DeviceName) is the fleet-mode key
+    DeviceName string // unprefixed: "datadisk"
+}
+
+// GuestPath returns /dev/disk/by-id/mws-<DeviceName>.
+func (d DiskRef) GuestPath() string
+// MetricLabel returns the device_name label value: "mws-<DeviceName>".
+func (d DiskRef) MetricLabel() string
+
 type MetricSource interface {
     // Sample returns one observation per managed disk. Units are explicit
     // in the Sample struct; implementations must not mix them.
@@ -363,7 +387,8 @@ bytes; a silent mix would be a real and hard-to-spot bug.
 
 ### 5.3 Configuration
 
-See `docs/configuration.md` for the full model. Summary: presets are the user-facing surface;
+See `docs/configuration.md` for the full model. Disks are addressed by `device_name` and never by
+kernel device path (ADR-004). Summary: presets are the user-facing surface;
 inheritance is `disk → vm → project → platform default` (`fleet`) or `disk → vm → default` (`local`);
 advanced controller knobs exist but are opt-in and treated as experimental until telemetry justifies
 exposing them.

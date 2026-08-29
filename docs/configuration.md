@@ -1,7 +1,8 @@
 # MWS IOPS Autoscaler — Configuration
 
-Companion to `docs/design.md`. Derived from the product-side design draft, with the platform
-constraints from `CLAUDE.md` folded in.
+Derived from `docs/prd-mws-iops-autoscaler.md` (the primary document) and `docs/design.md`, with the
+platform constraints from `CLAUDE.md` folded in. The user-facing surface described here follows the
+PRD's requirements — it does not define them.
 
 > **All numeric defaults below are design defaults, not production-validated values.** They must be
 > calibrated against observe-only telemetry (design §8.5) before GA.
@@ -124,6 +125,34 @@ sooner, accepting more risk of scaling down before a lull ends.
 
 ## 4. Disk selection
 
+### 4.1 How a disk is named
+
+**Disks are addressed by `device_name`, in both modes.** This is the disk's `deviceName` as set when
+it was attached to the VM — the same value the platform reports in
+`status.storage.disks[].deviceName` and puts on the `device_name` label of every exported metric.
+
+**Write it without the `mws-` prefix**, exactly as it was given at attach time:
+
+```yaml
+device_name: datadisk         # correct
+device_name: mws-datadisk     # rejected by --validate-config
+```
+
+The platform adds the prefix on the way out — `status` returns `mws-datadisk`, the metric label reads
+`device_name="mws-datadisk"`, and the guest path is `/dev/disk/by-id/mws-datadisk`. The agent applies
+that prefix itself when resolving either. The config stays in the form the operator actually chose.
+
+**Kernel device names (`/dev/vdb`, `/dev/sdb`) must never be used.** They are assigned in discovery
+order, which is not stable across reboots or attach/detach cycles: `/dev/vdb` today can be `/dev/vdc`
+tomorrow, and the agent would silently apply one disk's policy to another — a config that looks
+correct and is wrong. See ADR-004.
+
+`deviceName` is unique **within a VM**, not globally. In `local` mode that is sufficient. In `fleet`
+mode disk selectors are always nested under their instance (§6.3), so the effective key is the pair
+`(instance, device_name)`.
+
+### 4.2 Strategies
+
 Three strategies, available in both modes:
 
 ```yaml
@@ -135,20 +164,22 @@ disks:
 disks:
   mode: auto-discovery          # everything except these
   exclude:
-    - /dev/vda
+    - bootdisk
 ```
 
 ```yaml
 disks:
   mode: selected                # only these, each with an optional policy
   selected:
-    - device: /dev/vdb
-    - device: /dev/vdc
+    - device_name: datadisk
+    - device_name: logdisk
       policy:
         preset: performance
 ```
 
-Disks are identified by guest device path in `local` mode and by cloud disk id in `fleet` mode.
+`exclude` is a plain list of device names. `selected` entries are mappings, because each one may
+carry a policy.
+
 Rediscovery runs on an interval, so disks attached after startup are picked up without a restart.
 
 **Classification is automatic and not user-configurable.** Each disk is dependent (VM-owned, written
@@ -191,7 +222,7 @@ policy:
 disks:
   mode: auto-discovery
   exclude:
-    - /dev/vda
+    - bootdisk
 
 runtime:
   metrics:
@@ -215,14 +246,14 @@ policy:
 disks:
   mode: selected
   selected:
-    - device: /dev/vdb
+    - device_name: datadisk
 
-    - device: /dev/vdc
+    - device_name: logdisk
       policy:
         preset: performance
         limits: {min_iops: 3000, max_iops: 10000}
 
-    - device: /dev/vdd
+    - device_name: backupdisk
       policy:
         preset: cost
         limits: {min_iops: 1000, max_iops: 6000}
@@ -254,8 +285,8 @@ project:
         disks:
           mode: selected
           selected:
-            - disk_id: db-data
-            - disk_id: db-wal
+            - device_name: db-data
+            - device_name: db-wal
               policy:
                 preset: performance
                 limits: {min_iops: 5000, max_iops: 10000}
@@ -263,7 +294,7 @@ project:
       - instance: worker-01
         disks:
           mode: auto-discovery
-          exclude: [{disk_id: boot}]
+          exclude: [bootdisk]
 
       - instance: batch-01
         policy:
@@ -303,7 +334,11 @@ value, and maintenance windows.
 - `min_iops > max_iops`
 - any IOPS value not a multiple of 100
 - unknown preset name
-- unknown keys anywhere (typos must fail loudly, not be ignored)
+- unknown keys anywhere (typos must fail loudly, not be ignored) — this is what rejects the
+  superseded `device:` and `disk_id:` selectors
+- a disk identified by a kernel device path (`/dev/vdb`, `/dev/sdb`) instead of `device_name`
+- a `device_name` written with the `mws-` prefix (§4.1 — the config carries the unprefixed form)
+- the same `device_name` listed twice within one VM's `selected` or `exclude` list
 - `advanced` fields set while `advanced.enabled: false`
 - `mode: local` with `metrics.source: platform` but no API key configured
 - `mode: fleet` with `metrics.source: guest` (impossible — no guest access)
