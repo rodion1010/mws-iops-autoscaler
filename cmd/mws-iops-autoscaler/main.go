@@ -109,7 +109,7 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	}
 
 	source := metrics.NewGuestSource()
-	sampler, err := metrics.NewSampler(source, samplerCapacity(resolved))
+	sampler, err := metrics.NewSampler(source, resolved.SamplerCapacity())
 	if err != nil {
 		return fmt.Errorf("build sampler: %w", err)
 	}
@@ -199,24 +199,6 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 		log.Printf("mws-iops-autoscaler: starting for VM %q", vmName)
 	}
 	return agent.Run(ctx)
-}
-
-// samplerCapacity sizes the ring buffer by the longest configured window
-// across the VM policy and every per-disk override — Sampler.NewSampler
-// (design.md §3.2 "Bounded memory") takes one capacity for every disk, so
-// it must fit whichever disk needs the most history.
-func samplerCapacity(resolved *config.ResolvedConfig) int {
-	longest := resolved.VMPolicy.Advanced.ScaleDownWindow
-	for _, p := range resolved.DiskPolicies {
-		if p.Advanced.ScaleDownWindow > longest {
-			longest = p.Advanced.ScaleDownWindow
-		}
-	}
-	n := int(longest / resolved.Runtime.CollectionInterval)
-	if n < 1 {
-		n = 1
-	}
-	return n
 }
 
 func validateConfig(path string) int {

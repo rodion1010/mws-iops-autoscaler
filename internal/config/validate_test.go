@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -349,6 +350,128 @@ func TestValidate_rules(t *testing.T) {
 				c.Runtime.Metrics.CollectionInterval = durationPtr("0s")
 			},
 			wantSub: "runtime.metrics.collection_interval",
+		},
+		// --- issue #6, reopened ---
+		{
+			name: "latency.mode absolute is rejected (not implemented)",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{Latency: &LatencySpec{Mode: strPtr("absolute")}},
+				}
+			},
+			wantSub: "latency.mode",
+		},
+		{
+			name: "NaN utilization_threshold rejected as non-finite, not silently passed",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(math.NaN())},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "+Inf scale_up_utilization rejected as non-finite",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Target:  &TargetSpec{ScaleUpUtilization: floatPtr(math.Inf(1))},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "NaN queue_depth_threshold rejected as non-finite",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(math.NaN())},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "queue_depth_threshold of exactly zero rejected — gate must not degenerate to always-true",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(0)},
+				}
+			},
+			wantSub: "saturation.queue_depth_threshold",
+		},
+		{
+			name: "queue_depth_threshold just above zero is valid",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(0.1)},
+				}
+			},
+			wantSub: "",
+		},
+		{
+			name: "latency.baseline_multiplier of exactly 1 rejected — threshold would equal the baseline itself",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{Latency: &LatencySpec{BaselineMultiplier: floatPtr(1)}},
+				}
+			},
+			wantSub: "latency.baseline_multiplier",
+		},
+		{
+			name: "latency.baseline_multiplier just above 1 is valid",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{Latency: &LatencySpec{BaselineMultiplier: floatPtr(1.01)}},
+				}
+			},
+			wantSub: "",
+		},
+		{
+			name: "NaN max_scale_up_ratio rejected as non-finite",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Step:    &StepSpec{MaxScaleUpRatio: floatPtr(math.NaN())},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "Inf max_scale_down_ratio rejected as non-finite",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Step:    &StepSpec{MaxScaleDownRatio: floatPtr(math.Inf(-1))},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "collection_interval too long for the default windows to ever fill",
+			mutate: func(c *Config) {
+				// Default scale_down_window is 30m (defaults.go's
+				// PresetBalanced); a 20m collection_interval yields a
+				// sampler capacity of only floor(30m/20m) = 1, below the
+				// 3-sample floor windowFull requires — the window could
+				// never become full no matter how long the agent ran.
+				c.Runtime.Metrics.CollectionInterval = durationPtr("20m")
+			},
+			wantSub: "collection_interval",
+		},
+		{
+			name: "collection_interval exactly at the boundary is valid",
+			mutate: func(c *Config) {
+				// scale_down_window=30m / minSamplesForWindowMirror(3) = 10m
+				// exactly — capacity floors to exactly 3, the minimum.
+				c.Runtime.Metrics.CollectionInterval = durationPtr("10m")
+			},
+			wantSub: "",
 		},
 	}
 

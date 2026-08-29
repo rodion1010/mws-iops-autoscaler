@@ -1098,8 +1098,9 @@ milestone introduces.
   done without it.
 - **Leader election.** Two `fleet` agents on the same project would both act. v1 documents
   "run one"; a lease is the fix if it becomes real.
-- **Absolute latency thresholds.** Relative-to-baseline only in v1; absolute mode is in the config
-  schema but unimplemented.
+- **Absolute latency thresholds.** Relative-to-baseline only in v1; `latency.mode: absolute` is in the
+  config schema's type but rejected by validation (issue #6) — the field decodes, but only "relative"
+  passes `--validate-config`, since no Analyzer code path reads the mode at all yet.
 
 ---
 

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -43,8 +44,38 @@ func Validate(cfg *Config) error {
 		errs = append(errs, validateResolvedPolicy(fmt.Sprintf("disks.selected[%s].policy", name), rp)...)
 	}
 	errs = append(errs, validateResolvedRuntime("runtime", resolved.Runtime)...)
+	errs = append(errs, validateSamplerCapacity(resolved)...)
 
 	return errors.Join(errs...)
+}
+
+// minSamplesForWindowMirror duplicates internal/analyzer's own
+// minSamplesForWindow constant (config must not import analyzer —
+// design.md §3.3's decoupling, the same tradeoff internal/decider already
+// accepts for billingStepIOPS). Kept in sync by hand; both are
+// calibration-pending together (design.md §8.5).
+const minSamplesForWindowMirror = 3
+
+// validateSamplerCapacity rejects a config whose runtime.metrics.collection_interval
+// is too long relative to the configured windows for the Sampler's ring
+// buffer to ever hold minSamplesForWindowMirror samples (issue #6,
+// reopened: "cross-validate collection cadence/windows/minimum samples so
+// an accepted config can eventually become evaluable"). It calls the same
+// ResolvedConfig.SamplerCapacity the orchestrator uses to size the real
+// buffer — one formula, checked here and used there, rather than two
+// independently-reasoned-about approximations that could disagree. Below
+// this floor, WindowFullUp/WindowFullDown (ADR-010) can never become true
+// for any disk, for any window, no matter how long the agent runs: the
+// ring buffer would evict down to fewer samples than analyzer.Analyze's
+// own minimum before a window could ever fill.
+func validateSamplerCapacity(resolved *ResolvedConfig) []error {
+	if capacity := resolved.SamplerCapacity(); capacity < minSamplesForWindowMirror {
+		return []error{fmt.Errorf(
+			"runtime.metrics.collection_interval: %s is too long relative to the configured evaluation windows — "+
+				"the sample buffer could only ever hold %d sample(s), but at least %d are required before any window can become evaluable",
+			resolved.Runtime.CollectionInterval, capacity, minSamplesForWindowMirror)}
+	}
+	return nil
 }
 
 // validateResolvedPolicy checks the range and cross-field rules that only
@@ -113,7 +144,25 @@ func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 	nonNegativeDuration("cooldown.scale_up", a.CooldownScaleUp)
 	nonNegativeDuration("cooldown.scale_down", a.CooldownScaleDown)
 
+	// finite guards every float check below against NaN/Inf (issue #6,
+	// reopened): a bare `v <= 0 || v > 1` silently lets NaN through, since
+	// every comparison against NaN is false — `NaN <= 0` is false and
+	// `NaN > 1` is false, so the "violation" branch never fires and NaN
+	// passes as if it were a valid fraction. Reports its own error and
+	// returns false so a caller can skip a range comparison that would be
+	// meaningless anyway.
+	finite := func(field string, v float64) bool {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			errs = append(errs, fmt.Errorf("%s.advanced.%s: %v is not a finite number", path, field, v))
+			return false
+		}
+		return true
+	}
+
 	fraction := func(field string, v float64) {
+		if !finite(field, v) {
+			return
+		}
 		if v <= 0 || v > 1 {
 			errs = append(errs, fmt.Errorf("%s.advanced.%s: %v must be greater than 0 and at most 1", path, field, v))
 		}
@@ -122,15 +171,33 @@ func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 	fraction("target.scale_up_utilization", a.ScaleUpUtilization)
 	fraction("target.scale_down_utilization", a.ScaleDownUtilization)
 
-	if a.QueueDepthThreshold < 0 {
-		errs = append(errs, fmt.Errorf("%s.advanced.saturation.queue_depth_threshold: %v must not be negative", path, a.QueueDepthThreshold))
+	if finite("saturation.queue_depth_threshold", a.QueueDepthThreshold) && a.QueueDepthThreshold <= 0 {
+		// Strictly positive, not merely non-negative (issue #6, reopened):
+		// with a non-negative QueueDepth.Value, a threshold of exactly 0
+		// makes sustainedQueueAtOrAbove/sustainedQueueBelow (analyzer.go)
+		// trivially true/false on every sample regardless of actual queue
+		// depth — the gate stops gating, and utilization_threshold alone
+		// would decide saturation.
+		errs = append(errs, fmt.Errorf("%s.advanced.saturation.queue_depth_threshold: %v must be greater than zero", path, a.QueueDepthThreshold))
 	}
 
-	if a.LatencyMode != "relative" && a.LatencyMode != "absolute" {
-		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.mode: %q is neither \"relative\" nor \"absolute\"", path, a.LatencyMode))
+	// Only "relative" is implemented — design.md §2/§9.4 explicitly places
+	// absolute latency thresholds out of scope for v1, and no Analyzer
+	// code path reads LatencyMode at all today (analyzer.EvaluationPolicy
+	// carries no such field). Accepting "absolute" therefore accepted a
+	// value the agent silently treats identically to "relative," with
+	// nothing to signal the difference (issue #6, reopened).
+	if a.LatencyMode != "relative" {
+		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.mode: %q — only \"relative\" is implemented in this phase (design.md §2/§9.4)", path, a.LatencyMode))
 	}
-	if a.LatencyBaselineMultiplier <= 0 {
-		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.baseline_multiplier: %v must be greater than zero", path, a.LatencyBaselineMultiplier))
+	if finite("saturation.latency.baseline_multiplier", a.LatencyBaselineMultiplier) && a.LatencyBaselineMultiplier <= 1 {
+		// > 1, not merely > 0 (issue #6, reopened): the elevated-latency
+		// trigger compares observed p95 against baseline.P95 × multiplier
+		// (analyzer.go's scaledDuration). A multiplier at or below 1 sets
+		// that threshold at or below the baseline itself, so ordinary
+		// measurement noise around baseline latency would read as
+		// "elevated" continuously.
+		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.baseline_multiplier: %v must be greater than 1", path, a.LatencyBaselineMultiplier))
 	}
 
 	if a.MinChangeIOPS <= 0 {
@@ -138,10 +205,10 @@ func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 	} else if a.MinChangeIOPS%BillingStepIOPS != 0 {
 		errs = append(errs, fmt.Errorf("%s.advanced.step.min_change_iops: %d is not a multiple of %d", path, a.MinChangeIOPS, BillingStepIOPS))
 	}
-	if a.MaxScaleUpRatio <= 1 {
+	if finite("step.max_scale_up_ratio", a.MaxScaleUpRatio) && a.MaxScaleUpRatio <= 1 {
 		errs = append(errs, fmt.Errorf("%s.advanced.step.max_scale_up_ratio: %v must be greater than 1 — otherwise it never actually scales up", path, a.MaxScaleUpRatio))
 	}
-	if a.MaxScaleDownRatio <= 0 || a.MaxScaleDownRatio >= 1 {
+	if finite("step.max_scale_down_ratio", a.MaxScaleDownRatio) && (a.MaxScaleDownRatio <= 0 || a.MaxScaleDownRatio >= 1) {
 		errs = append(errs, fmt.Errorf("%s.advanced.step.max_scale_down_ratio: %v must be greater than 0 and less than 1", path, a.MaxScaleDownRatio))
 	}
 

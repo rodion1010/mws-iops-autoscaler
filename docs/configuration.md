@@ -55,7 +55,7 @@ policy:
       utilization_threshold: 0.98        # GATE, not a trigger — IOPS or bandwidth, whichever is higher (ADR-008)
       queue_depth_threshold: 1
       latency:
-        mode: relative                   # relative | absolute (absolute unimplemented in v1)
+        mode: relative                   # only "relative" is accepted — "absolute" is rejected by validation (§8, issue #6)
         baseline_multiplier: 1.5
 
     target:
@@ -363,13 +363,27 @@ value, and maintenance windows.
 - `advanced.evaluation.collection_interval` — removed from the schema (ADR-010); rejected as an
   unknown key like any other superseded field
 - `saturation.utilization_threshold`, `target.scale_up_utilization`, or `target.scale_down_utilization`
-  outside `(0, 1]`
-- `saturation.queue_depth_threshold` < 0
-- `saturation.latency.mode` anything other than `relative` or `absolute`
-- `saturation.latency.baseline_multiplier` ≤ 0
+  outside `(0, 1]`, or non-finite (`NaN`/`Inf` — see below)
+- `saturation.queue_depth_threshold` ≤ 0 (strictly positive, not merely non-negative: at exactly 0 the
+  queue-depth gate degenerates to always-true given a non-negative queue depth, and
+  `utilization_threshold` alone would decide saturation — issue #6), or non-finite
+- `saturation.latency.mode` anything other than `relative` — `absolute` is rejected too, not merely
+  "not yet accepted": design.md §2/§9.4 places absolute latency thresholds out of scope for v1, and no
+  Analyzer code path reads this field at all, so accepting it would silently do nothing (issue #6)
+- `saturation.latency.baseline_multiplier` ≤ 1, not merely ≤ 0 — at exactly 1 the elevated-latency
+  threshold (`baseline.P95 × multiplier`) equals the baseline itself, so ordinary noise around baseline
+  latency would read as "elevated" continuously (issue #6), or non-finite
 - `step.min_change_iops` ≤ 0 or not a multiple of 100
-- `step.max_scale_up_ratio` ≤ 1 (it would never actually scale up)
-- `step.max_scale_down_ratio` outside `(0, 1)`
+- `step.max_scale_up_ratio` ≤ 1 (it would never actually scale up), or non-finite
+- `step.max_scale_down_ratio` outside `(0, 1)`, or non-finite
 - `budget.max_changes_per_24h` ≤ 0
 - any `runtime.metrics.collection_interval`, `runtime.controller.reconcile_interval`, or
   `runtime.controller.discovery_interval` ≤ 0
+- `runtime.metrics.collection_interval` too long relative to the configured evaluation windows for the
+  Sampler's ring buffer to ever hold enough samples to fill one — `config.ResolvedConfig.SamplerCapacity()`
+  (the same formula the orchestrator uses to actually size the buffer) must be ≥ 3, the Analyzer's own
+  `minSamplesForWindow` floor (ADR-010); below that, `WindowFullUp`/`WindowFullDown` could never become
+  true no matter how long the agent ran (issue #6)
+- any of the float fields above that decode as `NaN` or `±Inf` — a bare range comparison like
+  `v <= 0 || v > 1` silently lets `NaN` through (every comparison against `NaN` is `false`), so this is
+  checked explicitly, separately from the range itself (issue #6)

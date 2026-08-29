@@ -146,6 +146,35 @@ const (
 	defaultDiscoveryInterval  = 5 * time.Minute
 )
 
+// SamplerCapacity sizes the ring buffer by the longest configured window
+// across the VM policy and every per-disk override — Sampler.NewSampler
+// (design.md §3.2 "Bounded memory") takes one capacity for every disk, so
+// it must fit whichever disk needs the most history. Exported so both the
+// orchestrator (which sizes the real Sampler, cmd/mws-iops-autoscaler)
+// and Validate (which rejects a config that would size it too small to
+// ever complete a window, issue #6) share exactly one formula — never two
+// independently-reasoned-about copies that could silently drift apart.
+func (rc *ResolvedConfig) SamplerCapacity() int {
+	longest := rc.VMPolicy.Advanced.ScaleDownWindow
+	for _, p := range rc.DiskPolicies {
+		if p.Advanced.ScaleDownWindow > longest {
+			longest = p.Advanced.ScaleDownWindow
+		}
+	}
+	if rc.Runtime.CollectionInterval <= 0 {
+		// Defensive only — validateResolvedRuntime already rejects a
+		// non-positive collection_interval outright; this just keeps the
+		// method itself panic-free (no division by zero) if ever called
+		// against an unvalidated ResolvedConfig.
+		return 1
+	}
+	n := int(longest / rc.Runtime.CollectionInterval)
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 func resolveRuntime(r RuntimeSpec) ResolvedRuntime {
 	out := ResolvedRuntime{
 		MetricsSource:      defaultMetricsSource,

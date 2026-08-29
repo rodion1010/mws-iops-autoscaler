@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestResolve_diskInheritsVMPolicyWhenNoOverride(t *testing.T) {
 	cfg := validConfig()
@@ -113,5 +116,41 @@ func TestResolve_runtimeDefaults(t *testing.T) {
 	}
 	if resolved.Runtime.DiscoveryInterval != defaultDiscoveryInterval {
 		t.Errorf("DiscoveryInterval = %v, want default %v", resolved.Runtime.DiscoveryInterval, defaultDiscoveryInterval)
+	}
+}
+
+func TestSamplerCapacity(t *testing.T) {
+	// issue #6, reopened: this is the exact formula both the orchestrator
+	// (sizing the real Sampler) and Validate (rejecting a config that
+	// would size it too small) share — one implementation, tested once.
+	cases := []struct {
+		name                string
+		vmScaleDownWindow   time.Duration
+		diskScaleDownWindow time.Duration // 0 means no per-disk override
+		collectionInterval  time.Duration
+		want                int
+	}{
+		{"default preset", 30 * time.Minute, 0, 10 * time.Second, 180},
+		{"exact boundary yields exactly 3", 30 * time.Minute, 0, 10 * time.Minute, 3},
+		{"floors down, not up", 30 * time.Minute, 0, 11 * time.Minute, 2},
+		{"per-disk override longer than VM policy wins", 5 * time.Minute, 40 * time.Minute, 10 * time.Minute, 4},
+		{"per-disk override shorter than VM policy does not win", 30 * time.Minute, 5 * time.Minute, 10 * time.Minute, 3},
+		{"never floors below 1", time.Minute, 0, time.Hour, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := &ResolvedConfig{
+				VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{ScaleDownWindow: tc.vmScaleDownWindow}},
+				Runtime:  ResolvedRuntime{CollectionInterval: tc.collectionInterval},
+			}
+			if tc.diskScaleDownWindow > 0 {
+				rc.DiskPolicies = map[string]ResolvedPolicy{
+					"datadisk": {Advanced: ResolvedAdvanced{ScaleDownWindow: tc.diskScaleDownWindow}},
+				}
+			}
+			if got := rc.SamplerCapacity(); got != tc.want {
+				t.Errorf("SamplerCapacity() = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
