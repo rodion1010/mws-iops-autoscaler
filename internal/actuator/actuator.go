@@ -1,5 +1,5 @@
 // Package actuator applies a decider.Decision through the correct Compute
-// API write path (design.md §3.2/§4.7, ADR-003) — the only component in
+// API write path (design.md §3.2/§4.7, docs/design.md §4.7) — the only component in
 // the pipeline that mutates anything. Everything upstream (Analyzer,
 // Decider) is pure; this is where that stops.
 package actuator
@@ -20,7 +20,7 @@ import (
 // that produced current/vm.
 type Target struct {
 	VMName     string
-	DeviceName string // unprefixed (ADR-004) — dependent-path target
+	DeviceName string // unprefixed (docs/design.md §4.1) — dependent-path target
 	DiskName   string // cloud resource name — independent-path target (GetDisk/UpdateDisk)
 	Class      compute.DiskClass
 
@@ -48,7 +48,7 @@ type Actuator interface {
 	// dryRun only has a server-confirmed effect on Target.Class ==
 	// ClassIndependent (UpdateDisk's ValidateOnly, US-013). On
 	// ClassDependent it reports intent without calling the write endpoint
-	// at all — UpdateVirtualMachine has no validateOnly (ADR-007), so
+	// at all — UpdateVirtualMachine has no validateOnly (docs/design.md §4.7), so
 	// there is no server-side dry run to ask for on that path.
 	Apply(ctx context.Context, d decider.Decision, target Target, dryRun bool, idempotencyKey string) (Applied, error)
 }
@@ -85,7 +85,7 @@ func (a *ComputeActuator) Apply(ctx context.Context, d decider.Decision, target 
 		// dryRun is threaded all the way into UpdateDependentDiskIOPS
 		// rather than short-circuited here (issue #16) — a dry run must
 		// still exercise the fresh-read/conflict/direction checks below,
-		// even though (ADR-007) there is no server-side validateOnly for
+		// even though (docs/design.md §4.7) there is no server-side validateOnly for
 		// this path to also confirm against.
 		applied, err := compute.UpdateDependentDiskIOPS(ctx, a.Client, target.VMName, target.DeviceName, d.Current, d.Target, target.IncarnationID, dryRun, idempotencyKey)
 		if err != nil {

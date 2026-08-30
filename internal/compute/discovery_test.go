@@ -198,7 +198,7 @@ func TestDiscover_duplicateDeviceNameBothSkipped(t *testing.T) {
 		t.Fatalf("Discover: %v", err)
 	}
 	if len(vm.Disks) != 0 {
-		t.Fatalf("Disks = %+v, want none — registry.Select joins by device_name (ADR-004); a collision must exclude both, not let one silently win", vm.Disks)
+		t.Fatalf("Disks = %+v, want none — registry.Select joins by device_name (docs/design.md §4.1); a collision must exclude both, not let one silently win", vm.Disks)
 	}
 	if len(skipped) != 2 {
 		t.Fatalf("skipped = %+v, want both entries excluded", skipped)

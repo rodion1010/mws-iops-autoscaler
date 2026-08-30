@@ -43,7 +43,7 @@ var ErrIncarnationMismatch = errors.New("live disk incarnation differs from the 
 //     "degrade gracefully when IncarnationID is unavailable" contract.
 //   - expected != "" && live == "": asymmetric with the case above, and
 //     deliberately NOT treated the same way. Every real disk this project has
-//     access to returns a metadata.id (ADR-018) — an expected value existing
+//     access to returns a metadata.id (docs/design.md §5.2) — an expected value existing
 //     at all means Discover successfully read one for this disk. A live read
 //     that suddenly comes back empty is not "unavailable," it is unexplained,
 //     and could just as easily be a different resource whose read happened
@@ -126,7 +126,7 @@ func UpdateIndependentDiskIOPS(ctx context.Context, c Client, diskName string, e
 }
 
 // UpdateDependentDiskIOPS writes a new IOPS limit on a VM-owned disk
-// (US-011a), which the disk API refuses (ADR-003). It re-reads the VM
+// (US-011a), which the disk API refuses (docs/design.md §4.7). It re-reads the VM
 // itself immediately before writing — never reusing a Discover snapshot
 // from the slow path — because the whole point of the "every other field
 // byte-identical" check is comparing against state no older than the write
@@ -134,7 +134,7 @@ func UpdateIndependentDiskIOPS(ctx context.Context, c Client, diskName string, e
 //
 // expectedCurrent/target/dryRun mirror UpdateIndependentDiskIOPS exactly
 // (issue #16), including on the dry-run path: since there is no
-// server-side validateOnly for UpdateVirtualMachine (ADR-007), dryRun here
+// server-side validateOnly for UpdateVirtualMachine (docs/design.md §4.7), dryRun here
 // means "run every precondition check below against a fresh re-read, then
 // report intent without calling UpdateDependentDisk at all" — the closest
 // analogue this write path has to the independent path's server-confirmed

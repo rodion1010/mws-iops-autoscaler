@@ -93,7 +93,7 @@ func (r *Registry) Handler() http.Handler {
 // reconcile across every disk on the VM) and the applied-state half of
 // disk_provisioned_iops (RecordAppliedIOPS, called only once a write is
 // verified to have landed). vmName and class (dependent|independent,
-// ADR-003) come from the caller — neither is on Decision, since Decide has
+// docs/design.md §4.7) come from the caller — neither is on Decision, since Decide has
 // no reason to know either (design.md §3.3's decoupling: Decide only needs
 // policy/state/evidence, not disk-classification metadata a journal
 // consumer wants).

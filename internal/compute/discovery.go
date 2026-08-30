@@ -38,7 +38,7 @@ type SkippedDisk struct {
 }
 
 // Discover is the slow-path read described in design.md §4.1: fetch the VM,
-// classify each disk (ADR-003), resolve the VM's vCPU count via its VmType,
+// classify each disk (docs/design.md §4.7), resolve the VM's vCPU count via its VmType,
 // and read each disk's own spec/status. It is idempotent and rebuilds the
 // whole picture on every call — a disk that changed class, was detached, or
 // was resized externally is picked up here, not cached across calls.
@@ -57,7 +57,7 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 	// Duplicate-identity detection (issue #4): a second attachment sharing
 	// either the cloud resource name (DiskName, the GetDisk/UpdateDisk
 	// target) or the device_name (DeviceName, registry.Select's join key
-	// per ADR-004) makes both entries ambiguous — registry.Select's
+	// per docs/design.md §4.1) makes both entries ambiguous — registry.Select's
 	// by-device-name map would otherwise silently let the second one win,
 	// with no diagnostic that the first was ever dropped. Neither should
 	// ever happen on a real VM; treated as an eligibility failure, not

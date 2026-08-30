@@ -22,7 +22,7 @@ type ManagedDisk struct {
 }
 
 // Select applies spec against vm's discovered disks, matching by
-// unprefixed device_name (ADR-004), and resolves each one's policy from
+// unprefixed device_name (docs/design.md §4.1), and resolves each one's policy from
 // resolved.DiskPolicies, falling back to resolved.VMPolicy — the
 // inheritance chain docs/configuration.md §5 describes, already computed
 // by config.Resolve; this function only decides which disks it applies to.

@@ -2,7 +2,7 @@
 // evidence and verdict — windows, percentiles, latency baselines,
 // saturated/underutilized (design.md §4.4/§4.5, M3). It is pure over a
 // sample slice plus policy: no network, no state beyond the per-disk
-// latency baseline it must remember across calls (ADR-012's "establish
+// latency baseline it must remember across calls (the baseline rule in docs/design.md §4.4: "establish
 // once, freeze while saturated" needs memory the input samples alone don't
 // carry). Producing a target from this evidence is the Decider's job (M4,
 // design.md §3.2) — kept separate so both stay independently testable.
@@ -51,7 +51,7 @@ type EvaluationPolicy struct {
 // LatencyStatKind names how a latency percentile was derived — carried on
 // the value itself so a windowed estimate and a (future) histogram-derived
 // quantile are never silently compared as if they meant the same thing
-// (ADR-011). This package only ever produces LatencyWindowedAvg:
+// (docs/design.md §5.2). This package only ever produces LatencyWindowedAvg:
 // metrics.Sample carries no histogram data, so LatencyHistogram is
 // unreachable until a PlatformSource (M7) adds one — the constant exists
 // now so Analysis's shape doesn't change when that day comes.
@@ -117,7 +117,7 @@ type Analysis struct {
 	Baseline            LatencyStat // low percentile over the full buffered history
 	BaselineEstablished bool
 
-	WindowFullUp   bool // span ≥ ScaleUpWindow (ADR-010)
+	WindowFullUp   bool // span ≥ ScaleUpWindow (docs/design.md §4.2)
 	WindowFullDown bool // span ≥ ScaleDownWindow
 
 	// WindowFillUpRatio/WindowFillDownRatio are the same span-vs-window
@@ -132,7 +132,7 @@ type Analysis struct {
 	Saturated bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
 	// Underutilized requires resource_gate to never trigger (both IOPS and
 	// bandwidth utilization below threshold, every sample — the mirror of
-	// Saturated's own gate, ADR-008) in addition to every other signal
+	// Saturated's own gate, docs/design.md §4.4) in addition to every other signal
 	// quiet, all sustained over ScaleDownWindow (US-010); false if
 	// !WindowFullDown. The resource-gate term exists because queue depth,
 	// latency, and throttle detection are all IOPS-denominated and blind
@@ -147,8 +147,8 @@ type Analysis struct {
 	// bandwidth converted to IOPS-equivalent units (bytes/s ÷ bytesPerIOPS)
 	// — the other input to EffectiveDemandP95Down (issue #17). NBS-PL2
 	// ties provisioned IOPS and bandwidth at the same fixed ratio
-	// (docs/platform-reference.md, already used for BandwidthUtilization/ADR-008's
-	// saturation gate) — a scale-down target sized from ops alone can
+	// (docs/platform-reference.md), already used by BandwidthUtilization and
+	// the saturation gate in docs/design.md §4.4. A scale-down target sized from ops alone can
 	// undersize the bandwidth ceiling a large-block, low-ops/s workload
 	// still needs.
 	BandwidthP95DownIOPSEquiv float64

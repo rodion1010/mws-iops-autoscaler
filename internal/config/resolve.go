@@ -10,7 +10,7 @@ type ResolvedPolicy struct {
 }
 
 // ResolvedRuntime is the runtime block with defaults filled in.
-// CollectionInterval here is the single canonical sampling cadence (ADR-010)
+// CollectionInterval here is the single canonical sampling cadence (docs/design.md §4.2)
 // — one Sampler ticks one source for every managed disk in a single call,
 // so there is no per-policy equivalent to keep in sync with this one.
 type ResolvedRuntime struct {
@@ -150,7 +150,7 @@ const (
 // endpoint-to-endpoint minimum (issue #7's "explicit slack... plus any
 // documented jitter allowance"), so a Sampler.Tick that fires a little
 // late or a source.Sample call that occasionally comes back empty (a
-// missed tick, ADR-010) doesn't immediately reopen the same off-by-one gap
+// missed tick, docs/design.md §4.2) doesn't immediately reopen the same off-by-one gap
 // this formula exists to close. Calibration-pending, same treatment as
 // every other constant of this shape (design.md §8.5).
 const samplerCapacitySlackSamples = 2

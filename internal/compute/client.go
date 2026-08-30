@@ -7,8 +7,8 @@ import "context"
 // go.mws.cloud/go-sdk; tests use a hand-written fake (fake_test.go) — no
 // mocking framework, matching internal/config's testing style.
 type Client interface {
-	// GetVirtualMachine reads a VM by name, classifying each disk (ADR-003)
-	// and resolving its device name (ADR-004) along the way.
+	// GetVirtualMachine reads a VM by name, classifying each disk (docs/design.md §4.7)
+	// and resolving its device name (docs/design.md §4.1) along the way.
 	GetVirtualMachine(ctx context.Context, name string) (*VirtualMachine, error)
 	// GetVmType reads a VM type — currently only for its vCPU count.
 	GetVmType(ctx context.Context, name string) (*VmType, error)

@@ -151,7 +151,7 @@ func TestApply_dependentDiskWrites(t *testing.T) {
 }
 
 func TestApply_dependentDryRunNeverCallsWriteEndpoint(t *testing.T) {
-	// ADR-007: no server-side dry-run exists for the dependent path.
+	// docs/design.md §4.7: no server-side dry-run exists for the dependent path.
 	// dependentErr proves the write endpoint was never even called — if
 	// Apply called it, this test would fail with that error instead of
 	// succeeding. The VM still needs a real Disks entry, though (issue

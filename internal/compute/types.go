@@ -1,10 +1,10 @@
 // Package compute wraps the MWS Compute API (go.mws.cloud/go-sdk) behind a
 // narrow interface, translating its wire types into plain domain values so
 // the rest of the agent never imports the SDK directly. Discovery and
-// classification are docs/design.md §4.1; the two write paths are ADR-003.
+// classification are docs/design.md §4.1; the two write paths are docs/design.md §4.7.
 package compute
 
-// DiskClass is how a disk is attached to its VM (ADR-003) — it determines
+// DiskClass is how a disk is attached to its VM (docs/design.md §4.7) — it determines
 // the write path, never whether a disk is in scope.
 type DiskClass string
 
@@ -25,7 +25,7 @@ const (
 type StorageDisk struct {
 	Alias      string // spec.storage.disks[].name — alias unique within the VM, not globally
 	Boot       bool
-	DeviceName string // unprefixed (ADR-004); empty if the platform has not assigned one
+	DeviceName string // unprefixed (docs/design.md §4.1); empty if the platform has not assigned one
 	Class      DiskClass
 	DiskName   string // status.storage.disks[].ref — cloud resource name; GetDisk/UpdateDisk target
 

@@ -6,7 +6,7 @@ not an architecture or platform reference.
 ## Read before changing code
 
 - Product requirements and MVP scope: [docs/prd-mws-iops-autoscaler.md](docs/prd-mws-iops-autoscaler.md)
-- Current architecture and safety invariants: [docs/design.md](docs/design.md)
+- Accepted architecture and safety invariants: [docs/design.md](docs/design.md)
 - User-facing configuration contract: [docs/configuration.md](docs/configuration.md)
 - Verified MWS API, SDK and monitoring behaviour: [docs/platform-reference.md](docs/platform-reference.md)
 - Local setup and the reference test environment: [docs/development.md](docs/development.md)
@@ -21,6 +21,9 @@ interpretation. `TODO.md` is a parking lot, not authorized implementation scope.
 - Treat explicitly documented future work as normal WIP. It becomes a defect only when reachable
   behaviour violates the current MVP contract, a safety invariant, or an already implemented public
   contract.
+- Treat `docs/design.md` as the normative, currently accepted architecture, not a code-completion
+  ledger. Track implementation deviations in issues; do not weaken an invariant or add gap status to
+  the design merely to mirror incomplete code.
 - Keep functional changes separate from comment-only or documentation-only cleanup.
 - Do not widen the requested scope merely because a nearby TODO or design idea exists.
 - Preserve fail-closed behaviour around disk identity, stale evidence, concurrency and change-budget
@@ -34,13 +37,13 @@ Each fact has one canonical home:
 
 - `docs/prd-mws-iops-autoscaler.md`: product requirements, supported scope, priorities and success
   criteria.
-- `docs/design.md`: the current architecture, flows, contracts and safety invariants.
+- `docs/design.md`: the accepted architecture, flows, contracts and safety invariants the implementation must satisfy.
 - `docs/configuration.md`: the user-facing configuration schema, defaults and examples.
 - `docs/platform-reference.md`: verified behaviour of external MWS APIs, SDKs and metrics.
 - `PLATFORM_DEPENDENCIES.md`: upstream limitations, ownership, workarounds and removal conditions.
 - `docs/development.md`: developer setup and test-environment conventions.
 - `docs/TODO.md`: uncommitted ideas and deferred work.
-- ADRs: historical rationale for exceptional architectural decisions.
+- ADRs: temporary decision requests from an agent to the Product Lead; never accepted architecture.
 
 Update every document whose own contract changed, but do not copy the same statement into the PRD,
 design, ADRs and code comments. Link to the canonical document instead.
@@ -64,18 +67,28 @@ design, ADRs and code comments. Link to the canonical document instead.
 
 ## ADR policy
 
-The default is to update `docs/design.md`, not to create an ADR. Create a new ADR only when all of
-the following are true:
+An ADR is a temporary communication artifact, not a permanent architecture record. Use one only when
+an agent finds a material choice that the PRD, current design and verified platform facts do not
+resolve, and needs the Product Lead to choose how to proceed.
 
-1. At least two credible alternatives were considered.
-2. The decision crosses component boundaries or changes a public contract.
-3. Reversing it later would be materially expensive.
-4. The rationale will remain useful after the implementation and issue are closed.
+Before creating an ADR:
 
-Keep an ADR concise: Context, Decision, Alternatives and Consequences. It may link to the canonical
-design section, but must not duplicate the current implementation walkthrough, test plan, issue
-chronology, progress checklist or amendment log. `docs/design.md` remains the source of truth for
-the current system. When a retained ADR is replaced, mark it superseded and link to the replacement.
+1. Try to resolve the question from the canonical documents and current code.
+2. If the choice is local, reversible and does not change a contract, make the reasonable engineering
+   choice without creating an ADR.
+3. Create an ADR only when at least two credible options remain and the choice materially affects
+   product behaviour, a public contract, safety or multiple components.
+4. Do not use an ADR merely to explain an implementation, preserve issue history or announce a
+   decision the agent has already made.
+
+Every ADR must have status `Proposed` and contain: the unresolved question, relevant context and
+constraints, credible options with trade-offs, the agent's recommendation, and the exact decision
+requested from the Product Lead. Keep it concise and do not start implementation that depends on the
+choice until the decision is made.
+
+After the Product Lead decides, update the appropriate canonical documents and delete the ADR in the
+same change. The PR or issue discussion and Git history preserve the communication. Do not keep
+`Accepted` ADRs in the active tree and do not use ADRs as a parallel history of the architecture.
 
 ## Verification
 

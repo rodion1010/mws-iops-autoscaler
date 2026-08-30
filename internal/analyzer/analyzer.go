@@ -10,7 +10,7 @@ import (
 // bytesPerIOPS is NBS-PL2's fixed IOPS-to-bandwidth ratio, measured in
 // docs/platform-reference.md: "compute_vm_disk_read_latency..." aside, the throughput figure
 // itself is `MB/s = IOPS × 32 / 1024`, i.e. exactly 32768 bytes per IOPS
-// unit (33554432 Bps at 1000 IOPS). Used for bandwidth_utilization (ADR-008).
+// unit (33554432 Bps at 1000 IOPS). Used for bandwidth_utilization (docs/design.md §4.4).
 const bytesPerIOPS = 32768
 
 // minSamplesForWindow is a floor beneath which a window is never "full"
@@ -37,7 +37,7 @@ const throttleTolerance = 0.02
 
 // WindowAnalyzer is the concrete Analyzer (design.md §5.2). It is stateful
 // across calls — unlike Sample, which is a pure snapshot — because the
-// latency baseline must be remembered and selectively frozen (ADR-012), not
+// latency baseline must be remembered and selectively frozen (docs/design.md §4.4), not
 // recomputed fresh from whatever happens to be in the current sample
 // window. State is keyed by disk ID, mirroring Sampler's own per-disk map.
 type WindowAnalyzer struct {
@@ -141,7 +141,7 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 // currentBaseline returns the stored baseline for diskID, establishing it
 // now — from samples' own low-percentile latency — the first time
 // windowFullUp is true, regardless of whether that window happened to be
-// saturated (ADR-012: "seeds from the disk's first full window", never
+// saturated (docs/design.md §4.4: "seeds from the disk's first full window", never
 // gated by saturation). Before the first full window, there is nothing
 // honest to establish from yet, so BaselineEstablished stays false.
 func (a *WindowAnalyzer) currentBaseline(diskID string, samples []metrics.Sample, windowFullUp bool) (LatencyStat, bool) {
@@ -159,7 +159,7 @@ func (a *WindowAnalyzer) currentBaseline(diskID string, samples []metrics.Sample
 		// Full window, but every sample in it was idle in both directions
 		// (issue #9) — there is still nothing honest to establish from.
 		// Leave established false and retry next cycle, rather than
-		// freezing a bogus 0 baseline in place forever (ADR-012's "seeds
+		// freezing a bogus 0 baseline in place forever (the baseline rule in docs/design.md §4.4: "seeds
 		// from the disk's first full window" assumes that window has real
 		// latency data to seed from).
 		return LatencyStat{}, false
@@ -255,7 +255,7 @@ func trailingWindow(samples []metrics.Sample, window time.Duration) []metrics.Sa
 }
 
 // windowFull is timestamp-span based, not a sample count, beyond the
-// minSamplesForWindow floor (ADR-010; design.md §4.3) — and, per issue #15
+// minSamplesForWindow floor (docs/design.md §4.2; design.md §4.3) — and, per issue #15
 // / issue #7, also requires that no gap between consecutive samples inside
 // the window exceeds maxGap. A window whose overall span covers `window`
 // but contains one large silent gap (a missed collection cycle, a source
@@ -336,9 +336,9 @@ func sustainedResourceGate(window []metrics.Sample, specIOPS int64, threshold fl
 // count could still read as Underutilized: queue depth, latency, and
 // throttle detection are all IOPS-denominated signals (design.md §4.4/
 // §4.5) and blind to a bandwidth-only bottleneck on their own — the same
-// asymmetry ADR-008 already fixed for the Saturated gate, now closed for
+// asymmetry docs/design.md §4.4 already fixed for the Saturated gate, now closed for
 // its mirror. Reuses policy.saturation.utilization_threshold rather than a
-// new config field: this keeps the same invariant ADR-008 already
+// new config field: this keeps the same invariant docs/design.md §4.4 already
 // established (whichever resource is closer to its ceiling decides) and
 // means a disk can never simultaneously be a candidate for Saturated (via
 // this same threshold, sustained the other direction) and Underutilized.
@@ -359,7 +359,7 @@ func sustainedResourceBelow(window []metrics.Sample, specIOPS int64, threshold f
 // below needs before comparing raw QueueDepth.Value against an
 // ops-calibrated threshold or summing it into an IOPS quantity (issue #18).
 // Guest is the only MetricSource implemented today and always produces
-// QueueDepthOps (ADR-001), so a false return is unreachable through the
+// QueueDepthOps (docs/design.md §4.2), so a false return is unreachable through the
 // real pipeline right now — it exists so a future platform-sourced window
 // (QueueDepthBytes, docs/platform-reference.md: "write_queue_length ... byte-denominated")
 // is rejected outright the moment M7 lands, rather than silently compared

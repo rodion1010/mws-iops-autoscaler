@@ -97,7 +97,7 @@ func TestBudget_countSinceExcludesEventsBeforeCutoff(t *testing.T) {
 }
 
 func TestLoadBudget_survivesRestart(t *testing.T) {
-	// This is the whole point of ADR-013: a restart must not reset the
+	// The durability invariant in docs/design.md §9.4 requires that a restart not reset the
 	// budget. Simulate one by writing with one Budget instance and
 	// reloading with a fresh one over the same file.
 	path := filepath.Join(t.TempDir(), "budget.jsonl")
@@ -115,7 +115,7 @@ func TestLoadBudget_survivesRestart(t *testing.T) {
 		t.Fatalf("LoadBudget (after restart): %v", err)
 	}
 	if got := b2.CountSince("disk1", epoch.Add(-time.Hour)); got != 5 {
-		t.Errorf("CountSince after reload = %d, want 5 — a restart must not reset the budget (ADR-013)", got)
+		t.Errorf("CountSince after reload = %d, want 5 — a restart must not reset the budget (docs/design.md §9.4)", got)
 	}
 }
 

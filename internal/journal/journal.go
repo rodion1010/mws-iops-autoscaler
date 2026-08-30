@@ -32,7 +32,7 @@ type Record struct {
 	TS     time.Time `json:"ts"`
 	Disk   string    `json:"disk"`
 	VM     string    `json:"vm"`
-	Class  string    `json:"class"` // dependent | independent (ADR-003)
+	Class  string    `json:"class"` // dependent | independent (docs/design.md §4.7)
 	Action string    `json:"action"`
 	Reason string    `json:"reason"`
 
