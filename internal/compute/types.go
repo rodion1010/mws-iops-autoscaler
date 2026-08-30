@@ -1,27 +1,17 @@
-// Package compute wraps the MWS Compute API (go.mws.cloud/go-sdk) behind a
-// narrow interface, translating its wire types into plain domain values so
-// the rest of the agent never imports the SDK directly. Discovery and
-// classification are docs/design.md §4.1; the two write paths are docs/design.md §4.7.
+// Package compute isolates the MWS Compute SDK behind domain types and a narrow client interface.
 package compute
 
-// DiskClass is how a disk is attached to its VM (docs/design.md §4.7) — it determines
-// the write path, never whether a disk is in scope.
+// DiskClass selects the platform write path for an attachment.
 type DiskClass string
 
 const (
-	// ClassIndependent disks are created standalone and attached by
-	// reference (spec.storage.disks[].disk.ref). Written via UpdateDisk.
+	// ClassIndependent is a standalone disk attached by reference and updated through the disk API.
 	ClassIndependent DiskClass = "independent"
-	// ClassDependent disks are created inline in the VM spec
-	// (spec.storage.disks[].disk.spec) and owned by it. Written by
-	// resending the VM's full storage.disks[] array (US-011a).
+	// ClassDependent is owned inline by a VM and updated through the VM attachment collection.
 	ClassDependent DiskClass = "dependent"
 )
 
-// StorageDisk is one entry in a VM's spec.storage.disks[], translated from
-// the SDK's wire-optional types into plain Go values. Once a read has
-// succeeded every field here is populated for the disk's class — there is
-// nothing left to make optional at this layer.
+// StorageDisk is one translated VM disk attachment with class-specific fields populated.
 type StorageDisk struct {
 	Alias      string // spec.storage.disks[].name — alias unique within the VM, not globally
 	Boot       bool
@@ -29,92 +19,61 @@ type StorageDisk struct {
 	Class      DiskClass
 	DiskName   string // status.storage.disks[].ref — cloud resource name; GetDisk/UpdateDisk target
 
-	// Populated for ClassDependent only — the fields DiskSpecRequest marks
-	// immutable-but-must-be-resent (docs/platform-reference.md, "DiskSpecRequest mutability"),
-	// carried so a write can resend every other disk's entry byte-identical.
+	// Dependent-only immutable fields that must be resent unchanged by VM updates.
 	DiskType string // e.g. "nbs-pl2"
 	SizeRaw  string // bytesize.ByteSize.RawValue(), reparsed unchanged on write
 
-	// Populated by Discover (discovery.go) from a separate GetDisk call —
-	// design.md §4.1 reads every disk's own spec/status this way, uniformly
-	// for both classes, rather than trusting the VM spec's inline iops.
+	// Provisioned IOPS from a separate live disk read performed during discovery.
 	IOPS                           int64 // spec.iops, current provisioned limit
 	BaseIOPS, ExtraIOPS, TotalIOPS int64 // status.iops breakdown
 
-	// IncarnationID is the disk resource's own metadata.id — the
-	// platform's stable, creation-time-assigned identifier, distinct from
-	// DiskName (pre-merge review: "don't use DiskName alone as a
-	// long-term identity"). DiskName is not safe on its own for state
-	// that must survive across reconcile cycles: an independent disk's
-	// name is user-chosen (Terraform's `disk` field), so deleting one and
-	// creating a new disk under the identical name — an ordinary
-	// infra-as-code "replace" — is unremarkable, and DiskName alone
-	// cannot distinguish the two resources. Populated by Discover from
-	// the same GetDisk call that already reads SpecIOPS; left empty if
-	// the response carried no metadata.id (see Discover's own comment on
-	// why that degrades rather than excludes the disk).
+	// IncarnationID is metadata.id, which distinguishes same-name replacement resources.
+	// It may be empty only when the platform response omits identity.
 	IncarnationID string
 }
 
-// GuestPath is where this disk appears on the guest filesystem in `local`
-// mode (docs/configuration.md §4.1).
+// GuestPath is the local-mode device path.
 func (d StorageDisk) GuestPath() string {
 	return "/dev/disk/by-id/mws-" + d.DeviceName
 }
 
-// MetricLabel is the device_name label value on this disk's exported
-// metrics (docs/platform-reference.md, "Prometheus export").
+// MetricLabel is the exported device_name label.
 func (d StorageDisk) MetricLabel() string {
 	return "mws-" + d.DeviceName
 }
 
-// IdentityKey is this disk's long-term state identity — the key samples,
-// cooldown, and the 24h change budget must use instead of DiskName alone
-// (pre-merge review), so a disk deleted and recreated under the same name
-// starts every one of those systems fresh rather than inheriting the
-// previous incarnation's history. Combining DiskName with IncarnationID
-// rather than using IncarnationID alone keeps the key human-diagnosable
-// (grep-able by name) and degrades gracefully — never collides with a
-// different disk — when IncarnationID is unavailable, at the cost of only
-// matching this pre-fix behavior's exposure in that one degenerate case.
+// IdentityKey is the incarnation-aware key for samples, cooldowns, and change budget.
+// It retains the disk name for diagnostics and degrades to name-only when identity is unavailable.
 func (d StorageDisk) IdentityKey() string {
 	return d.DiskName + "\x00" + d.IncarnationID
 }
 
-// VirtualMachine is a VM as read from the Compute API.
+// VirtualMachine is a VM translated from the Compute API.
 type VirtualMachine struct {
 	Name   string
 	Etag   string // metadata.etag — required for the dependent write path
 	VMType string // spec.vmType — feeds GetVmType for the VM's IOPS pool (design.md §4.1)
 	Disks  []StorageDisk
 
-	// VCPUCount is populated by Discover (discovery.go) from a separate
-	// GetVmType call — the VM ceiling is 3000 × VCPUCount and is not
-	// enforced by the platform (docs/platform-reference.md "IOPS limits"). Zero until
-	// Discover fills it in; GetVirtualMachine alone does not know it.
+	// VCPUCount comes from a separate VM-type read and determines aggregate IOPS capacity.
 	VCPUCount int32
 }
 
-// VmType is a VM type as read from the Compute API — currently used only
-// for its vCPU count (the VM aggregate IOPS pool is 3000 × vCPU, docs/platform-reference.md
-// "IOPS limits"; spec.disks.totalIops exists in the schema but is null on
-// every type observed, so it is not read here).
+// VmType is the VM-type capacity data needed by discovery.
 type VmType struct {
 	Name      string
 	VCPUCount int32
 }
 
-// Disk is a standalone disk resource as read from the Compute API.
+// Disk is a standalone disk translated from the Compute API.
 type Disk struct {
 	Name     string
 	SpecIOPS int64  // spec.iops — current provisioned limit
 	Etag     string // metadata.etag — optimistic-concurrency precondition for UpdateDisk (issue #16)
 
-	// status.iops breakdown — observability only, not load-bearing yet.
+	// Live status IOPS breakdown, currently used only for observability.
 	BaseIOPS, ExtraIOPS, TotalIOPS int64
 
-	// IncarnationID is metadata.id — see StorageDisk.IncarnationID's own
-	// comment; carried here too since GetDisk's response is where both
-	// StorageDisk.IncarnationID (via Discover) and this field originate.
+	// IncarnationID is the disk resource metadata.id returned by GetDisk.
 	IncarnationID string
 }

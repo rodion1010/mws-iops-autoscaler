@@ -7,40 +7,23 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/analyzer"
 )
 
-// platformMaxIOPS is the disk-level ceiling the platform itself enforces
-// (docs/platform-reference.md "IOPS limits") — always part of the clamp regardless of what
-// policy.limits.max_iops or VM headroom allow.
+// platformMaxIOPS is the disk-level platform ceiling included in every clamp.
 const platformMaxIOPS = 10000
 
-// billingStepIOPS mirrors internal/config.BillingStepIOPS — duplicated
-// rather than imported to keep this package decoupled from internal/config
-// (design.md §3.3), the same way analyzer.EvaluationPolicy avoids it.
+// billingStepIOPS mirrors config.BillingStepIOPS without coupling the packages.
 const billingStepIOPS = 100
 
-// queueGrowthThreshold is the boundary between "open workload, queue
-// growing" and "closed workload, queue stable" (design.md §4.5), in
-// QueueDepth units per second. No exact value is pinned by any doc; a
-// small positive epsilon (rather than a strict >0) avoids misclassifying a
-// genuinely stable queue as "growing" on measurement noise alone.
-// Calibration-pending per design.md §8.5, same treatment as
-// internal/analyzer's constants.
+// queueGrowthThreshold separates a growing open-workload queue from measurement noise.
+// It is calibration-sensitive.
 const queueGrowthThreshold = 0.01
 
-// PolicyDecider implements Decider. It holds no per-decision state — every
-// input Decide needs (current value, cooldown/budget state, wall clock) is
-// an explicit parameter, so it is safe to share and trivial to test. The
-// one thing it does hold is allowScaleDown: a build-time capability, not a
-// per-call policy value, deliberately (issue #14) — Phase 1 is scale-up
-// only (PRD §6), and that must not depend on any user-tunable threshold
-// happening to never trigger scale-down. Phase 3 flips exactly this one
-// constructor argument; nothing else about Decide changes.
+// PolicyDecider is stateless across decisions except for the process-wide scale-down capability.
+// Keeping capability separate from policy prevents configuration from enabling an unsupported write path.
 type PolicyDecider struct {
 	allowScaleDown bool
 }
 
-// NewPolicyDecider is the single, reviewable point where bidirectional
-// actuation gets enabled (issue #14's "one explicit, reviewable enablement
-// point"). Phase 1 callers must pass false.
+// NewPolicyDecider is the explicit enablement point for bidirectional actuation.
 func NewPolicyDecider(allowScaleDown bool) *PolicyDecider {
 	return &PolicyDecider{allowScaleDown: allowScaleDown}
 }
@@ -51,11 +34,8 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		Current: current,
 		Target:  current,
 		Inputs:  a,
-		// VM-level (§4.6), independent of this disk's own policy.limits —
-		// distinct from ceiling below, which folds policy/platform bounds
-		// in too. BudgetRemaining is set on every path, including
-		// resize_in_progress: it describes the disk's standing budget, not
-		// something this cycle's action consumed.
+		// VM headroom is separate from disk policy/platform ceilings.
+		// BudgetRemaining describes standing state even when no action is taken.
 		VMHeadroomIOPS:  vm.IOPSPool - int64(vm.SiblingP95IOPS),
 		BudgetRemaining: p.MaxChangesPer24h - state.ChangesInLast24h,
 	}
@@ -91,20 +71,8 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		return withReason(base, ActionScaleUp, "saturated")
 
 	case a.Underutilized:
-		// Checked first, before cooldown/guardrails: with the shipped Phase
-		// 1 configuration, a quiet full down-window must never reach any
-		// write path, full stop — not "reach it but then get clamped by
-		// something else." The candidate demand is still computed and
-		// surfaced (issue #14: "optionally retaining the candidate
-		// recommendation for observability") so the journal/metrics show
-		// what *would* have happened, without it ever becoming a target.
-		// Demand is the effective (IOPS-or-bandwidth, whichever binds)
-		// figure, not IOPSP95Down alone (issue #17) — NBS-PL2 ties
-		// provisioned IOPS and bandwidth at a fixed ratio, so a target
-		// sized from served ops/s alone can undersize the bandwidth
-		// ceiling a large-block, low-ops/s workload still needs.
-		// a.EffectiveDemandP95Down is already the properly-aligned
-		// per-sample max, not a max of two separately-computed percentiles.
+		// The capability gate precedes cooldown and guardrails so disabled scale-down never reaches actuation.
+		// Preserve effective demand only as an observable recommendation.
 		base.Demand = a.EffectiveDemandP95Down
 		if !pd.allowScaleDown {
 			return withReason(base, ActionNoAction, "scale_down_disabled")
@@ -124,20 +92,8 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		return withReason(base, ActionScaleDown, "underutilized")
 
 	default:
-		// Distinguish *why* neither verdict fired (issue #15, extended
-		// pre-merge review) — "no_signal" alone conflated four very
-		// different situations in the journal: no sample has ever arrived
-		// for this disk at all, data arrived before but is now too old to
-		// trust, a window that hasn't accumulated enough history yet, and
-		// a genuinely quiet-but-fresh-and-full disk with nothing to do.
-		// The first three are transient/operational; only the fourth is
-		// the disk actually behaving. no_data is checked first — a.Fresh
-		// is false (zero value) in that case too, so ordering matters:
-		// without this case ahead of it, a disk that has simply never
-		// been sampled would misreport as metrics_stale, implying data
-		// once flowed and has since gone stale, which is a different
-		// operational fact (and a different fix) than never having
-		// received any data at all.
+		// Ordering distinguishes cold start, stale data, incomplete windows, and a real no-signal state.
+		// HasData must precede Fresh because both are false during cold start.
 		switch {
 		case !a.HasData:
 			return withReason(base, ActionNoAction, "no_data")
@@ -157,9 +113,7 @@ func withReason(d Decision, action Action, reason string) Decision {
 	return d
 }
 
-// headroomCeiling is the disk-level ceiling from every source that bounds
-// it (design.md §4.6, NFR-5): the platform's own max, the user's
-// policy.limits.max_iops, and the VM's remaining aggregate pool.
+// headroomCeiling combines platform, policy, and VM aggregate limits.
 func headroomCeiling(vm VMState, p EffectivePolicy) int64 {
 	ceiling := int64(platformMaxIOPS)
 	if p.MaxIOPS < ceiling {
@@ -172,22 +126,11 @@ func headroomCeiling(vm VMState, p EffectivePolicy) int64 {
 	return ceiling
 }
 
-// demand implements design.md §4.5's two regimes. The closed-regime
-// !a.BaselineEstablished branch is defensive, not reachable through the
-// real pipeline: analyzer.Analyze always sets BaselineEstablished the same
-// cycle WindowFullUp first becomes true, and Saturated already requires
-// WindowFullUp — Saturated ⟹ BaselineEstablished by construction (the baseline
-// invariant in docs/design.md §4.4). It stays here so Decide never divides by zero if ever
-// handed an Analysis built by hand in a test that violates the invariant.
+// demand uses queue growth for open workloads and latency ratio for closed workloads.
+// The missing-baseline branch defensively avoids division by zero for malformed Analysis values.
 func demand(a analyzer.Analysis) (float64, bool) {
-	// a.QueueGrowthRateValid gates this sum (issue #18): ServedIOPS is
-	// ops/s, and the open-workload formula is only dimensionally valid
-	// when QueueGrowthRate is too. Analyzer sets Valid=false whenever the
-	// up-window's QueueDepth isn't ops-denominated (today, only reachable
-	// once a future platform source can deliver QueueDepthBytes) — never
-	// reach here treating a bytes/s reading as if it were ops/s. An
-	// invalid growth rate falls through to the closed-workload regime
-	// below, the same as a growth rate that simply isn't above threshold.
+	// Queue growth can be added to served IOPS only when both are ops-denominated.
+	// Invalid units fall back to the closed-workload regime.
 	if a.QueueGrowthRateValid && a.QueueGrowthRate > queueGrowthThreshold {
 		return a.ServedIOPS + a.QueueGrowthRate, true
 	}
@@ -202,27 +145,13 @@ func demand(a analyzer.Analysis) (float64, bool) {
 	return a.ServedIOPS * ratio, true
 }
 
-// floorTo100 and ceilTo100 round toward the 100-multiple grid in the
-// direction that keeps a bound a bound: a value already known to be <= some
-// upper limit must floor (rounding up could push it back over); a value
-// already known to be >= some lower limit must ceil (rounding down could
-// push it back under). ceiling, MaxIOPS, MinIOPS and current are always
-// already on the grid (config validation, and every value this package
-// itself ever produces) — only vm.SiblingP95IOPS (a measured p95, not an
-// IOPS setting) and ratio*current (ratio is a user float, not necessarily
-// grid-preserving) can land off it, which is exactly why these exist.
+// floorTo100 and ceilTo100 preserve upper and lower bounds while aligning to billing steps.
+// Measured and ratio-derived inputs may be off-grid even though configured limits are not.
 func floorTo100(v float64) int64 { return int64(math.Floor(v/billingStepIOPS)) * billingStepIOPS }
 func ceilTo100(v float64) int64  { return int64(math.Ceil(v/billingStepIOPS)) * billingStepIOPS }
 
-// guardrails is the last line before any write (design.md §3.2/§4.6/NFR-5).
-// The raw demand-based value is ceiled first — never undershoot a computed
-// need. Upper bounds (ceiling, and the ratio cap on scale-up) then floor;
-// lower bounds (minIOPS, and the ratio floor on scale-down) then ceil — see
-// floorTo100/ceilTo100. Because every intermediate value this function
-// produces is already grid-aligned, the final min/max clamp between them
-// stays grid-aligned too, so there is no re-rounding step to get wrong.
-// changed=false means there is no meaningful write to make (clamped back
-// to current, or the remaining delta is below minChangeIOPS).
+// guardrails aligns demand upward, upper bounds downward, and lower bounds upward.
+// changed is false when clamping returns to current or the remaining delta is below the minimum.
 func guardrails(raw float64, current, ceiling, minIOPS int64, ratio float64, minChangeIOPS int64) (int64, bool) {
 	if raw < 0 {
 		raw = 0

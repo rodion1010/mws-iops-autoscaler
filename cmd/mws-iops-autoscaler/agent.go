@@ -23,55 +23,24 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/telemetry"
 )
 
-// Agent wires design.md §3.1's whole pipeline together: Discovery/Registry
-// (slow path, DiscoveryInterval) → Sampler (fast path, CollectionInterval)
-// → Analyzer → Decider → Actuator (reconcile, ReconcileInterval), with
-// State/Journal/Observability on the side. It is the orchestrator M0-M5
-// deliberately left unbuilt — every package above is pure and testable on
-// its own; this is where their I/O ends meet.
+// Agent coordinates discovery, sampling, analysis, decisions, writes, state, and observability.
 type Agent struct {
 	cfg      *config.Config
 	resolved *config.ResolvedConfig
 	vmName   string
 	dryRun   bool
 
-	// allowScaleDown is defense in depth for issue #14's Phase 1 gate:
-	// PolicyDecider already refuses to ever return ActionScaleDown when
-	// its own allowScaleDown is false, so this check should never fire in
-	// practice — but Decider is an interface, and Agent must not simply
-	// trust whatever implementation it was handed to have gotten the gate
-	// right. Set from the same single constructor argument as the
-	// Decider's own (main.go) — one capability, not two independently
-	// maintained copies of it.
+	// Enforced again at actuation because Decider is replaceable.
 	allowScaleDown bool
 
-	// maxDiscoveryAge bounds how old the last successful discover() may be
-	// before reconcile refuses to act on it (issue #15's "fail closed on
-	// stale... discovery snapshots"). Unlike sample staleness, a failed
-	// discover() call is immediately visible (readiness.SetDiscoverySucceeded
-	// goes false the same cycle) — this guard exists for the case that
-	// matters anyway: reconcile keeps running against the last known-good
-	// a.managed snapshot while discovery has been failing, potentially for
-	// a long time, and a disk's Current value or its very presence on the
-	// VM may no longer be accurate.
+	// Maximum age of the last successful discovery before reconcile fails closed.
 	maxDiscoveryAge time.Duration
 
-	// maxSampleAge/maxSampleGap are the same issue #15 freshness bounds as
-	// maxDiscoveryAge, but for the metrics path — derived once in main.go
-	// from runtime.collection_interval and threaded into every disk's
-	// EvaluationPolicy each reconcile cycle, rather than being a per-disk
-	// policy field: freshness is a property of the sampling pipeline, not
-	// something a user tunes per disk.
+	// Sampling freshness bounds are process-wide, not per-disk policy.
 	maxSampleAge time.Duration
 	maxSampleGap time.Duration
 
-	// guestPathVerifier confirms a disk's guest device is resolvable and
-	// present in /proc/diskstats before discover() admits it to the
-	// managed set (issue #4) — a narrow function type, not a dependency on
-	// *metrics.GuestSource's concrete type, so this stays swappable the
-	// same way every other pipeline stage here is. Wired from
-	// (*metrics.GuestSource).VerifyPath in main.go; nil is a valid value
-	// used by tests that don't exercise discover() at all.
+	// Optional local-mode check that the guest device resolves and appears in diskstats.
 	guestPathVerifier func(metrics.DiskRef) error
 
 	client    compute.Client
@@ -89,26 +58,10 @@ type Agent struct {
 	iopsPool             int64
 	lastDiscoverySuccess time.Time
 
-	// managedValid is false the instant any discover() call fails, and
-	// true only once one has since succeeded — a fatal discovery error
-	// (including an unmatched disks.selected device_name, issue #5
-	// reopened) must stop reconcile from acting on the previous managed
-	// set immediately, not merely once maxDiscoveryAge eventually elapses.
-	// maxDiscoveryAge still matters independently: it catches the case
-	// this flag cannot (discovery having simply stopped being called at
-	// all), so reconcile checks both.
+	// Cleared immediately on discovery failure; separate from age-based staleness.
 	managedValid bool
 
-	// generation counts successful discover() calls only — bumped
-	// alongside managed/iopsPool/lastDiscoverySuccess, in the same
-	// critical section, so a generation change is always exactly "a).
-	// managed/iopsPool were just replaced." reconcile() snapshots it at
-	// the start of a cycle and checks it again after every actuate() call:
-	// a forced rediscovery from a concurrent-modification conflict
-	// (compute.ErrConcurrentModification) bumps it mid-cycle, and every
-	// decision this cycle already made was computed from data that
-	// generation now supersedes — the rest of the cycle must not act on
-	// it either.
+	// Successful discovery generation; a mid-cycle change aborts remaining decisions.
 	generation int64
 }
 
@@ -116,17 +69,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.discover(ctx); err != nil {
 		return fmt.Errorf("initial discovery: %w", err)
 	}
-	// Reconcile any budget reservation left pending by a previous run that
-	// crashed before resolving it (issue #10) — must happen after the
-	// first successful discover() (it needs a.managed to route live-state
-	// reads) and before the first reconcile() (which needs a trustworthy
-	// budget count).
+	// Resolve crash-left budget reservations before the first decision cycle.
 	a.reconcilePendingBudget(ctx)
 
-	// First sample is taken immediately too, so the first reconcile after
-	// startup isn't waiting a full CollectionInterval before it has
-	// anything at all (it will still be cold-start-empty per NFR-9 either
-	// way — Analyze needs a full window, not just one sample).
+	// Prime sampling immediately; window readiness still prevents cold-start actions.
 	if err := a.sampler.Tick(ctx); err != nil {
 		log.Printf("sampler: initial tick: %v", err)
 		a.readiness.SetSourceReachable(false)
@@ -162,12 +108,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
-// discover is design.md §4.1's slow path: read the VM, apply the
-// selection strategy (registry.Select), and hand the resulting set to the
-// Sampler. Errors here mark the process not-ready (health.Readiness) but
-// never crash the loop — a transient Compute API failure must not take
-// down an otherwise-working agent (design.md §6.1's failure-mode table:
-// "retry with backoff; decisions queue but never stack up").
+// discover refreshes managed disks and invalidates the snapshot on fatal discovery errors.
 func (a *Agent) discover(ctx context.Context) error {
 	vm, skipped, err := compute.Discover(ctx, a.client, a.vmName)
 	if err != nil {
@@ -180,16 +121,6 @@ func (a *Agent) discover(ctx context.Context) error {
 		a.telemetry.RecordDiscoverySkipped(s.Alias, s.Category)
 	}
 
-	// An unmatched disks.selected device_name is now a hard error, not a
-	// logged omission (issue #5, reopened): registry.Select's "selected"
-	// branch never returns a non-nil err alongside a nil missing, and
-	// never returns a non-nil missing alongside a nil err — the two
-	// possibilities the old code handled separately (fatal vs. "log and
-	// continue with a partial set") have collapsed into one. Returning
-	// here means a.managed/a.sampler.SetDisks are never reached, so the
-	// previous (still valid) managed set is left in place rather than
-	// replaced by a partial one — and SetDiscoverySucceeded(false) makes
-	// that visible on /readyz, exactly as this issue requires.
 	managed, _, err := registry.Select(vm, a.cfg.Disks, a.resolved)
 	if err != nil {
 		a.readiness.SetDiscoverySucceeded(false)
@@ -197,15 +128,7 @@ func (a *Agent) discover(ctx context.Context) error {
 		return err
 	}
 
-	// Local mode's guest-path verification (issue #4): a disk that passed
-	// every Compute-API-side check in compute.Discover can still be
-	// unmanageable if its /dev/disk/by-id/mws-<deviceName> symlink doesn't
-	// resolve, or its kernel device has no /proc/diskstats entry —
-	// GuestSource.Sample would otherwise silently emit no sample for it,
-	// forever, with no diagnosis beyond an ever-growing
-	// metric_staleness_seconds. Verified once here, up front, with a
-	// specific reason, instead of left to manifest later as an
-	// indistinguishable "no data" stream.
+	// Exclude disks whose guest path cannot produce metrics.
 	if a.guestPathVerifier != nil {
 		verified := managed[:0]
 		for _, m := range managed {
@@ -234,21 +157,9 @@ func (a *Agent) discover(ctx context.Context) error {
 	a.mu.Unlock()
 
 	a.readiness.SetDiscoverySucceeded(true)
-	// SourceReachable is deliberately not touched here (issue #15): the
-	// Compute API and the metrics source are different dependencies even
-	// in `local` mode (the guest source reads /proc/diskstats, which can
-	// fail — permissions, a missing disk — independent of Compute API
-	// reachability). It is driven solely by sampler.Tick()'s own success,
-	// in Run().
+	// Compute API and metric-source reachability are independent readiness signals.
 
-	// Budget compaction scheduled here (issue #10, per Budget.Compact's
-	// own doc comment: "once per discovery cycle... is a natural fit —
-	// far less often than every reconcile"). A failure here is logged but
-	// not treated as making the budget unhealthy: Compact only ever
-	// replaces b.events with the freshly-written set after writeAll
-	// succeeds, so a failed attempt leaves the in-memory budget exactly as
-	// correct as it was before — only the on-disk file's pruning is
-	// deferred to the next cycle, not the budget's own accuracy.
+	// Compact opportunistically; failure leaves the in-memory budget intact.
 	if err := a.tracker.Compact(time.Now()); err != nil {
 		log.Printf("discover: budget compaction failed (will retry next cycle): %v", err)
 	}
@@ -256,16 +167,7 @@ func (a *Agent) discover(ctx context.Context) error {
 	return nil
 }
 
-// journalDiscoveryStale writes one NoAction/discovery_stale journal record
-// per disk still sitting in the (now-untrusted) managed snapshot, when
-// reconcile bails before ever reaching Decide (pre-merge review: "why
-// didn't it scale" must always be answerable from the journal alone,
-// design.md §4.3 — a cycle skipped for stale discovery previously emitted
-// nothing at all, a silent gap in that guarantee). No Decide call happens
-// on this path, so there is no real Analysis or guardrail state to
-// report — Inputs/VMHeadroomIOPS/BudgetRemaining stay zero-valued,
-// honestly reflecting that this cycle never looked at any of it, rather
-// than fabricating values Decide never computed.
+// journalDiscoveryStale emits one no-action record per disk without fabricating analysis inputs.
 func (a *Agent) journalDiscoveryStale(managed []registry.ManagedDisk, now time.Time) {
 	for _, m := range managed {
 		d := decider.Decision{
@@ -282,10 +184,6 @@ func (a *Agent) journalDiscoveryStale(managed []registry.ManagedDisk, now time.T
 	}
 }
 
-// diskRef builds m's metrics.DiskRef, including IncarnationID — the one
-// place this construction happens, so every caller (guest-path
-// verification, Sampler.SetDisks, reconcile's own Samples lookup) derives
-// the Sampler's identity key the same way (pre-merge review).
 func (a *Agent) diskRef(m registry.ManagedDisk) metrics.DiskRef {
 	return metrics.DiskRef{
 		DiskID:        m.Disk.DiskName,
@@ -295,41 +193,23 @@ func (a *Agent) diskRef(m registry.ManagedDisk) metrics.DiskRef {
 	}
 }
 
-// invalidateManaged marks the currently-cached managed set unusable —
-// called from every discover() failure path so a fatal discovery error
-// (including an unmatched disks.selected device_name) stops reconcile from
-// acting on the stale snapshot immediately, rather than waiting for
-// maxDiscoveryAge to eventually elapse. Deliberately does not touch
-// a.managed/a.iopsPool/a.generation themselves: the previous values stay
-// available for observability (e.g. a log line naming what was last
-// managed), guarded by the validity flag rather than cleared outright.
+// invalidateManaged prevents reconcile from using cached disks while retaining them for diagnostics.
 func (a *Agent) invalidateManaged() {
 	a.mu.Lock()
 	a.managedValid = false
 	a.mu.Unlock()
 }
 
-// skipReasonGuestPathUnresolvable mirrors the compute package's
-// SkipReason* constants (a stable, low-cardinality telemetry label) for
-// the one skip category that originates here rather than in
-// compute.Discover — the compute package has no concept of a guest
-// filesystem to check.
 const skipReasonGuestPathUnresolvable = "guest_path_unresolvable"
 
-// hasManagedDisks reports whether any disk currently passed every
-// eligibility check (issue #4's "readiness must not report a usable
-// metrics path when no managed disk can produce a sample") — read under
-// the same lock discover()/reconcile() use for a.managed.
+// hasManagedDisks distinguishes reachable metrics from usable disk coverage.
 func (a *Agent) hasManagedDisks() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.managed) > 0
 }
 
-// reconcile is design.md §4.3, run once per disk per cycle. Every disk is
-// analyzed first, in one pass, before any decision is made — VM headroom
-// (design.md §4.6) needs every sibling's own Analysis already computed,
-// not recomputed per disk.
+// reconcile analyzes all disks first so VM headroom uses one cycle-wide snapshot.
 func (a *Agent) reconcile(ctx context.Context) {
 	a.mu.Lock()
 	managed := append([]registry.ManagedDisk(nil), a.managed...)
@@ -341,38 +221,17 @@ func (a *Agent) reconcile(ctx context.Context) {
 
 	now := time.Now()
 
-	// Polled once per cycle rather than pushed from Tracker itself (issue
-	// #10) — keeps Tracker decoupled from health/telemetry the same way
-	// every other pure package here stays decoupled from its observers.
 	healthy := a.tracker.Healthy()
 	a.readiness.SetBudgetHealthy(healthy)
 	a.telemetry.RecordBudgetHealthy(healthy)
 
-	// A fatal discovery error (including an unmatched disks.selected
-	// device_name, issue #5 reopened) must stop reconcile from acting on
-	// the previous managed set immediately — not merely once
-	// maxDiscoveryAge eventually elapses, which could be minutes away.
-	// invalidateManaged() clears this the instant any discover() call
-	// fails; a subsequent successful discover() is what sets it true
-	// again (pre-merge review finding).
 	if !managedValid {
 		log.Printf("reconcile: managed snapshot invalidated by the last discover() call failing — skipping this cycle until the next successful discovery")
 		a.journalDiscoveryStale(managed, now)
 		return
 	}
 
-	// Fail closed on a stale discovery snapshot (issue #15): a.managed
-	// keeps whatever discover() last populated even while discovery has
-	// since started failing (readiness.SetDiscoverySucceeded already
-	// reports that), so reconcile must not keep acting on it indefinitely.
-	// lastDiscovery.IsZero() (never discovered) is deliberately included —
-	// Run() always discovers once before the first reconcile, so reaching
-	// here with a zero value can only mean that first discover() itself
-	// failed and this cycle's managed list is empty/stale anyway. This is
-	// a distinct, complementary guard from managedValid above: it catches
-	// discovery having simply stopped being *called* at all (a stuck
-	// ticker, a wedged goroutine), which a validity flag alone — set once
-	// and never revisited — could never detect on its own.
+	// The age guard also catches a stuck discovery loop whose last call succeeded.
 	if age := now.Sub(lastDiscovery); lastDiscovery.IsZero() || age > a.maxDiscoveryAge {
 		log.Printf("reconcile: discovery snapshot stale (age=%s, max=%s) — skipping this cycle (issue #15)", age, a.maxDiscoveryAge)
 		a.journalDiscoveryStale(managed, now)
@@ -384,54 +243,25 @@ func (a *Agent) reconcile(ctx context.Context) {
 		diskID := m.Disk.DiskName
 		samples := a.sampler.Samples(a.diskRef(m))
 		ep := toEvaluationPolicy(m.Policy.Advanced, a.maxSampleAge, a.maxSampleGap)
-		// m.Disk.IdentityKey(), not the bare DiskName, keys the analyzer's
-		// own per-disk baseline state — the same key the Sampler's ring
-		// buffer uses (pre-merge review). A disk deleted and recreated
-		// under the same name must establish its own latency baseline from
-		// its own samples, never inherit the previous incarnation's frozen
-		// one; a fresh IncarnationID makes it a distinct key that starts
-		// cold, exactly as the Sampler already does for its buffer.
+		// Baselines use the same incarnation-aware key as sample storage.
 		an := a.analyzer.Analyze(m.Disk.IdentityKey(), samples, ep, m.Disk.IOPS, now)
-		// Analyze's diskID parameter above is doing double duty as the
-		// analyzer's own internal baseline-state map key — it is not meant
-		// to be display-facing, and Analysis.DiskID is simply whatever that
-		// parameter was (analyzer.go: out := Analysis{DiskID: diskID}).
-		// Restored to the plain, human-readable name here so a.DiskID never
-		// carries IdentityKey()'s "\x00"-joined composite form into any
-		// future consumer, preserving the display-facing identity invariant in
-		// docs/design.md §5.2 for Decision.DiskID, journal and telemetry. Nothing today reads Analysis.DiskID (Decide's diskID
-		// comes from the plain diskID param below, not from an.DiskID), but
-		// leaving the composite key on an exported field it's not built for
-		// is a footgun for the next thing that does.
+		// Keep exported analysis identity human-readable; IdentityKey is internal state only.
 		an.DiskID = diskID
 		analyses[diskID] = an
-		// Only once this disk has ever had a real sample (pre-merge
-		// review) — an.SampleAge is meaningless before that (nothing to
-		// measure the age of), and publishing it as 0 would read as
-		// maximally fresh, the opposite of the true "no data yet" state.
-		// A cold-start disk simply has no metric_staleness_seconds series
-		// until its first sample lands, rather than a misleading 0.
+		// Publish staleness only after the first real sample.
 		if an.HasData {
 			a.telemetry.RecordStaleness(diskID, an.SampleAge.Seconds())
 		}
 	}
 
-	// Aggregated across every disk decided this cycle and reported once,
-	// after the loop (issue #19) — vm_cap_reached is a VM-wide gauge with
-	// no disk label, so setting it per-disk inside the loop let whichever
-	// disk was processed last silently overwrite every earlier disk's
-	// result.
+	// Aggregate the VM-wide gauge once to avoid last-disk-wins.
 	anyVMCapReached := false
 
 	for _, m := range managed {
 		diskID := m.Disk.DiskName
 		an := analyses[diskID]
 
-		// Sibling p95 aggregation (design.md §4.6): summing each sibling's
-		// own p95 rather than a joint-timestamp p95 across siblings is the
-		// simpler, already-accepted-as-imperfect method — correlated
-		// bursty siblings can make this optimistic (design.md §9's open
-		// question #6), not something this pass resolves.
+		// Sum sibling p95s; correlated bursts remain a documented approximation.
 		var siblingP95 float64
 		for otherID, otherAn := range analyses {
 			if otherID != diskID {
@@ -441,11 +271,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 		vm := decider.VMState{IOPSPool: iopsPool, SiblingP95IOPS: siblingP95}
 
 		ep := toEffectivePolicy(m.Policy)
-		// m.Disk.IdentityKey(), not diskID — cooldown state must not
-		// survive a delete-and-recreate under the same DiskName
-		// (pre-merge review). diskID itself stays the plain resource
-		// name below, since Decision.DiskID feeds the journal and
-		// telemetry labels, which must stay human-readable.
+		// Cooldown and budget state must not survive disk replacement.
 		gState := a.tracker.State(m.Disk.IdentityKey(), now)
 
 		d := a.decider.Decide(diskID, m.Disk.IOPS, an, vm, ep, gState, now)
@@ -464,18 +290,8 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 		a.actuate(ctx, m, d, now)
 
-		// actuate() forces a rediscovery on either ErrConcurrentModification
-		// or ErrIncarnationMismatch. If it succeeded, a.generation bumped and
-		// the managed/iopsPool snapshot this cycle decided against is
-		// superseded. If it *failed*, invalidateManaged() cleared
-		// a.managedValid instead — the snapshot is now suspect (a disk's
-		// Current, or its very presence on the VM, may no longer be
-		// accurate) even though generation did not move. Either way every
-		// decision already made this cycle — every siblingP95 and vm value
-		// above — was computed from data that no longer holds. Abort the
-		// rest of the cycle rather than keep deciding (and actuating)
-		// against it; the next reconcile tick starts fresh once discovery
-		// recovers.
+		// Rediscovery success changes generation; failure invalidates the snapshot.
+		// Either outcome aborts the remaining cycle.
 		a.mu.Lock()
 		currentGeneration := a.generation
 		stillValid := a.managedValid
@@ -491,41 +307,22 @@ func (a *Agent) reconcile(ctx context.Context) {
 
 func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.Decision, now time.Time) {
 	diskID := m.Disk.DiskName
-	// identity, not diskID, is used for every Tracker call below (budget
-	// reservation, resize-in-progress, cooldown) — samples/cooldown/budget
-	// must not survive a delete-and-recreate under the same DiskName
-	// (pre-merge review). diskID itself remains the plain resource name,
-	// used only for logging here.
+	// Tracker state uses incarnation-aware identity; logs use the resource name.
 	identity := m.Disk.IdentityKey()
 
 	if d.Action == decider.ActionScaleDown && !a.allowScaleDown {
-		// Defense in depth (issue #14) — PolicyDecider should never
-		// produce this, so reaching here means the Decider implementation
-		// itself disagrees with this process's own phase gate. Refuse
-		// loudly rather than writing, and make it visible the same way
-		// any other write-blocking outcome is.
+		// A custom Decider cannot bypass the process capability gate.
 		log.Printf("actuate %s (%s): refusing ActionScaleDown — scale-down is disabled in this build (issue #14)", diskID, m.Disk.DeviceName)
 		return
 	}
 
 	if !a.tracker.Healthy() {
-		// Fail closed (issue #10): a prior budget-persistence failure,
-		// this process's whole lifetime, means the durable count can no
-		// longer be trusted. Decide would already refuse via
-		// budget_exhausted (Tracker.State reports MaxInt), but checking
-		// here too avoids even attempting the ReserveChange call below,
-		// which would just fail again for the same reason.
+		// Fail closed while durable budget state is unhealthy.
 		log.Printf("actuate %s (%s): refusing to write — the change budget is unhealthy after a prior persistence failure, fail closed until restart (issue #10)", diskID, m.Disk.DeviceName)
 		return
 	}
 
-	// Reserve the budget slot before the write is even attempted (issue
-	// #10) — never after, which is what let a crash between the
-	// platform confirming a write and this process recording it silently
-	// undercount a real change against the hard cap. idempotencyKey is
-	// generated once here and threaded through both the reservation and
-	// the write itself, so a startup reconciliation can always find the
-	// exact record a given attempt belongs to.
+	// Reserve durably before the write and reuse its idempotency key.
 	idempotencyKey := uuid.NewString()
 	if err := a.tracker.ReserveChange(identity, idempotencyKey, d.Current, d.Target, now); err != nil {
 		log.Printf("actuate %s (%s): failed to durably reserve a budget slot before writing — refusing to write: %v", diskID, m.Disk.DeviceName, err)
@@ -545,13 +342,7 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	a.tracker.EndResize(identity)
 	if err != nil {
 		if a.dryRun {
-			// A dry run can never ambiguously succeed server-side: an
-			// independent disk's error comes from the platform's own
-			// validateOnly call, which by contract never mutates even if
-			// the response is lost; a dependent disk's write function
-			// returns before ever calling UpdateDependentDisk at all
-			// (docs/design.md §4.7, no server-side dry run exists for it). Safe to
-			// release unconditionally — there is no live state to check.
+			// Dry-run errors cannot hide a mutation, so the reservation is releasable.
 			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
 				log.Printf("actuate %s (%s): failed to release the dry-run budget reservation after an error: %v", diskID, m.Disk.DeviceName, rerr)
 			}
@@ -559,26 +350,12 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 			return
 		}
 
-		// A pre-write refusal is unambiguous where a bare write error is
-		// not: both write paths return ErrConcurrentModification and
-		// ErrIncarnationMismatch *before* ever sending the mutating
-		// request, so nothing landed. The reservation must be released
-		// outright — never resolved from a live read (which for a value
-		// that has since moved, or a replacement disk, can say nothing
-		// about a write that never happened) and never left pending, which
-		// would silently spend a budget slot on a change that was refused.
+		// Typed pre-write refusals prove that no mutation was sent.
 		if errors.Is(err, compute.ErrConcurrentModification) {
 			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
 				log.Printf("actuate %s (%s): failed to release the reservation for a write refused pre-flight (concurrent modification): %v", diskID, m.Disk.DeviceName, rerr)
 			}
-			// The live value moved since this Decision's snapshot (issue
-			// #16), so d.Target is no longer meaningful. Force a rediscovery
-			// now rather than waiting up to DiscoveryInterval, so the next
-			// reconcile cycle decides again from a snapshot no older than
-			// this moment instead of retrying the same stale target. A
-			// rediscovery failure here is logged by discover() itself and,
-			// via invalidateManaged(), stops the current reconcile cycle
-			// from acting on the now-suspect snapshot.
+			// Refresh immediately; the target is no longer meaningful against live state.
 			log.Printf("actuate %s (%s): %v — forcing rediscovery before the next decision", diskID, m.Disk.DeviceName, err)
 			if derr := a.discover(ctx); derr != nil {
 				log.Printf("actuate %s (%s): rediscovery after conflict failed: %v", diskID, m.Disk.DeviceName, derr)
@@ -586,26 +363,11 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 			return
 		}
 		if errors.Is(err, compute.ErrIncarnationMismatch) {
-			// The disk this Decision targeted was deleted and recreated
-			// under the same name — a genuinely different resource. Nothing
-			// was written, so release the reservation.
+			// No mutation was sent.
 			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
 				log.Printf("actuate %s (%s): failed to release the reservation for a write refused against a replacement disk: %v", diskID, m.Disk.DeviceName, rerr)
 			}
-			// Force a rediscovery, mirroring the concurrent-modification
-			// branch above — not to retry against the disk this Decision
-			// targeted (there is nothing to retry: that resource is gone),
-			// but because the *whole snapshot* this reconcile cycle is
-			// working from is now proven wrong for at least this one disk.
-			// Every sibling's VMState (siblingP95IOPS, the VM's IOPS pool)
-			// was computed from the same captured-at-cycle-start managed
-			// set, so it is exactly as suspect as it would be after a
-			// concurrent-modification conflict. A successful rediscovery
-			// bumps a.generation and picks up the replacement's own fresh
-			// identity; a failed one invalidates the snapshot via
-			// invalidateManaged(). Either way reconcile's own
-			// generation/managedValid check below aborts the rest of this
-			// cycle rather than act on now-stale data.
+			// Replacement invalidates the cycle-wide disk and VM snapshot.
 			log.Printf("actuate %s (%s): %v — forcing rediscovery to pick up the replacement before the next decision", diskID, m.Disk.DeviceName, err)
 			if derr := a.discover(ctx); derr != nil {
 				log.Printf("actuate %s (%s): rediscovery after incarnation mismatch failed: %v", diskID, m.Disk.DeviceName, derr)
@@ -613,27 +375,13 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 			return
 		}
 
-		// A real write's error does not prove the change never landed —
-		// the platform may have applied it before the response reached
-		// this process (timeout, connection reset, etc). Releasing
-		// against d.Current here without checking would reopen exactly
-		// the undercounting gap ReserveChange-before-write exists to
-		// close: Budget.Release's own contract requires live state
-		// verified to still match Before, which an error alone can never
-		// establish. Resolve the reservation from a fresh live read
-		// instead — the same three-way resolution reconcilePendingBudget
-		// already applies at startup for an identically ambiguous
-		// situation.
+		// A transport error is ambiguous; resolve from fresh state before releasing budget.
 		a.resolveReservationAfterWriteFailure(ctx, m, d, idempotencyKey, now)
 		log.Printf("actuate %s (%s): %v", diskID, m.Disk.DeviceName, err)
 		return
 	}
 
 	if a.dryRun {
-		// Nothing real happened — release the reservation a dry run's own
-		// probe still had to make (Reserve happens before Apply
-		// regardless of dryRun, so this path stays uniform rather than
-		// special-casing dry-run out of the crash-safety flow).
 		if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
 			log.Printf("actuate %s (%s): failed to release the dry-run budget reservation: %v", diskID, m.Disk.DeviceName, rerr)
 		}
@@ -641,10 +389,7 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 		return
 	}
 
-	// Adopt the verified applied value immediately (issue #16) — waiting
-	// for the next discover() to notice would leave a.managed's Current
-	// stale for up to DiscoveryInterval, exactly the same class of gap
-	// this issue exists to close for external changes.
+	// Adopt the verified value immediately instead of waiting for discovery.
 	a.mu.Lock()
 	for i := range a.managed {
 		if a.managed[i].Disk.DiskName == diskID {
@@ -654,44 +399,18 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	}
 	a.mu.Unlock()
 
-	// disk_provisioned_iops only ever moves on a write verified to have
-	// landed (issue #19) — this is that verification point, the same one
-	// issue #16's comment above just adopted into a.managed.
 	a.telemetry.RecordAppliedIOPS(diskID, a.vmName, string(m.Disk.Class), applied.IOPS)
 
 	if err := a.tracker.ConfirmChange(idempotencyKey); err != nil {
-		// The write landed (verified above) but confirming that fact
-		// durably failed — the reservation stays "pending" on disk, which
-		// is still safe (issue #10: pending counts the same as confirmed)
-		// and will resolve itself via the next restart's reconciliation.
+		// Pending still counts against budget and is reconciled after restart.
 		log.Printf("actuate %s (%s): failed to durably confirm a successful write — the budget reservation stays pending until the next restart's reconciliation: %v", diskID, m.Disk.DeviceName, err)
 	}
 	a.tracker.RecordChange(identity, d.Action == decider.ActionScaleUp, now)
 	log.Printf("%s %s: %d -> %d (%s)", d.Action, m.Disk.DeviceName, d.Current, applied.IOPS, d.Reason)
 }
 
-// resolveReservationAfterWriteFailure re-reads diskID's live IOPS after a
-// real (non-dry-run) actuator.Apply error and resolves idempotencyKey's
-// reservation from that reading alone — never from the error, which cannot
-// distinguish "nothing was applied" from "applied, but the response never
-// reached this process." Exactly the same three-way resolution
-// reconcilePendingBudget already applies at startup for an identically
-// ambiguous situation (a crash instead of a single failed call), so this
-// reuses its logic rather than inventing a second one:
-//
-//   - live == d.Target: the write landed despite the error. Adopted into
-//     a.managed and confirmed the same way a verified success already is
-//     (issue #16) — the next cycle's decision must see reality, not a
-//     stale Current, and the reservation must count as the real change it
-//     was, not sit wrongly released.
-//   - live == d.Current: conclusively never landed. Released — this is
-//     the one case Budget.Release's own contract (live verified to still
-//     match Before) is actually satisfied.
-//   - anything else, including a failed read itself: left pending,
-//     fail closed. The live value cannot be explained by this attempt
-//     alone (most likely an unrelated external change, or the error
-//     genuinely was mid-write) — resolving it via reconcilePendingBudget
-//     at the next restart, not guessed at here.
+// resolveReservationAfterWriteFailure resolves an ambiguous write from fresh live state.
+// Target confirms and adopts, Current releases, and anything else remains pending.
 func (a *Agent) resolveReservationAfterWriteFailure(ctx context.Context, m registry.ManagedDisk, d decider.Decision, idempotencyKey string, now time.Time) {
 	diskID := m.Disk.DiskName
 	identity := m.Disk.IdentityKey()
@@ -728,22 +447,8 @@ func (a *Agent) resolveReservationAfterWriteFailure(ctx context.Context, m regis
 	}
 }
 
-// reconcilePendingBudget resolves every budget reservation a previous run
-// left unresolved (issue #10) — called once at startup, after the first
-// successful discover() has populated a.managed. For each pending
-// reservation whose disk is still managed, a fresh live read decides the
-// outcome: live current equal to the reservation's Target means the write
-// landed (Confirm); equal to Before means it never did (Release); neither
-// is ambiguous and is left pending — fail closed — rather than guessed
-// at. A disk no longer managed at all (detached/replaced, or — the case
-// this specific lookup exists to catch, pre-merge review — deleted and
-// recreated under the same DiskName as a genuinely different resource)
-// has nothing to verify against, so its reservation is also left as-is:
-// still counted, never silently dropped or matched against the wrong
-// disk. ev.DiskID is IdentityKey()'s composite form (ReserveChange is
-// always called with it, never bare DiskName), so this lookup keyed the
-// same way is what makes a stale reservation from a deleted disk's prior
-// incarnation correctly fail to match its same-named replacement.
+// reconcilePendingBudget resolves crash-left reservations from fresh live state.
+// Target confirms, Before releases, and ambiguity remains pending.
 func (a *Agent) reconcilePendingBudget(ctx context.Context) {
 	pending := a.tracker.PendingChanges()
 	if len(pending) == 0 {
@@ -791,11 +496,7 @@ func (a *Agent) reconcilePendingBudget(ctx context.Context) {
 	}
 }
 
-// liveCurrentIOPS reads diskID's actual current IOPS directly from the
-// Compute API, routed by class — used only for startup budget
-// reconciliation (issue #10), which must never trust a's own in-memory
-// snapshot for this: the whole point is verifying what really happened
-// while this process wasn't running.
+// liveCurrentIOPS reads current IOPS from the Compute API by disk class.
 func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (int64, error) {
 	switch m.Disk.Class {
 	case compute.ClassIndependent:
@@ -826,18 +527,7 @@ func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (in
 	}
 }
 
-// verifyLiveIncarnation fails a live-state read whose resource is a
-// different incarnation than the reservation/decision being resolved. A
-// disk deleted and recreated under the same name can sit at the same IOPS
-// as the old incarnation's Target, which would make a live read of the
-// *replacement* look like a verdict on the *original's* write — it is not:
-// nothing about the new disk's current value says whether the old disk's
-// write landed. Returning an error here routes both callers
-// (reconcilePendingBudget and resolveReservationAfterWriteFailure) into
-// their fail-closed "leave the reservation pending" branch. Only asserts a
-// mismatch when both incarnations are known, mirroring the write path's own
-// incarnationMatches: an absent metadata.id on either side degrades to the
-// pre-existing IOPS-only resolution rather than blocking it outright.
+// verifyLiveIncarnation rejects a known mismatch; unavailable IDs fall back to IOPS-only reconciliation.
 func verifyLiveIncarnation(diskName, expected, live string) error {
 	if expected == "" || live == "" || expected == live {
 		return nil

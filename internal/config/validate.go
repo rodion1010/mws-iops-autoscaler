@@ -10,18 +10,12 @@ import (
 	"time"
 )
 
-// Validate checks cfg against every rule in docs/configuration.md §8 and
-// returns all violations found, joined, or nil if none. Each error names the
-// field it complains about, per that section's own requirement.
-//
-// Unknown YAML keys are not checked here — Load rejects them at decode time
-// via strict decoding, before Validate ever sees the document.
+// Validate returns every configuration violation in deterministic, field-qualified form.
+// Unknown YAML keys are rejected earlier by strict decoding.
 func Validate(cfg *Config) error {
 	var errs []error
 
 	if cfg.Mode != "local" {
-		// Nothing past this point applies: fleet's config shape does not
-		// exist in this build (Phase 1 is local-only, PRD §6).
 		return fmt.Errorf("mode: %q is not supported in this build (fleet mode ships in Phase 4)", cfg.Mode)
 	}
 
@@ -37,8 +31,7 @@ func Validate(cfg *Config) error {
 
 	errs = append(errs, validateMetricsSource(cfg)...)
 
-	// Cross-field rules need the fully resolved policy, since a level may
-	// inherit the value on either side of the comparison.
+	// Cross-field rules use resolved values after inheritance.
 	resolved := Resolve(cfg)
 	errs = append(errs, validateResolvedPolicy("policy", resolved.VMPolicy)...)
 	for name, rp := range resolved.DiskPolicies {
@@ -51,45 +44,12 @@ func Validate(cfg *Config) error {
 	return errors.Join(errs...)
 }
 
-// minSamplesForWindowMirror duplicates internal/analyzer's own
-// minSamplesForWindow constant (config must not import analyzer —
-// design.md §3.3's decoupling, the same tradeoff internal/decider already
-// accepts for billingStepIOPS). Kept in sync by hand; both are
-// calibration-pending together (design.md §8.5).
+// minSamplesForWindowMirror mirrors analyzer's readiness floor without coupling packages.
+// Keep it synchronized with analyzer.minSamplesForWindow.
 const minSamplesForWindowMirror = 3
 
-// validateSamplerCapacity rejects a config whose runtime.metrics.collection_interval
-// is too long relative to the configured windows for the Sampler's ring
-// buffer to ever hold minSamplesForWindowMirror samples (issue #6,
-// reopened: "cross-validate collection cadence/windows/minimum samples so
-// an accepted config can eventually become evaluable"). It calls the same
-// ResolvedConfig.SamplerCapacity the orchestrator uses to size the real
-// buffer — one formula, checked here and used there, rather than two
-// independently-reasoned-about approximations that could disagree. Below
-// this floor, WindowFullUp/WindowFullDown (docs/design.md §4.2) can never become true
-// for any disk, for any window, no matter how long the agent runs: the
-// ring buffer would evict down to fewer samples than analyzer.Analyze's
-// own minimum before a window could ever fill.
-//
-// SamplerCapacity's own corrected formula (issue #7, reopened:
-// ceil(window/interval) + 1 + samplerCapacitySlackSamples) means this can
-// no longer actually fire for any positive window and interval — the
-// formula's own minimum output is 1+1+2=4, already above this function's
-// floor of 3. Kept anyway as defense in depth (this codebase's established
-// pattern — see e.g. Agent's own allowScaleDown double-check): if
-// SamplerCapacity's formula or its slack constant ever changes, this stays
-// the backstop that catches a config that would otherwise silently never
-// become evaluable, without requiring every future change to that formula
-// to remember this invariant on its own.
-//
-// This alone is not sufficient (pre-merge review, docs/design.md §4.2's third
-// refinement): SamplerCapacity sizes ONE buffer against only the single
-// longest scale_down_window across every policy, so a much shorter window
-// elsewhere — the VM policy's own scale_up_window, or a per-disk override
-// — can still be numerically unreachable at the same collection_interval
-// without this function ever detecting it. See
-// validateCollectionIntervalAgainstWindows, which checks that case
-// directly and independently, right below.
+// validateSamplerCapacity ensures the shared ring can retain the analyzer's minimum sample count.
+// The current capacity formula always satisfies this, so the check is a backstop against future changes.
 func validateSamplerCapacity(resolved *ResolvedConfig) []error {
 	if capacity := resolved.SamplerCapacity(); capacity < minSamplesForWindowMirror {
 		return []error{fmt.Errorf(
@@ -100,34 +60,9 @@ func validateSamplerCapacity(resolved *ResolvedConfig) []error {
 	return nil
 }
 
-// validateCollectionIntervalAgainstWindows rejects a config whose
-// runtime.metrics.collection_interval cannot possibly produce
-// minSamplesForWindowMirror samples within one SPECIFIC configured window
-// — scale_up_window or scale_down_window, on the VM policy or any per-disk
-// override — not merely the single longest window
-// SamplerCapacity/validateSamplerCapacity checks (pre-merge review).
-// collection_interval: 20m against the default scale_up_window: 5m passed
-// validation before this: the buffer's total capacity (sized against the
-// far longer default scale_down_window: 30m) was comfortably large, but at
-// most one real sample can ever fall inside a 5-minute trailing span when
-// consecutive samples are 20 minutes apart — WindowFullUp could then never
-// become true for that disk, no matter how long the agent ran.
-//
-// validateSamplerCapacity's ceil(window/interval)+1+slack formula cannot
-// catch this on its own: ceil() of a positive ratio is always >= 1
-// regardless of how disproportionate collection_interval is to window, so
-// that formula's output is always comfortably above minSamplesForWindowMirror
-// however long collection_interval actually is — it answers a different
-// question (how many buffer slots keep a window that CAN fill from being
-// evicted too early) than this one (can this specific window numerically
-// ever fill at all). This function uses floor, not ceil: at exact cadence,
-// a trailing window of span w can contain more than one real sample only
-// if at least one full collection interval fits inside it, i.e.
-// collection_interval <= window. Above that, consecutive real samples are
-// farther apart than the window itself, so at most one can ever land
-// inside it — analyzer.windowFull's minSamplesForWindow floor (3) can then
-// never be reached for that disk, for that direction, regardless of how
-// long the agent runs.
+// validateCollectionIntervalAgainstWindows checks every resolved window independently.
+// A buffer sized for a longer window does not make a shorter window evaluable when collection
+// cadence is too slow.
 func validateCollectionIntervalAgainstWindows(resolved *ResolvedConfig) []error {
 	interval := resolved.Runtime.CollectionInterval
 	if interval <= 0 {
@@ -139,18 +74,8 @@ func validateCollectionIntervalAgainstWindows(resolved *ResolvedConfig) []error 
 		if window <= 0 {
 			return // validateAdvancedRanges already rejects this
 		}
-		// interval must be strictly shorter than the window, not merely
-		// "not longer" (regression: an accepted cadence must be able to
-		// fill its window). At exactly window cadence a trailing span of
-		// that same length contains exactly two real samples — the newest
-		// and the one landing on its far boundary — and analyzer.windowFull
-		// needs minSamplesForWindowMirror (3) before any window is ever
-		// "full"; the boundary sample also leaves the span at exactly
-		// `window`, so trailingWindow never reaches back for a third. So a
-		// collection_interval equal to (or longer than) a window can never
-		// produce an evaluable window, however long the agent runs. A
-		// strictly shorter interval can: a natural or reached-back
-		// predecessor supplies the third sample.
+		// Equality still yields only two boundary samples; analyzer requires three.
+		// The interval must therefore be strictly shorter than every window.
 		if interval >= window {
 			errs = append(errs, fmt.Errorf(
 				"runtime.metrics.collection_interval: %s is not shorter than %s.advanced.evaluation.%s (%s) — "+
@@ -162,9 +87,7 @@ func validateCollectionIntervalAgainstWindows(resolved *ResolvedConfig) []error 
 	check("policy", "scale_up_window", resolved.VMPolicy.Advanced.ScaleUpWindow)
 	check("policy", "scale_down_window", resolved.VMPolicy.Advanced.ScaleDownWindow)
 
-	// Sorted for deterministic error ordering (map iteration order is not
-	// stable in Go) — matters for test assertions and for a human reading
-	// the same error list twice getting the same order both times.
+	// Stable ordering makes diagnostics and tests deterministic.
 	names := make([]string, 0, len(resolved.DiskPolicies))
 	for name := range resolved.DiskPolicies {
 		names = append(names, name)
@@ -180,8 +103,7 @@ func validateCollectionIntervalAgainstWindows(resolved *ResolvedConfig) []error 
 	return errs
 }
 
-// validateResolvedPolicy checks the range and cross-field rules that only
-// make sense once inheritance has been applied.
+// validateResolvedPolicy checks rules that require inherited values.
 func validateResolvedPolicy(path string, rp ResolvedPolicy) []error {
 	var errs []error
 
@@ -222,11 +144,7 @@ func validateResolvedPolicy(path string, rp ResolvedPolicy) []error {
 	return errs
 }
 
-// validateAdvancedRanges checks every advanced field against the finite
-// range or enum its meaning actually admits (issue #6) — everything here
-// previously passed Validate silently, including a threshold of 0 (a gate
-// that never opens or a target that permits zero headroom) and negative
-// durations/counts.
+// validateAdvancedRanges rejects non-finite, out-of-range, or unsupported advanced values.
 func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 	var errs []error
 
@@ -246,13 +164,7 @@ func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 	nonNegativeDuration("cooldown.scale_up", a.CooldownScaleUp)
 	nonNegativeDuration("cooldown.scale_down", a.CooldownScaleDown)
 
-	// finite guards every float check below against NaN/Inf (issue #6,
-	// reopened): a bare `v <= 0 || v > 1` silently lets NaN through, since
-	// every comparison against NaN is false — `NaN <= 0` is false and
-	// `NaN > 1` is false, so the "violation" branch never fires and NaN
-	// passes as if it were a valid fraction. Reports its own error and
-	// returns false so a caller can skip a range comparison that would be
-	// meaningless anyway.
+	// Range comparisons do not reject NaN, so guard finiteness first.
 	finite := func(field string, v float64) bool {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			errs = append(errs, fmt.Errorf("%s.advanced.%s: %v is not a finite number", path, field, v))
@@ -274,31 +186,16 @@ func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 	fraction("target.scale_down_utilization", a.ScaleDownUtilization)
 
 	if finite("saturation.queue_depth_threshold", a.QueueDepthThreshold) && a.QueueDepthThreshold <= 0 {
-		// Strictly positive, not merely non-negative (issue #6, reopened):
-		// with a non-negative QueueDepth.Value, a threshold of exactly 0
-		// makes sustainedQueueAtOrAbove/sustainedQueueBelow (analyzer.go)
-		// trivially true/false on every sample regardless of actual queue
-		// depth — the gate stops gating, and utilization_threshold alone
-		// would decide saturation.
+		// Zero would make the queue gate trivially true or false for every sample.
 		errs = append(errs, fmt.Errorf("%s.advanced.saturation.queue_depth_threshold: %v must be greater than zero", path, a.QueueDepthThreshold))
 	}
 
-	// Only "relative" is implemented — design.md §2/§9.4 explicitly places
-	// absolute latency thresholds out of scope for v1, and no Analyzer
-	// code path reads LatencyMode at all today (analyzer.EvaluationPolicy
-	// carries no such field). Accepting "absolute" therefore accepted a
-	// value the agent silently treats identically to "relative," with
-	// nothing to signal the difference (issue #6, reopened).
+	// Relative latency is the only implemented mode; accepting others would silently misconfigure behavior.
 	if a.LatencyMode != "relative" {
 		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.mode: %q — only \"relative\" is implemented in this phase (design.md §2/§9.4)", path, a.LatencyMode))
 	}
 	if finite("saturation.latency.baseline_multiplier", a.LatencyBaselineMultiplier) && a.LatencyBaselineMultiplier <= 1 {
-		// > 1, not merely > 0 (issue #6, reopened): the elevated-latency
-		// trigger compares observed p95 against baseline.P95 × multiplier
-		// (analyzer.go's scaledDuration). A multiplier at or below 1 sets
-		// that threshold at or below the baseline itself, so ordinary
-		// measurement noise around baseline latency would read as
-		// "elevated" continuously.
+		// Values at or below one classify baseline noise as continuously elevated.
 		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.baseline_multiplier: %v must be greater than 1", path, a.LatencyBaselineMultiplier))
 	}
 
@@ -321,9 +218,7 @@ func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 	return errs
 }
 
-// validateResolvedRuntime checks the runtime block's intervals — all three
-// are durations the controller schedules on, so zero or negative silently
-// breaks scheduling rather than failing validation.
+// validateResolvedRuntime requires positive controller scheduling intervals.
 func validateResolvedRuntime(path string, r ResolvedRuntime) []error {
 	var errs []error
 	if r.CollectionInterval <= 0 {
@@ -338,8 +233,7 @@ func validateResolvedRuntime(path string, r ResolvedRuntime) []error {
 	return errs
 }
 
-// validateAdvancedGate rejects a set advanced.* sub-block whose enclosing
-// advanced.enabled is not explicitly true (docs/configuration.md §8).
+// validateAdvancedGate rejects advanced sub-blocks unless advanced.enabled is true.
 func validateAdvancedGate(path string, a *AdvancedSpec) []error {
 	if a == nil {
 		return nil
@@ -353,10 +247,8 @@ func validateAdvancedGate(path string, a *AdvancedSpec) []error {
 	return nil
 }
 
-// validateDiskSelection checks disks.mode is one of the two documented
-// strategies (docs/configuration.md §4.2) and that only the fields that
-// strategy actually uses are set, then checks device_name form (docs/design.md §4.1)
-// and duplicates within whichever list applies.
+// validateDiskSelection checks the selection strategy, its applicable fields,
+// device-name form, and duplicates.
 func validateDiskSelection(d *DisksSpec) []error {
 	var errs []error
 
@@ -401,8 +293,7 @@ func validateDiskSelection(d *DisksSpec) []error {
 	return errs
 }
 
-// validateDeviceName rejects a kernel device path and the mws- prefix
-// (docs/configuration.md §4.1, docs/design.md §4.1).
+// validateDeviceName rejects kernel paths and reserved mws- names.
 func validateDeviceName(name string) error {
 	if name == "" {
 		return fmt.Errorf("device_name must not be empty")
@@ -416,10 +307,7 @@ func validateDeviceName(name string) error {
 	return nil
 }
 
-// validateMetricsSource checks the mode/source combinations from
-// docs/configuration.md §8. In local mode, opting into the platform source
-// requires a monitoring API key on disk (docs/platform-reference.md "Monitoring" — a
-// different credential from the compute IAM token).
+// validateMetricsSource checks supported mode/source combinations and required platform credentials.
 func validateMetricsSource(cfg *Config) []error {
 	source := cfg.Runtime.Metrics.Source
 	if source == "" {
@@ -444,8 +332,5 @@ func validateMetricsSource(cfg *Config) []error {
 	return nil
 }
 
-// monitoringAPIKeyPathEnv names the file holding the monitoring API key
-// (docs/platform-reference.md's own Prometheus scrape example uses a bearer_token_file, not
-// an inline value — the compute IAM token has no equivalent, it comes from
-// the metadata service instead).
+// monitoringAPIKeyPathEnv names the file containing the monitoring API bearer token.
 const monitoringAPIKeyPathEnv = "MWS_MONITORING_API_KEY_PATH"

@@ -1,11 +1,5 @@
-// Package telemetry exports the Prometheus metrics design.md §7.1 defines,
-// derived from a decider.Decision (which already carries its full
-// analyzer.Analysis in Inputs). It wires every metric except
-// writes_total/write_duration_seconds (no Actuator exists yet to report a
-// write outcome — M6) and cost_delta_iops_hours (no billing-rate model is
-// designed anywhere yet) — registering a metric with nothing real behind it
-// would repeat the exact *_quota_utilization-reads-zero trap docs/platform-reference.md
-// documents as a platform bug, not something to imitate.
+// Package telemetry exports Prometheus metrics from decisions and confirmed writes.
+// Metrics without a real source are intentionally not registered.
 package telemetry
 
 import (
@@ -18,9 +12,7 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/metrics"
 )
 
-// Registry holds one isolated prometheus.Registry (never the global
-// DefaultRegisterer) so multiple instances never collide in tests and a
-// caller controls exactly what's exposed on /metrics.
+// Registry owns an isolated Prometheus registry so instances and tests cannot collide.
 type Registry struct {
 	reg *prometheus.Registry
 
@@ -81,31 +73,14 @@ func (r *Registry) counter(name, help string, labels ...string) *prometheus.Coun
 	return c
 }
 
-// Handler serves the Prometheus text exposition format for everything
-// registered here.
+// Handler serves the Prometheus text exposition format.
 func (r *Registry) Handler() http.Handler {
 	return promhttp.HandlerFor(r.reg, promhttp.HandlerOpts{})
 }
 
-// RecordDecision updates every gauge/counter this package owns from one
-// reconcile cycle's Decision (which already carries its Analysis in
-// Inputs), except vm_cap_reached (RecordVMCapReached, aggregated once per
-// reconcile across every disk on the VM) and the applied-state half of
-// disk_provisioned_iops (RecordAppliedIOPS, called only once a write is
-// verified to have landed). vmName and class (dependent|independent,
-// docs/design.md §4.7) come from the caller — neither is on Decision, since Decide has
-// no reason to know either (design.md §3.3's decoupling: Decide only needs
-// policy/state/evidence, not disk-classification metadata a journal
-// consumer wants).
-//
-// disk_provisioned_iops is set from d.Current here, not d.Target (issue
-// #19) — this call fires before actuate() ever attempts a write, so
-// reporting the proposed target as already provisioned would be wrong on
-// every dry-run cycle, every failed write, and for the whole window while
-// a write is in flight. d.Target is exposed separately, unconditionally,
-// as disk_proposed_target_iops — decision intent, distinguishable from
-// applied state by metric name rather than by cross-referencing the
-// journal.
+// RecordDecision updates per-disk decision metrics before actuation.
+// Provisioned IOPS therefore uses Current, while Target is exposed separately as intent.
+// VM-wide cap state and confirmed applied values are recorded by their dedicated methods.
 func (r *Registry) RecordDecision(vmName, class string, d decider.Decision) {
 	disk := d.DiskID
 	a := d.Inputs
@@ -121,11 +96,7 @@ func (r *Registry) RecordDecision(vmName, class string, d decider.Decision) {
 	r.decisionsTotal.WithLabelValues(string(d.Action), d.Reason).Inc()
 	r.vmHeadroom.WithLabelValues(disk, vmName).Set(float64(d.VMHeadroomIOPS))
 
-	// Both source series are always set together (issue #19) — a GaugeVec
-	// only ever remembers series someone has Set(), so the previously
-	// active source's series would otherwise stay at 1 forever once the
-	// active source switches; explicitly zeroing the inactive one each
-	// call keeps exactly one series at 1 per disk, always.
+	// Set both source labels so a previously active GaugeVec series cannot remain at one.
 	r.metricSource.WithLabelValues(disk, string(metrics.SourceGuest)).Set(boolFloat(a.Source == metrics.SourceGuest))
 	r.metricSource.WithLabelValues(disk, string(metrics.SourcePlatform)).Set(boolFloat(a.Source == metrics.SourcePlatform))
 
@@ -134,51 +105,27 @@ func (r *Registry) RecordDecision(vmName, class string, d decider.Decision) {
 	r.changeBudgetRemaining.WithLabelValues(disk).Set(float64(d.BudgetRemaining))
 }
 
-// RecordAppliedIOPS updates disk_provisioned_iops to a write the caller has
-// already verified landed (issue #19) — never called for a dry run or a
-// failed write, so the gauge only ever moves on confirmed applied state,
-// same class/label shape as RecordDecision's own Set of this gauge so the
-// two calls target the same series.
+// RecordAppliedIOPS updates provisioned state only after the caller verifies a write.
 func (r *Registry) RecordAppliedIOPS(diskID, vmName, class string, appliedIOPS int64) {
 	r.provisionedIOPS.WithLabelValues(diskID, vmName, class).Set(float64(appliedIOPS))
 }
 
-// RecordVMCapReached sets vm_cap_reached once per reconcile cycle, from the
-// caller's own OR across every disk decided that cycle (issue #19) — never
-// from a single disk's Decision, which is exactly the per-disk Set that let
-// disk iteration order silently clear this gauge (a VM where disk A capped
-// and disk B, processed later, did not would previously end the cycle
-// reporting 0).
+// RecordVMCapReached records the cycle-wide OR across all disks on a VM.
 func (r *Registry) RecordVMCapReached(vmName string, capped bool) {
 	r.vmCapReached.WithLabelValues(vmName).Set(boolFloat(capped))
 }
 
-// RecordStaleness sets metric_staleness_seconds directly — it needs the
-// sampler's own notion of "time since last successful sample," which
-// Analysis does not carry (Analysis only ever exists once a sample landed;
-// staleness is about the *absence* of one). Left as a separate call rather
-// than folded into RecordDecision so a caller with no fresh decision this
-// cycle (a disk marked "no data") can still report it.
+// RecordStaleness reports sampling age even when no decision can be produced.
 func (r *Registry) RecordStaleness(diskID string, seconds float64) {
 	r.metricStaleness.WithLabelValues(diskID).Set(seconds)
 }
 
-// RecordDiscoverySkipped increments disk_discovery_skipped_total for one
-// excluded attachment (issue #4) — alias, not DiskID/DiskName, since a
-// disk skipped for an empty or duplicate resource identity may not have a
-// usable DiskName to label with; alias is always present (it's the VM
-// spec's own collection key). reason must be one of the compute package's
-// SkipReason* constants, not free text — see that package's own comment on
-// why Category exists separately from the free-text Reason.
+// RecordDiscoverySkipped counts excluded attachments by alias and stable reason category.
 func (r *Registry) RecordDiscoverySkipped(alias, reason string) {
 	r.discoverySkippedTotal.WithLabelValues(alias, reason).Inc()
 }
 
-// RecordBudgetHealthy mirrors state.Tracker.Healthy() into
-// iops_autoscaler_budget_healthy (issue #10) — polled once per reconcile
-// cycle rather than pushed from Tracker itself, keeping Tracker decoupled
-// from telemetry the same way every other pure package here stays
-// decoupled from its observers.
+// RecordBudgetHealthy exports the tracker's durable-budget health without coupling state to telemetry.
 func (r *Registry) RecordBudgetHealthy(healthy bool) {
 	r.budgetHealthy.Set(boolFloat(healthy))
 }
