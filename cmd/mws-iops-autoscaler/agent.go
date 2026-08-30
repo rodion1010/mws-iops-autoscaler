@@ -392,6 +392,19 @@ func (a *Agent) reconcile(ctx context.Context) {
 		// one; a fresh IncarnationID makes it a distinct key that starts
 		// cold, exactly as the Sampler already does for its buffer.
 		an := a.analyzer.Analyze(m.Disk.IdentityKey(), samples, ep, m.Disk.IOPS, now)
+		// Analyze's diskID parameter above is doing double duty as the
+		// analyzer's own internal baseline-state map key — it is not meant
+		// to be display-facing, and Analysis.DiskID is simply whatever that
+		// parameter was (analyzer.go: out := Analysis{DiskID: diskID}).
+		// Restored to the plain, human-readable name here so a.DiskID never
+		// carries IdentityKey()'s "\x00"-joined composite form into any
+		// future consumer — mirroring ADR-018's own "display-facing
+		// identifiers are unchanged" rule for Decision.DiskID/journal/
+		// telemetry. Nothing today reads Analysis.DiskID (Decide's diskID
+		// comes from the plain diskID param below, not from an.DiskID), but
+		// leaving the composite key on an exported field it's not built for
+		// is a footgun for the next thing that does.
+		an.DiskID = diskID
 		analyses[diskID] = an
 		// Only once this disk has ever had a real sample (pre-merge
 		// review) — an.SampleAge is meaningless before that (nothing to
@@ -452,23 +465,24 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 		a.actuate(ctx, m, d, now)
 
-		// actuate() forces a rediscovery on ErrConcurrentModification. If it
-		// succeeded, a.generation bumped and the managed/iopsPool snapshot
-		// this cycle decided against is superseded. If it *failed*,
-		// invalidateManaged() cleared a.managedValid instead — the snapshot
-		// is now suspect (a disk's Current, or its very presence on the VM,
-		// may no longer be accurate) even though generation did not move.
-		// Either way every decision already made this cycle — every
-		// siblingP95 and vm value above — was computed from data that no
-		// longer holds. Abort the rest of the cycle rather than keep
-		// deciding (and actuating) against it; the next reconcile tick
-		// starts fresh once discovery recovers.
+		// actuate() forces a rediscovery on either ErrConcurrentModification
+		// or ErrIncarnationMismatch. If it succeeded, a.generation bumped and
+		// the managed/iopsPool snapshot this cycle decided against is
+		// superseded. If it *failed*, invalidateManaged() cleared
+		// a.managedValid instead — the snapshot is now suspect (a disk's
+		// Current, or its very presence on the VM, may no longer be
+		// accurate) even though generation did not move. Either way every
+		// decision already made this cycle — every siblingP95 and vm value
+		// above — was computed from data that no longer holds. Abort the
+		// rest of the cycle rather than keep deciding (and actuating)
+		// against it; the next reconcile tick starts fresh once discovery
+		// recovers.
 		a.mu.Lock()
 		currentGeneration := a.generation
 		stillValid := a.managedValid
 		a.mu.Unlock()
 		if currentGeneration != startGeneration || !stillValid {
-			log.Printf("reconcile: managed snapshot superseded or invalidated mid-cycle (forced rediscovery after a concurrent-modification conflict) — aborting the rest of this reconcile cycle rather than act on now-stale data")
+			log.Printf("reconcile: managed snapshot superseded or invalidated mid-cycle (forced rediscovery after a conflict or incarnation mismatch) — aborting the rest of this reconcile cycle rather than act on now-stale data")
 			return
 		}
 	}
@@ -575,14 +589,28 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 		if errors.Is(err, compute.ErrIncarnationMismatch) {
 			// The disk this Decision targeted was deleted and recreated
 			// under the same name — a genuinely different resource. Nothing
-			// was written, so release the reservation. No forced rediscovery
-			// here: there is nothing to retry against, and the next
-			// scheduled discovery onboards the replacement with its own
-			// fresh identity and sampling history.
+			// was written, so release the reservation.
 			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
 				log.Printf("actuate %s (%s): failed to release the reservation for a write refused against a replacement disk: %v", diskID, m.Disk.DeviceName, rerr)
 			}
-			log.Printf("actuate %s (%s): %v — skipping; the next discovery will onboard the replacement", diskID, m.Disk.DeviceName, err)
+			// Force a rediscovery, mirroring the concurrent-modification
+			// branch above — not to retry against the disk this Decision
+			// targeted (there is nothing to retry: that resource is gone),
+			// but because the *whole snapshot* this reconcile cycle is
+			// working from is now proven wrong for at least this one disk.
+			// Every sibling's VMState (siblingP95IOPS, the VM's IOPS pool)
+			// was computed from the same captured-at-cycle-start managed
+			// set, so it is exactly as suspect as it would be after a
+			// concurrent-modification conflict. A successful rediscovery
+			// bumps a.generation and picks up the replacement's own fresh
+			// identity; a failed one invalidates the snapshot via
+			// invalidateManaged(). Either way reconcile's own
+			// generation/managedValid check below aborts the rest of this
+			// cycle rather than act on now-stale data.
+			log.Printf("actuate %s (%s): %v — forcing rediscovery to pick up the replacement before the next decision", diskID, m.Disk.DeviceName, err)
+			if derr := a.discover(ctx); derr != nil {
+				log.Printf("actuate %s (%s): rediscovery after incarnation mismatch failed: %v", diskID, m.Disk.DeviceName, derr)
+			}
 			return
 		}
 

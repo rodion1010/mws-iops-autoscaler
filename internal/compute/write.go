@@ -34,14 +34,24 @@ var ErrConcurrentModification = errors.New("live current differs from the decisi
 var ErrIncarnationMismatch = errors.New("live disk incarnation differs from the decision's expected incarnation — the disk was replaced under the same name")
 
 // incarnationMatches reports whether a live-read incarnation is safe to
-// write against given the incarnation the caller expected. A mismatch is
-// only asserted when both are known: an empty expected (the caller carried
-// no incarnation) or an empty live (the platform returned no metadata.id)
-// degrades to the pre-existing IOPS-only precondition rather than refusing
-// every write, mirroring StorageDisk.IdentityKey's own "degrade gracefully
-// when IncarnationID is unavailable" contract.
+// write against given the incarnation the caller expected.
+//
+//   - expected == "": the Decision was computed without a known incarnation
+//     (Discover's own metadata.id read came back empty for this disk) — there
+//     is nothing to compare against, so this degrades to the pre-existing
+//     IOPS-only precondition, mirroring StorageDisk.IdentityKey's own
+//     "degrade gracefully when IncarnationID is unavailable" contract.
+//   - expected != "" && live == "": asymmetric with the case above, and
+//     deliberately NOT treated the same way. Every real disk this project has
+//     access to returns a metadata.id (ADR-018) — an expected value existing
+//     at all means Discover successfully read one for this disk. A live read
+//     that suddenly comes back empty is not "unavailable," it is unexplained,
+//     and could just as easily be a different resource whose read happened
+//     to omit the field for some other reason. Fail closed rather than
+//     assume it is safe.
+//   - expected != "" && live != "": exact match required.
 func incarnationMatches(expected, live string) bool {
-	if expected == "" || live == "" {
+	if expected == "" {
 		return true
 	}
 	return expected == live
@@ -149,7 +159,7 @@ func UpdateIndependentDiskIOPS(ctx context.Context, c Client, diskName string, e
 // Both are checked before any attachment is selected, so an ambiguous
 // inventory returns a descriptive error without ever reaching
 // UpdateDependentDisk (issue #20's own acceptance criterion).
-func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string) (targetAlias string, liveCurrent int64, liveIncarnation string, err error) {
+func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string) (targetAlias string, liveCurrent int64, targetDiskName string, err error) {
 	aliasCount := make(map[string]int, len(disks))
 	for _, d := range disks {
 		if d.Alias == "" {
@@ -184,7 +194,14 @@ func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string
 		if target.Alias == "" {
 			return "", 0, "", fmt.Errorf("update dependent disk: device_name %q on VM %q has an empty alias", deviceName, vmName)
 		}
-		return target.Alias, target.IOPS, target.IncarnationID, nil
+		// target.DiskName, not target.IncarnationID: a VM read
+		// (translateVMResponse, sdk_client.go) never populates
+		// StorageDisk.IncarnationID at all (CLAUDE.md:
+		// "StorageDiskStatusResponse... does not carry metadata.id") — only
+		// Discover's own separate GetDisk call does, for either disk class.
+		// The caller performs that same fresh read itself, immediately
+		// before the write, using this DiskName.
+		return target.Alias, target.IOPS, target.DiskName, nil
 	default:
 		return "", 0, "", fmt.Errorf("update dependent disk: device_name %q attached %d times on VM %q — refusing an ambiguous target", deviceName, len(matches), vmName)
 	}
@@ -211,7 +228,7 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 	// and more than one attachment sharing deviceName would let
 	// targetAlias silently pick whichever the loop below saw last,
 	// mutating an arbitrary attachment instead of the intended one.
-	targetAlias, liveCurrent, liveIncarnation, err := validateDependentWriteTarget(vm.Disks, deviceName, vmName)
+	targetAlias, liveCurrent, targetDiskName, err := validateDependentWriteTarget(vm.Disks, deviceName, vmName)
 	if err != nil {
 		return 0, err
 	}
@@ -220,13 +237,30 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 		aliases[i] = d.Alias
 	}
 
-	// Prove the attachment is still the resource the Decision targeted
+	// Prove the attachment is still the resource the Decision targeted,
 	// before the IOPS precondition — a same-name replacement can sit at the
 	// same IOPS (regression: a stale decision must never touch a
-	// replacement disk).
-	if !incarnationMatches(expectedIncarnation, liveIncarnation) {
-		return 0, fmt.Errorf("update dependent disk %q on VM %q: %w (expected incarnation %q, live %q)",
-			deviceName, vmName, ErrIncarnationMismatch, expectedIncarnation, liveIncarnation)
+	// replacement disk). Unlike the independent path, the VM read just
+	// above cannot answer this on its own: translateVMResponse
+	// (sdk_client.go) never populates a live StorageDisk's IncarnationID at
+	// all — the VM's own per-attachment view carries no metadata.id
+	// (CLAUDE.md: "StorageDiskStatusResponse... does not carry
+	// metadata.id"); only a separate GetDisk call does, uniformly for
+	// either disk class (Discover already makes this exact call per
+	// managed disk, discovery.go). So proving incarnation here needs its
+	// own fresh read — skipped entirely when expectedIncarnation is empty
+	// (nothing to compare against, and no reason to pay for a read the
+	// result of which incarnationMatches would ignore anyway).
+	if expectedIncarnation != "" {
+		liveDisk, err := c.GetDisk(ctx, targetDiskName)
+		if err != nil {
+			return 0, fmt.Errorf("update dependent disk %q on VM %q: re-read disk %q for incarnation check: %w",
+				deviceName, vmName, targetDiskName, err)
+		}
+		if !incarnationMatches(expectedIncarnation, liveDisk.IncarnationID) {
+			return 0, fmt.Errorf("update dependent disk %q on VM %q: %w (expected incarnation %q, live %q)",
+				deviceName, vmName, ErrIncarnationMismatch, expectedIncarnation, liveDisk.IncarnationID)
+		}
 	}
 	if liveCurrent != expectedCurrent {
 		return 0, fmt.Errorf("update dependent disk %q on VM %q: %w (expected current %d, live %d)",
