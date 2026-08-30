@@ -8,10 +8,7 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/metrics"
 )
 
-// This test intentionally permits either valid fix for the boundary:
-// reject collection_interval == scale_up_window during validation, or make
-// the accepted configuration actually produce an evaluable window. What
-// must never recur is accepting a configuration that can never evaluate.
+// An accepted boundary configuration must eventually produce an evaluable window.
 func TestRegressionEveryAcceptedCollectionCadenceCanFillItsWindow(t *testing.T) {
 	cfg := validConfig()
 	cfg.Runtime.Metrics.CollectionInterval = durationPtr("5m")

@@ -34,7 +34,6 @@ func TestReadyz_readyOnlyWhenAllThreeConditionsHold(t *testing.T) {
 	r := &Readiness{}
 	r.SetConfigValid(true)
 	r.SetDiscoverySucceeded(true)
-	// SourceReachable still false.
 
 	if r.Ready() {
 		t.Fatal("Ready() = true with only 2 of 3 conditions set")

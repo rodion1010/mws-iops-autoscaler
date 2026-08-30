@@ -5,21 +5,14 @@ import (
 	"fmt"
 )
 
-// fakeClient is a hand-written Client for unit tests — no mocking
-// framework, matching internal/config's testing style. Production wiring
-// (sdk_client.go) is exercised only by building against the real SDK; there
-// are no credentials in this environment to run it live.
 type fakeClient struct {
 	vms     map[string]*VirtualMachine
 	vmTypes map[string]*VmType
 	disks   map[string]*Disk
 
-	// dependentWriteErr, if set, is returned by UpdateDependentDisk instead
-	// of performing the write — used to simulate an etag conflict.
+	// Optional dependent-write failure.
 	dependentWriteErr error
-	// independentApplied overrides what UpdateIndependentDisk reports as
-	// applied, to simulate the platform silently applying a different
-	// value than requested.
+	// Optional applied value used to simulate a mismatched platform result.
 	independentApplied *int64
 }
 

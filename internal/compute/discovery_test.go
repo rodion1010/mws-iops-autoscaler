@@ -57,9 +57,7 @@ func TestDiscover_classifiesAndResolvesGuestPath(t *testing.T) {
 	if data.TotalIOPS != 3000 || data.ExtraIOPS != 2000 {
 		t.Errorf("datadisk status breakdown = %+v, want total=3000 extra=2000", data)
 	}
-	// IncarnationID (metadata.id) propagates from the same GetDisk call as
-	// IOPS, for both classes uniformly (pre-merge review: samples/
-	// cooldown/budget must not key on DiskName alone).
+	// Discover obtains both IOPS and incarnation from GetDisk for either attachment class.
 	if boot.IncarnationID != "boot-incarnation-1" {
 		t.Errorf("bootdisk IncarnationID = %q, want %q", boot.IncarnationID, "boot-incarnation-1")
 	}
@@ -83,7 +81,7 @@ func TestDiscover_unresolvableDiskExcludedNotFatal(t *testing.T) {
 	}
 	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
 	c.disks["resolves-fine"] = &Disk{Name: "resolves-fine", SpecIOPS: 2000}
-	// Deliberately no entry in c.disks for "does-not-exist".
+	// No disk resource exists for this attachment.
 
 	vm, skipped, err := Discover(context.Background(), c, "vm-1")
 	if err != nil {
@@ -106,8 +104,7 @@ func TestDiscover_ambiguousClassSkipped(t *testing.T) {
 		Name:   "vm-1",
 		VMType: "base-2-8",
 		Disks: []StorageDisk{
-			// Neither ref nor spec resolved (translateVMResponse's zero
-			// value) — Class stays the empty string.
+			// Neither ref nor inline spec resolves, so Class remains empty.
 			{Alias: "weird", DeviceName: "weird", Class: "", DiskName: "vm-1-weird"},
 		},
 	}
@@ -211,10 +208,7 @@ func TestDiscover_duplicateDeviceNameBothSkipped(t *testing.T) {
 }
 
 func TestDiscover_duplicateAliasBothSkipped(t *testing.T) {
-	// issue #20: alias is write.go's own join key for the dependent write
-	// path (validateDependentWriteTarget) — a colliding alias must never
-	// enter the managed set, the same treatment duplicate DiskName/
-	// DeviceName already get.
+	// Aliases are dependent-write join keys and must be unique before selection.
 	c := newFakeClient()
 	c.vms["vm-1"] = &VirtualMachine{
 		Name:   "vm-1",
@@ -270,8 +264,7 @@ func TestDiscover_emptyAliasSkipped(t *testing.T) {
 }
 
 func TestDiscover_emptyDeviceNamesAreNotTreatedAsDuplicates(t *testing.T) {
-	// An empty device_name is expected (not yet assigned by the platform)
-	// — two such disks must not be flagged as colliding with each other.
+	// Empty device names are expected before platform assignment and do not collide.
 	c := newFakeClient()
 	c.vms["vm-1"] = &VirtualMachine{
 		Name:   "vm-1",

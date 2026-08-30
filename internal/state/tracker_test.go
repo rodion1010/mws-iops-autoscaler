@@ -66,9 +66,7 @@ func TestTracker_reserveConfirmUpdatesBudget(t *testing.T) {
 }
 
 func TestTracker_reserveWithoutResolutionStillCounts(t *testing.T) {
-	// issue #10: a change this process reserved but crashed before
-	// confirming must still consume budget — undercounting is the unsafe
-	// direction.
+	// A pending reservation still consumes budget.
 	tr := newTestTracker(t)
 	if err := tr.ReserveChange("disk1", "key-1", 1000, 2000, epoch); err != nil {
 		t.Fatalf("ReserveChange: %v", err)
@@ -92,10 +90,7 @@ func TestTracker_releaseChangeFreesTheSlot(t *testing.T) {
 }
 
 func TestTracker_budgetSurvivesRestartCooldownDoesNot(t *testing.T) {
-	// Exercise the durability invariant in docs/design.md §9.4: reload the budget from the
-	// same file (simulating a restart) into a *new* Tracker, and confirm
-	// the count carries over while cooldown state — correctly — starts
-	// fresh, since a new Tracker has no in-memory history at all.
+	// Durable budget survives restart while in-memory cooldown resets.
 	path := filepath.Join(t.TempDir(), "budget.jsonl")
 	b1, err := LoadBudget(path)
 	if err != nil {
@@ -136,15 +131,9 @@ func TestTracker_healthyByDefault(t *testing.T) {
 	}
 }
 
-// failingBudgetPath returns a path a Budget cannot write to — used to
-// force ReserveChange/ConfirmChange/ReleaseChange into failure without
-// depending on OS-specific permission semantics for read-only files
-// (which root, common in CI/sandboxed test runners, ignores).
 func failingBudgetPath(t *testing.T) string {
 	t.Helper()
-	// A path whose parent directory does not exist: every append/create
-	// call fails deterministically regardless of the running user's
-	// privileges.
+	// A missing parent directory fails deterministically for every user.
 	return filepath.Join(t.TempDir(), "does-not-exist", "budget.jsonl")
 }
 
@@ -176,12 +165,7 @@ func TestTracker_confirmFailureMarksUnhealthy(t *testing.T) {
 		t.Fatalf("ReserveChange: %v", err)
 	}
 
-	// Point the same in-memory Budget at a path whose parent directory
-	// doesn't exist, so the *next* append deterministically fails —
-	// simulating e.g. the volume the state directory lives on going
-	// away mid-run, without depending on OS-specific permission
-	// semantics for file modes (which root, common in test runners,
-	// ignores).
+	// Move the live Budget to a missing directory to force the next append to fail.
 	b.path = failingBudgetPath(t)
 
 	if err := tr.ConfirmChange("key-1"); err == nil {

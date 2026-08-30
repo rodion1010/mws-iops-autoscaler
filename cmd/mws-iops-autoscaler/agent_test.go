@@ -25,9 +25,6 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/telemetry"
 )
 
-// recordingActuator records every Apply call it receives — used to prove
-// the Agent never even calls the Actuator for a refused action, not just
-// that the result is discarded.
 type recordingActuator struct {
 	calls []decider.Decision
 }
@@ -54,9 +51,6 @@ func newTestAgent(t *testing.T, allowScaleDown bool, act actuator.Actuator) (*Ag
 	}, tracker
 }
 
-// scrapeAgentTelemetry renders a's telemetry registry the same way the
-// real /metrics endpoint would, for tests that need to assert on exported
-// series rather than internal state.
 func scrapeAgentTelemetry(t *testing.T, a *Agent) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -69,12 +63,6 @@ type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
-// testResolvedPolicy is a realistic resolved policy for the hand-built
-// managed disks below. In production every ManagedDisk carries one
-// (registry.Select resolves it from config defaults); a zero policy would
-// leave the evaluation windows at 0, which no real disk ever has, so any
-// test that feeds real samples through the Analyzer needs this to exercise
-// the window/baseline path at all.
 func testResolvedPolicy() config.ResolvedPolicy {
 	return config.ResolvedPolicy{
 		MinIOPS: 1000,
@@ -159,18 +147,10 @@ func TestActuate_allowScaleDownTrueReachesActuator(t *testing.T) {
 	}
 }
 
-// stubClient is a minimal compute.Client for exercising discover() end to
-// end in a test — it only needs to satisfy whatever a trivial
-// auto-discovery VM touches. disks, when set, backs GetDisk for whichever
-// resource names the VM's own Disks entries name.
 type stubClient struct {
 	getVMCalls int
 	vm         *compute.VirtualMachine
 	disks      map[string]*compute.Disk
-	// getVMErr, if set, is returned by GetVirtualMachine instead of a
-	// value — simulates discover() itself failing (a transient Compute
-	// API error), distinct from every other stub failure mode here which
-	// simulates a write-path problem.
 	getVMErr error
 }
 
@@ -199,18 +179,12 @@ func (s *stubClient) UpdateDependentDisk(_ context.Context, _ compute.DependentU
 	return nil, errors.New("stub: unused")
 }
 
-// erroringActuator always fails with a caller-supplied error — used to
-// simulate the write path refusing a stale/conflicting Decision.
 type erroringActuator struct{ err error }
 
 func (e erroringActuator) Apply(context.Context, decider.Decision, actuator.Target, bool, string) (actuator.Applied, error) {
 	return actuator.Applied{}, e.err
 }
 
-// newDiscoverableTestAgent is newTestAgent plus everything discover()
-// itself needs (client/cfg/resolved/sampler/readiness) — for tests that
-// must observe discover() actually running, not just that actuate()
-// returned without error.
 func newDiscoverableTestAgent(t *testing.T, act actuator.Actuator, client compute.Client) *Agent {
 	t.Helper()
 	budget, err := state.LoadBudget(t.TempDir() + "/budget.jsonl")
@@ -237,9 +211,7 @@ func newDiscoverableTestAgent(t *testing.T, act actuator.Actuator, client comput
 }
 
 func TestActuate_successAdoptsAppliedValueImmediately(t *testing.T) {
-	// issue #16: a successful write must not leave a.managed's Current
-	// stale until the next discover() — actuate() adopts the verified
-	// applied value itself.
+// A successful write must immediately update the managed snapshot.
 	act := &recordingActuator{}
 	a, _ := newTestAgent(t, true, act)
 	a.managed = []registry.ManagedDisk{independentDisk()}
@@ -252,9 +224,6 @@ func TestActuate_successAdoptsAppliedValueImmediately(t *testing.T) {
 	}
 }
 
-// TestActuate_telemetry_successMovesProvisionedIOPS is issue #19's
-// verified-write scenario at the full actuate() level: only a write
-// actuate() itself confirms landed may move disk_provisioned_iops.
 func TestActuate_telemetry_successMovesProvisionedIOPS(t *testing.T) {
 	act := &recordingActuator{}
 	a, _ := newTestAgent(t, true, act)
@@ -270,10 +239,6 @@ func TestActuate_telemetry_successMovesProvisionedIOPS(t *testing.T) {
 	}
 }
 
-// TestActuate_telemetry_dryRunNeverMovesProvisionedIOPS covers the dry-run
-// half of the same acceptance criterion — RecordDecision's own Current
-// value must be the only thing on the wire, never Target, and actuate()
-// must add nothing to it for a dry run.
 func TestActuate_telemetry_dryRunNeverMovesProvisionedIOPS(t *testing.T) {
 	act := &recordingActuator{}
 	a, _ := newTestAgent(t, true, act)
@@ -292,8 +257,6 @@ func TestActuate_telemetry_dryRunNeverMovesProvisionedIOPS(t *testing.T) {
 	}
 }
 
-// TestActuate_telemetry_failedWriteNeverMovesProvisionedIOPS is the same
-// acceptance criterion's failed-write half.
 func TestActuate_telemetry_failedWriteNeverMovesProvisionedIOPS(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
 	a, _ := newTestAgent(t, true, act)
@@ -312,10 +275,7 @@ func TestActuate_telemetry_failedWriteNeverMovesProvisionedIOPS(t *testing.T) {
 }
 
 func TestActuate_conflictNeverUpdatesManagedAndForcesRediscovery(t *testing.T) {
-	// issue #16: a concurrent-modification conflict must never write
-	// anything into a.managed (there is nothing verified to adopt), and
-	// must force a fresh discover() rather than leave the stale snapshot
-	// in place until the next scheduled DiscoveryInterval tick.
+// A stale decision must not write or adopt the externally changed value.
 	client := &stubClient{vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1"}}
 	conflictErr := fmt.Errorf("update independent disk %q: %w (expected current 1000, live 5000)", "vm-1-data", compute.ErrConcurrentModification)
 	act := erroringActuator{err: conflictErr}
@@ -325,10 +285,7 @@ func TestActuate_conflictNeverUpdatesManagedAndForcesRediscovery(t *testing.T) {
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
-	// The stub VM has no disks at all, so a successful forced rediscovery
-	// replaces the stale single-disk snapshot with an empty one — proof
-	// that discover() actually ran and overwrote a.managed, not just that
-	// GetVirtualMachine was called.
+// Empty rediscovery invalidates the previous managed snapshot.
 	if len(a.managed) != 0 {
 		t.Errorf("managed = %+v, want empty — forced rediscovery must replace the stale snapshot with a fresh one, never leave the conflicting entry in place", a.managed)
 	}
@@ -354,10 +311,6 @@ func TestActuate_nonConflictErrorDoesNotForceRediscovery(t *testing.T) {
 	}
 }
 
-// fixedDecider always returns the same Decision regardless of Analysis —
-// used to prove reconcile's discovery-staleness gate (issue #15) blocks
-// the whole pipeline before the Decider (and therefore the Actuator) is
-// ever reached, not just that this cycle happened to decide NoAction.
 type fixedDecider struct {
 	action decider.Action
 	target int64
@@ -367,9 +320,6 @@ func (f fixedDecider) Decide(diskID string, current int64, _ analyzer.Analysis, 
 	return decider.Decision{DiskID: diskID, Action: f.action, Current: current, Target: f.target}
 }
 
-// emptySource is a metrics.MetricSource stub that always succeeds with no
-// samples — reconcile's staleness gate must be checked before the sampler
-// or Analyzer are even consulted, so what they'd return doesn't matter.
 type emptySource struct{}
 
 func (emptySource) Sample(_ context.Context, _ []metrics.DiskRef) ([]metrics.Sample, error) {
@@ -377,10 +327,6 @@ func (emptySource) Sample(_ context.Context, _ []metrics.DiskRef) ([]metrics.Sam
 }
 func (emptySource) Kind() metrics.SourceKind { return metrics.SourceGuest }
 
-// newReconcileTestAgent's third return value is the journal's raw output —
-// a real bytes.Buffer rather than discard{} so tests can assert on what got
-// written (or, on the success path, that nothing did), not just on
-// Actuator.Apply call counts.
 func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent, *recordingActuator, *bytes.Buffer) {
 	t.Helper()
 	act := &recordingActuator{}
@@ -398,10 +344,7 @@ func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent
 		allowScaleDown:       true,
 		maxDiscoveryAge:      time.Minute,
 		lastDiscoverySuccess: lastDiscoverySuccess,
-		// managedValid is a separate, complementary gate from the
-		// age-based staleness these tests exercise (pre-merge review
-		// finding) — true here so lastDiscoverySuccess's own age is what
-		// actually decides the outcome, not this flag.
+// Immediate invalidation and age-based staleness are independent guards.
 		managedValid: true,
 		managed:      []registry.ManagedDisk{independentDisk()},
 		sampler:      sampler,
@@ -447,13 +390,6 @@ func TestReconcile_proceedsWhenDiscoveryFresh(t *testing.T) {
 	}
 }
 
-// TestReconcile_doesNotPublishStalenessForColdStartDisk is the pre-merge
-// review's second half of item 8: "для пустого буфера не следует
-// публиковать metrics_stale со значением staleness 0." newReconcileTestAgent
-// wires emptySource, so the Sampler's ring buffer for this disk has never
-// received a single Tick() — an.HasData is false, the true cold-start case
-// — and reconcile must skip the RecordStaleness call entirely rather than
-// publish a misleading 0-second reading.
 func TestReconcile_doesNotPublishStalenessForColdStartDisk(t *testing.T) {
 	a, _, _ := newReconcileTestAgent(t, time.Now())
 	a.reconcile(context.Background())
@@ -464,19 +400,11 @@ func TestReconcile_doesNotPublishStalenessForColdStartDisk(t *testing.T) {
 	}
 }
 
-// assertSingleJournalReason asserts that journalOut holds exactly one
-// journal line and that its reason field matches want — proving
-// journalDiscoveryStale (pre-merge review: "for discovery_stale... a
-// journal/decision record") is the source of the record, not that reconcile
-// merely happened to skip.
 func assertSingleJournalReason(t *testing.T, journalOut *bytes.Buffer, want string) {
 	t.Helper()
 	assertJournalReasons(t, journalOut, 1, want)
 }
 
-// assertJournalReasons asserts journalOut holds exactly wantCount lines, one
-// per still-managed disk on the skipped-cycle path, and that every one
-// carries reason=wantReason and action=NoAction.
 func assertJournalReasons(t *testing.T, journalOut *bytes.Buffer, wantCount int, wantReason string) {
 	t.Helper()
 	trimmed := strings.TrimSpace(journalOut.String())
@@ -501,12 +429,6 @@ func assertJournalReasons(t *testing.T, journalOut *bytes.Buffer, wantCount int,
 	}
 }
 
-// TestReconcile_skipsImmediatelyAfterFatalDiscoveryError is the pre-merge
-// review finding: a fatal discovery error must stop reconcile from acting
-// on the previous managed set the instant it happens, not merely once
-// maxDiscoveryAge eventually elapses. maxDiscoveryAge is set generously
-// large here specifically so the age-based gate (issue #15, tested above)
-// cannot be what blocks this cycle — only managedValid can.
 func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
 	goodClient := &stubClient{
 		vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
@@ -529,8 +451,7 @@ func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
 		t.Fatal("test setup: first discover() did not populate the managed set")
 	}
 
-	// A second, failing discover() — the managed set from the first call
-	// is still sitting in a.managed, well within maxDiscoveryAge.
+// Fail discovery after a previously successful snapshot.
 	a.client = &stubClient{getVMErr: errors.New("simulated: transient Compute API failure")}
 	if err := a.discover(context.Background()); err == nil {
 		t.Fatal("test setup: second discover() unexpectedly succeeded")
@@ -543,10 +464,6 @@ func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
 	assertSingleJournalReason(t, &journalOut, "discovery_stale")
 }
 
-// TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk is the same
-// finding through the specific scenario the review named: an unmatched
-// disks.selected device_name (issue #5 reopened), which fails inside
-// registry.Select rather than compute.Discover.
 func TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk(t *testing.T) {
 	client := &stubClient{
 		vm: vmWithTwoIndependentDisks(), // "good" and "bad", not "missing-disk"
@@ -579,17 +496,10 @@ func TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk(t *testing.T) {
 	if len(act.calls) != 0 {
 		t.Errorf("Actuator.Apply called %d times, want 0 — an unmatched disks.selected device_name must block reconcile immediately", len(act.calls))
 	}
-	// Two disks ("good" and "bad") were still in the managed set from the
-	// first, successful discover() — both must get a discovery_stale
-	// record, not just whichever one the fatal error itself named.
+// The previous managed set still contains both disks.
 	assertJournalReasons(t, &journalOut, 2, "discovery_stale")
 }
 
-// perDiskDecider returns a fixed Decision per DiskID, looked up by the
-// caller — unlike fixedDecider, which returns the same action for every
-// disk, this lets a reconcile test give different disks different
-// verdicts in the same cycle (issue #19: vm_cap_reached must aggregate
-// across disks, not reflect only whichever was decided last).
 type perDiskDecider struct {
 	byDisk map[string]decider.Action
 }
@@ -598,10 +508,6 @@ func (p perDiskDecider) Decide(diskID string, current int64, _ analyzer.Analysis
 	return decider.Decision{DiskID: diskID, Action: p.byDisk[diskID], Current: current}
 }
 
-// conflictOnFirstCallActuator returns a wrapped ErrConcurrentModification
-// on its first Apply call and a plain success on every subsequent one —
-// used to prove reconcile() aborts the rest of its cycle after the first
-// disk's conflict rather than going on to actuate a second one.
 type conflictOnFirstCallActuator struct {
 	calls []decider.Decision
 }
@@ -614,11 +520,6 @@ func (a *conflictOnFirstCallActuator) Apply(_ context.Context, d decider.Decisio
 	return actuator.Applied{DiskID: d.DiskID, IOPS: d.Target}, nil
 }
 
-// TestReconcile_abortsRestOfCycleAfterConcurrentModificationRediscovery is
-// the pre-merge review finding: after a concurrent-modification conflict
-// forces a rediscovery inside actuate(), the rest of this reconcile cycle
-// — every disk not yet decided — was computed from a managed/iopsPool
-// snapshot that rediscovery just superseded, and must not be acted on.
 func TestReconcile_abortsRestOfCycleAfterConcurrentModificationRediscovery(t *testing.T) {
 	client := &stubClient{
 		vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
@@ -650,11 +551,6 @@ func TestReconcile_abortsRestOfCycleAfterConcurrentModificationRediscovery(t *te
 	}
 }
 
-// incarnationMismatchOnFirstCallActuator mirrors conflictOnFirstCallActuator
-// for compute.ErrIncarnationMismatch — used to prove reconcile() treats a
-// replacement-disk refusal exactly like a concurrent-modification conflict:
-// both invalidate the whole cycle's snapshot, not just the one disk that
-// triggered them.
 type incarnationMismatchOnFirstCallActuator struct {
 	calls []decider.Decision
 }
@@ -667,12 +563,6 @@ func (a *incarnationMismatchOnFirstCallActuator) Apply(_ context.Context, d deci
 	return actuator.Applied{DiskID: d.DiskID, IOPS: d.Target}, nil
 }
 
-// TestReconcile_abortsRestOfCycleAfterIncarnationMismatchRediscovery is the
-// P1 finding from the second review pass: an ErrIncarnationMismatch refusal
-// used to release the budget reservation but never force a rediscovery,
-// leaving the rest of the cycle to actuate every other disk against a
-// snapshot already proven wrong for the replaced one. It must abort the
-// cycle exactly as a concurrent-modification conflict does.
 func TestReconcile_abortsRestOfCycleAfterIncarnationMismatchRediscovery(t *testing.T) {
 	client := &stubClient{
 		vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
@@ -704,12 +594,6 @@ func TestReconcile_abortsRestOfCycleAfterIncarnationMismatchRediscovery(t *testi
 	}
 }
 
-// TestActuate_incarnationMismatchReleasesReservationAndForcesRediscovery
-// proves both halves of the actuate()-level fix directly: the reservation
-// is released (nothing was ever sent), and a rediscovery is forced — unlike
-// an earlier version of this handling, which released the reservation but
-// left the stale managed snapshot in place until the next scheduled
-// DiscoveryInterval tick.
 func TestActuate_incarnationMismatchReleasesReservationAndForcesRediscovery(t *testing.T) {
 	conflictErr := fmt.Errorf("update independent disk %q: %w (expected incarnation \"incarnation-a\", live \"incarnation-b\")",
 		"vm-1-data", compute.ErrIncarnationMismatch)
@@ -724,10 +608,7 @@ func TestActuate_incarnationMismatchReleasesReservationAndForcesRediscovery(t *t
 	if got := len(a.tracker.PendingChanges()); got != 0 {
 		t.Errorf("PendingChanges() = %d, want 0 — an incarnation mismatch proves nothing was written, so the reservation must be released", got)
 	}
-	// The stub VM has no disks at all, so a successful forced rediscovery
-	// replaces the stale single-disk snapshot with an empty one — proof
-	// that discover() actually ran, not just that the reservation was
-	// released.
+// Empty rediscovery invalidates the previous managed snapshot.
 	if len(a.managed) != 0 {
 		t.Errorf("managed = %+v, want empty — an incarnation mismatch must force rediscovery, not leave the stale snapshot in place", a.managed)
 	}
@@ -736,11 +617,6 @@ func TestActuate_incarnationMismatchReleasesReservationAndForcesRediscovery(t *t
 	}
 }
 
-// TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder is issue #19's
-// full-pipeline version of the telemetry-package aggregation test: two
-// managed disks, only one of which is VM-cap-blocked, in both possible
-// map/slice iteration orders — vm_cap_reached must read 1 either way, not
-// depend on which disk reconcile happens to process last.
 func TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder(t *testing.T) {
 	capped := registry.ManagedDisk{Disk: compute.StorageDisk{
 		Alias: "capped", DeviceName: "capped", Class: compute.ClassIndependent, DiskName: "vm-1-capped",
@@ -794,7 +670,6 @@ func TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder(t *testing.T) {
 	}
 }
 
-// --- issue #4 (reopened): exclude disks that are not safely manageable ---
 
 func vmWithTwoIndependentDisks() *compute.VirtualMachine {
 	return &compute.VirtualMachine{
@@ -867,7 +742,6 @@ func TestHasManagedDisks(t *testing.T) {
 	}
 }
 
-// --- issue #5 (reopened): unmatched disks.selected must be fatal ---
 
 func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *testing.T) {
 	client := &stubClient{
@@ -881,8 +755,7 @@ func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *test
 	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "good"}, {DeviceName: "missing-disk"},
 	}}
-	// Simulate a prior successful cycle: every readiness dimension already
-	// true, and a real managed set already published.
+// Start from a previously healthy readiness state.
 	a.readiness.SetConfigValid(true)
 	a.readiness.SetDiscoverySucceeded(true)
 	a.readiness.SetSourceReachable(true)
@@ -926,7 +799,6 @@ func TestDiscover_selectedSucceedsWhenEveryDeviceMatches(t *testing.T) {
 	}
 }
 
-// --- issue #10 (reopened): crash-safe/fail-closed budget persistence ---
 
 func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
 	act := &recordingActuator{}
@@ -942,9 +814,6 @@ func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
 	}
 }
 
-// --- issue: don't release the budget reservation on a bare actuator error
-// — a real write's error does not prove nothing landed, so the reservation
-// must be resolved from a fresh live read instead. ---
 
 func TestActuate_writeFailure_liveStillAtBefore_releases(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
@@ -967,10 +836,7 @@ func TestActuate_writeFailure_liveStillAtBefore_releases(t *testing.T) {
 }
 
 func TestActuate_writeFailure_liveAtTarget_confirmsNotReleases(t *testing.T) {
-	// The platform may have applied the change before the response reached
-	// this process (timeout, connection reset). A bare error must not
-	// release a reservation that actually landed — that would silently
-	// undercount a real change against the 24h cap.
+// The platform may have applied the request despite the returned transport error.
 	act := &erroringActuatorRecording{err: errors.New("simulated: response lost after the request landed")}
 	a, tracker := newTestAgent(t, true, act)
 	a.managed = []registry.ManagedDisk{independentDisk()}
@@ -1028,9 +894,7 @@ func TestActuate_writeFailure_liveReadFails_staysPending(t *testing.T) {
 }
 
 func TestActuate_dryRunErrorAlwaysReleases(t *testing.T) {
-	// A dry run's error can never be ambiguous (no mutating call is ever
-	// reached), so it must release unconditionally without needing — or
-	// attempting — a live-state read.
+// Dry-run errors cannot hide a mutation, so the reservation is releasable.
 	act := &erroringActuatorRecording{err: errors.New("simulated dry-run validation failure")}
 	a, tracker := newTestAgent(t, true, act)
 	a.dryRun = true
@@ -1069,12 +933,6 @@ func TestActuate_refusesWriteWhenBudgetUnhealthy(t *testing.T) {
 	}
 }
 
-// newTestAgentWithUnhealthyBudget builds an Agent whose Tracker is already
-// unhealthy — by pointing its Budget at a directory that's then removed,
-// so one deliberate Reserve call fails and flips Healthy() false, the same
-// mechanism a real filesystem/permissions failure would use in production.
-// This can only be built this indirectly from outside internal/state: its
-// fields (Budget.path, Tracker.budget) are unexported, and rightly so.
 func newTestAgentWithUnhealthyBudget(t *testing.T, act actuator.Actuator) *Agent {
 	t.Helper()
 	sub := t.TempDir() + "/sub"
@@ -1105,8 +963,6 @@ func newTestAgentWithUnhealthyBudget(t *testing.T, act actuator.Actuator) *Agent
 	}
 }
 
-// erroringActuatorRecording is erroringActuator plus call recording, for
-// tests that need both.
 type erroringActuatorRecording struct {
 	err   error
 	calls []decider.Decision
@@ -1204,9 +1060,7 @@ func TestReconcilePendingBudget_detachedDiskLeftPending(t *testing.T) {
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	// Reserve for a disk that is not (and never was, in this test) part of
-	// the managed set — simulating a disk detached between the crash and
-	// this restart.
+// The reservation targets a disk absent from the managed set.
 	if err := a.tracker.ReserveChange("vm-1-detached", "key-1", 1000, 2000, time.Now()); err != nil {
 		t.Fatalf("ReserveChange: %v", err)
 	}
@@ -1218,15 +1072,6 @@ func TestReconcilePendingBudget_detachedDiskLeftPending(t *testing.T) {
 	}
 }
 
-// TestReconcilePendingBudget_recreatedDiskUnderSameNameNeverMatchesStaleReservation
-// is the pre-merge review scenario this whole identity fix exists for: a
-// disk is deleted and a new one created under the identical DiskName (an
-// ordinary Terraform "replace") between a crash and this restart. The
-// stale reservation must never be matched against the new disk's live
-// state — DiskName alone would make live IOPS on the *new* disk look like
-// a verdict on the *old* disk's write, which is simply wrong; nothing
-// about the new disk's current value says anything about whether the old
-// disk's write landed.
 func TestReconcilePendingBudget_recreatedDiskUnderSameNameNeverMatchesStaleReservation(t *testing.T) {
 	client := &stubClient{
 		vm: vmWithTwoIndependentDisks(),
@@ -1239,15 +1084,13 @@ func TestReconcilePendingBudget_recreatedDiskUnderSameNameNeverMatchesStaleReser
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	// A reservation from before the crash, against the original incarnation.
+// The reservation belongs to the original incarnation.
 	original := compute.StorageDisk{DiskName: "vm-1-good", IncarnationID: "incarnation-1"}
 	if err := a.tracker.ReserveChange(original.IdentityKey(), "key-1", 1000, 2000, time.Now()); err != nil {
 		t.Fatalf("ReserveChange: %v", err)
 	}
 
-	// The disk was deleted and a new one created under the same DiskName —
-	// same live IOPS as the old reservation's Target would coincidentally
-	// suggest a match, but it must not be treated as one.
+// Discovery now contains a replacement with the same name.
 	client.disks["vm-1-good"] = &compute.Disk{Name: "vm-1-good", SpecIOPS: 2000, IncarnationID: "incarnation-2"}
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("second discover: %v", err)

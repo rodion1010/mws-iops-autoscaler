@@ -15,25 +15,16 @@ var testPolicy = EvaluationPolicy{
 	UtilizationThreshold:      0.98,
 	QueueDepthThreshold:       1,
 	LatencyBaselineMultiplier: 1.5,
-	// Generous enough that ordinary tests (samples one minute apart, `now`
-	// taken as the newest sample's own timestamp) never trip freshness or
-	// gap checks by accident — issues #15/#7 get their own dedicated tests
-	// below with tight values instead of tightening this shared policy.
 	MaxSampleAge: time.Hour,
 	MaxSampleGap: time.Hour,
 }
 
 var epoch = time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
 
-// asOf returns the newest sample's own timestamp — the natural `now` for a
-// test that only cares about ordinary (non-staleness) behavior, since it
-// makes SampleAge exactly 0 regardless of which epoch offset the samples
-// use.
 func asOf(samples []metrics.Sample) time.Time {
 	return samples[len(samples)-1].Timestamp
 }
 
-// sampleAt builds one synthetic Sample minute*minutes after epoch.
 func sampleAt(minute int, readOps, writeOps, readBytes, writeBytes, queue float64, readLat, writeLat time.Duration) metrics.Sample {
 	return metrics.Sample{
 		DiskID:      "disk1",
@@ -49,9 +40,6 @@ func sampleAt(minute int, readOps, writeOps, readBytes, writeBytes, queue float6
 	}
 }
 
-// quietUpWindow is 6 samples, one per minute (0..5, span exactly
-// ScaleUpWindow), all low utilization, low queue, low flat latency, no
-// throttle — the baseline this establishes is ~1ms.
 func quietUpWindow() []metrics.Sample {
 	out := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
@@ -60,11 +48,6 @@ func quietUpWindow() []metrics.Sample {
 	return out
 }
 
-// quietDownWindow is 31 samples, one per minute (0..30, span exactly
-// ScaleDownWindow), all quiet — its trailing 6 samples are also a full,
-// quiet up-window (up-window ⊆ down-window, both trailing from the newest
-// sample), so a single Analyze call over this slice establishes the
-// baseline and can be evaluated for both directions at once.
 func quietDownWindow() []metrics.Sample {
 	out := make([]metrics.Sample, 0, 31)
 	for m := 0; m <= 30; m++ {
@@ -83,8 +66,6 @@ func TestAnalyze_emptySamples(t *testing.T) {
 
 func TestAnalyze_partialWindowNeverSaturates(t *testing.T) {
 	a := NewWindowAnalyzer()
-	// Only 4 samples spanning 3 minutes — short of the 5-minute ScaleUpWindow
-	// — even though every sample looks fully saturated.
 	samples := []metrics.Sample{
 		sampleAt(0, 1000, 0, 0, 0, 5, time.Millisecond, time.Millisecond),
 		sampleAt(1, 1000, 0, 0, 0, 5, time.Millisecond, time.Millisecond),
@@ -113,8 +94,7 @@ func TestAnalyze_gatePassesButNoSignal_notSaturated(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
-		// 1000 ops/s = 100% IOPS utilization (gate met), but queue is
-		// empty and latency is flat — efficient, not saturated (§4.4).
+	// Utilization reaches 100%, but no saturation signal fires.
 		samples = append(samples, sampleAt(m, 1000, 0, 0, 0, 0, time.Millisecond, time.Millisecond))
 	}
 	got := a.Analyze("disk1", samples, testPolicy, specIOPS, asOf(samples))
@@ -130,9 +110,7 @@ func TestAnalyze_queueDepthAloneTriggers(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
-		// Gate satisfied via bandwidth (large-block, low ops/s) so it
-		// never crosses the throttle floor on served IOPS — isolates the
-		// queue-depth trigger from throttling_detected.
+	// Bandwidth alone opens the resource gate for this large-block workload.
 		samples = append(samples, sampleAt(m, 100, 0, 40*1024*1024, 0, 5, time.Millisecond, time.Millisecond))
 	}
 	got := a.Analyze("disk1", samples, testPolicy, specIOPS, asOf(samples))
@@ -150,7 +128,7 @@ func TestAnalyze_queueDepthAloneTriggers(t *testing.T) {
 func TestAnalyze_latencyAloneTriggers(t *testing.T) {
 	a := NewWindowAnalyzer()
 
-	// Cycle 1: quiet, establishes a ~1ms baseline.
+	// Cycle 1 establishes the quiet latency baseline.
 	up := quietUpWindow()
 	if got := a.Analyze("disk1", up, testPolicy, specIOPS, asOf(up)); got.Saturated {
 		t.Fatal("test setup: cycle 1 must not be saturated")
@@ -158,8 +136,7 @@ func TestAnalyze_latencyAloneTriggers(t *testing.T) {
 		t.Fatal("test setup: baseline must establish from the first full window")
 	}
 
-	// Cycle 2: gate met via bandwidth, queue empty, no throttle, but
-	// latency well above baseline × multiplier (1ms × 1.5 = 1.5ms).
+	// Cycle 2 is bandwidth-saturated only through elevated latency.
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 100; m <= 105; m++ {
 		samples = append(samples, sampleAt(m, 100, 0, 40*1024*1024, 0, 0, 5*time.Millisecond, 5*time.Millisecond))
@@ -179,14 +156,11 @@ func TestAnalyze_latencyAloneTriggers(t *testing.T) {
 func TestAnalyze_throttleAloneTriggers(t *testing.T) {
 	a := NewWindowAnalyzer()
 
-	// Cycle 1: quiet, establishes baseline.
+	// Cycle 1 establishes the quiet latency baseline.
 	up := quietUpWindow()
 	a.Analyze("disk1", up, testPolicy, specIOPS, asOf(up))
 
-	// Cycle 2: served pinned at the provisioned limit (990/1000, within
-	// throttleTolerance), queue > 0 but below QueueDepthThreshold (1) so
-	// the queue-depth trigger itself doesn't independently fire, latency
-	// flat at baseline.
+	// Cycle 2 is throttled near the provisioned limit with a non-empty queue.
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 100; m <= 105; m++ {
 		samples = append(samples, sampleAt(m, 990, 0, 0, 0, 0.5, time.Millisecond, time.Millisecond))
@@ -220,8 +194,6 @@ func TestAnalyze_momentarySpikeNotSustained(t *testing.T) {
 }
 
 func TestAnalyze_baselineEstablishesEvenWhenSaturatedFromStart(t *testing.T) {
-	// docs/design.md §4.4 regression: a disk saturated on every sample from the first
-	// window onward must still establish a baseline, not deadlock forever.
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
@@ -249,8 +221,7 @@ func TestAnalyze_baselineFrozenWhileSaturatedThenResumes(t *testing.T) {
 	}
 	baselineAfterCycle1 := first.Baseline.P95
 
-	// Cycle 2: still saturated, but with a much lower latency distribution
-	// — if the baseline recomputed from this data, it would change.
+	// Saturation freezes the lower-latency baseline update.
 	stillSaturated := make([]metrics.Sample, 0, 6)
 	for m := 100; m <= 105; m++ {
 		stillSaturated = append(stillSaturated, sampleAt(m, 1000, 0, 0, 0, 5, time.Microsecond, time.Microsecond))
@@ -264,11 +235,7 @@ func TestAnalyze_baselineFrozenWhileSaturatedThenResumes(t *testing.T) {
 			baselineAfterCycle1, second.Baseline.P95)
 	}
 
-	// Cycle 3: quiet — updateBaseline fires this cycle (stored for the
-	// *next* lookup), but this cycle's own reported Baseline still
-	// reflects the value as of before that update — a value must not
-	// retroactively describe itself. Cycle 3's own reported Baseline
-	// therefore still equals cycle 1's.
+	// A quiet cycle updates the stored baseline for subsequent analysis.
 	quiet := make([]metrics.Sample, 0, 6)
 	for m := 200; m <= 205; m++ {
 		quiet = append(quiet, sampleAt(m, 100, 0, 0, 0, 0, time.Microsecond, time.Microsecond))
@@ -282,7 +249,7 @@ func TestAnalyze_baselineFrozenWhileSaturatedThenResumes(t *testing.T) {
 			third.Baseline.P95, baselineAfterCycle1)
 	}
 
-	// Cycle 4: the freeze must have lifted after cycle 3's quiet update.
+	// The quiet update must unfreeze the baseline.
 	fourth := a.Analyze("disk1", quiet, testPolicy, specIOPS, asOf(quiet))
 	if fourth.Baseline.P95 == baselineAfterCycle1 {
 		t.Error("Baseline.P95 never updated after saturation cleared — the freeze must lift, not persist forever")
@@ -304,17 +271,9 @@ func TestAnalyze_underutilizedOnSustainedQuiet(t *testing.T) {
 	}
 }
 
-// TestAnalyze_notUnderutilizedWhenBandwidthElevated is the mirror of
-// the bandwidth-bound saturation invariant in docs/design.md §4.4, applied to the quiet
-// direction: a large-block, low-ops/s workload can still be saturating
-// its bandwidth ceiling even though queue depth, latency, and throttle
-// detection — all IOPS-denominated signals — read as idle. Must not
-// classify as Underutilized on IOPS-side quiet alone.
 func TestAnalyze_notUnderutilizedWhenBandwidthElevated(t *testing.T) {
 	a := NewWindowAnalyzer()
-	// specIOPS(1000) x bytesPerIOPS(32768) is the disk's bandwidth
-	// ceiling; 0.99 of it is comfortably above testPolicy's default 0.98
-	// utilization_threshold while ReadOps(100) alone reads as quiet.
+	// 1000 IOPS at 32 KiB per operation equals the provisioned bandwidth ceiling.
 	const nearCeilingBytes = 0.99 * 1000 * 32768
 	samples := make([]metrics.Sample, 0, 31)
 	for m := 0; m <= 30; m++ {
@@ -349,7 +308,7 @@ func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
-		// Queue climbs by 1 per minute: 0,1,2,3,4,5 -> growth rate = 5 / 300s.
+	// Queue rises from 0 to 5 over 300 seconds.
 		samples = append(samples, sampleAt(m, 300, 200, 0, 0, float64(m), time.Millisecond, time.Millisecond))
 	}
 	got := a.Analyze("disk1", samples, testPolicy, specIOPS, asOf(samples))
@@ -365,13 +324,7 @@ func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
 	}
 }
 
-// --- issue #18: queue units must never mix into IOPS demand math ---
 
-// sampleWithQueueUnit builds one sample identical in shape to sampleAt but
-// with an explicit QueueDepth unit, so these tests can construct a
-// bytes-denominated window with the exact same numeric progression as an
-// ops-denominated one — proving the two cannot produce the same math
-// despite identical raw values.
 func sampleWithQueueUnit(minute int, queue float64, unit metrics.QueueDepthUnit) metrics.Sample {
 	s := sampleAt(minute, 100, 0, 0, 0, queue, time.Millisecond, time.Millisecond)
 	s.QueueDepth.Unit = unit
@@ -404,11 +357,6 @@ func TestQueueUnitConsistent_mixedOrBytesWindowRejected(t *testing.T) {
 	}
 }
 
-// TestSustainedQueue_identicalValuesDifferentUnitsDiverge is the issue's
-// own acceptance criterion: "tests cover identical numeric values with ops
-// and bytes and prove they cannot produce silently identical math." Both
-// windows carry the exact same QueueDepth.Value progression; only the unit
-// differs.
 func TestSustainedQueue_identicalValuesDifferentUnitsDiverge(t *testing.T) {
 	const threshold = 1.0
 	opsWindow := []metrics.Sample{
@@ -443,9 +391,6 @@ func TestSustainedQueue_identicalValuesDifferentUnitsDiverge(t *testing.T) {
 	}
 }
 
-// TestQueueGrowthRate_identicalProgressionDifferentUnitsDiverge is the
-// growth-rate half of the same acceptance criterion, at the exact call
-// site issue #18 flags: decider.demand()'s open-workload sum.
 func TestQueueGrowthRate_identicalProgressionDifferentUnitsDiverge(t *testing.T) {
 	opsWindow := []metrics.Sample{
 		sampleWithQueueUnit(0, 0, metrics.QueueDepthOps),
@@ -471,8 +416,7 @@ func TestQueueGrowthRate_identicalProgressionDifferentUnitsDiverge(t *testing.T)
 
 func TestAnalyze_sourceAndPerOpOpsAndFillRatio(t *testing.T) {
 	a := NewWindowAnalyzer()
-	// 4 samples spanning 3 minutes -> 3/5 = 0.6 of ScaleUpWindow(5m),
-	// 3/30 = 0.1 of ScaleDownWindow(30m).
+	// Four samples span three of the required five minutes.
 	samples := []metrics.Sample{
 		sampleAt(0, 300, 200, 0, 0, 0, time.Millisecond, time.Millisecond),
 		sampleAt(1, 300, 200, 0, 0, 0, time.Millisecond, time.Millisecond),
@@ -521,13 +465,12 @@ func TestAnalyze_nonPositiveSpecIOPSIsDefensive(t *testing.T) {
 	}
 }
 
-// --- issue #15: fail closed on stale metrics ---
 
 func TestAnalyze_staleSamplesNeverSaturate(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
-		// Queue-driven saturation shape — would trigger Saturated if fresh.
+	// This shape would be saturated if its evidence were fresh.
 		samples = append(samples, sampleAt(m, 1000, 0, 0, 0, 5, time.Millisecond, time.Millisecond))
 	}
 	policy := testPolicy
@@ -570,13 +513,9 @@ func TestAnalyze_sampleAgeReportedEvenWhenFresh(t *testing.T) {
 	}
 }
 
-// --- issue #7 (reopened): gap-aware window coverage ---
 
 func TestWindowFull_gapBreaksFullness(t *testing.T) {
-	// Overall span covers the window and the sample count clears
-	// minSamplesForWindow, but one gap between samples[2] and samples[3] is
-	// far larger than maxGap — span+count alone is not enough (issue #15 /
-	// issue #7's "gap-aware window coverage").
+	// Count and total span pass, but the internal outage invalidates the window.
 	samples := []metrics.Sample{
 		sampleAt(0, 100, 0, 0, 0, 0, time.Millisecond, time.Millisecond),
 		sampleAt(1, 100, 0, 0, 0, 0, time.Millisecond, time.Millisecond),
@@ -591,13 +530,9 @@ func TestWindowFull_gapBreaksFullness(t *testing.T) {
 	}
 }
 
-// --- issue #9 (reopened): exclude inactive-direction zero latency ---
 
 func TestComputeBaseline_excludesInactiveDirectionZero(t *testing.T) {
-	// Every sample only has read activity; WriteLatAvg here stands in for
-	// metrics.computeSample's zero-value-when-idle field, not a real 0ns
-	// observation (issue #9). Pooling it anyway would drag the baseline
-	// toward zero.
+	// Only reads are active; write latency is a phantom zero value.
 	samples := []metrics.Sample{
 		sampleAt(0, 100, 0, 0, 0, 0, 10*time.Millisecond, 0),
 		sampleAt(1, 100, 0, 0, 0, 0, 10*time.Millisecond, 0),
@@ -613,9 +548,7 @@ func TestComputeBaseline_excludesInactiveDirectionZero(t *testing.T) {
 }
 
 func TestComputeBaseline_allIdleReturnsNotOk(t *testing.T) {
-	// Nonzero latency fields but zero ops in both directions — exactly the
-	// shape a totally idle interval produces once the zero-value fields are
-	// excluded. Establishing a "baseline" from this would be a bogus 0.
+	// Nonzero latency fields with zero operations must not establish a baseline.
 	samples := []metrics.Sample{
 		sampleAt(0, 0, 0, 0, 0, 0, 5*time.Millisecond, 5*time.Millisecond),
 	}
@@ -640,13 +573,9 @@ func TestReadWriteLatencies_excludeInactiveSamples(t *testing.T) {
 	}
 }
 
-// --- issue #7 (reopened): buffer slack + gap-aware window coverage ---
 
 func TestWindowFull_toleratesJitterWithinMaxGap(t *testing.T) {
-	// Real ticks are never perfectly evenly spaced. Gaps of 55s/65s around
-	// a nominal 60s cadence, all comfortably under a 90s maxGap, must still
-	// read as a full, sustained window — jitter is not the same failure
-	// mode as a genuine outage.
+	// Scheduler jitter alternates 55s and 65s around a one-minute cadence.
 	base := epoch
 	offsets := []time.Duration{0, 55 * time.Second, 120 * time.Second, 175 * time.Second, 240 * time.Second, 300 * time.Second}
 	samples := make([]metrics.Sample, 0, len(offsets))
@@ -659,10 +588,7 @@ func TestWindowFull_toleratesJitterWithinMaxGap(t *testing.T) {
 }
 
 func TestWindowFull_sparseSpanButBelowMinSamplesIsNotFull(t *testing.T) {
-	// Only 2 samples, but their span alone already covers the window —
-	// minSamplesForWindow's floor must still block this: a window this
-	// sparse carries almost no real information despite "technically"
-	// spanning the right amount of wall-clock time.
+	// Two endpoints span the window but do not meet the minimum sample count.
 	samples := []metrics.Sample{
 		{DiskID: "disk1", Timestamp: epoch, Source: metrics.SourceGuest},
 		{DiskID: "disk1", Timestamp: epoch.Add(5 * time.Minute), Source: metrics.SourceGuest},
@@ -673,23 +599,15 @@ func TestWindowFull_sparseSpanButBelowMinSamplesIsNotFull(t *testing.T) {
 }
 
 func TestAnalyze_recoversAfterLongOutageWithoutPoisoningFromOldHistory(t *testing.T) {
-	// The buffer still retains history from before a long collection
-	// outage — that alone must not prevent WindowFullUp from becoming
-	// true again once enough contiguous, fresh samples have accumulated.
-	// This is exactly what trailingWindow + windowFull(upWindow, ...)
-	// (rather than windowFull(samples, ...) on the whole buffer) is
-	// supposed to guarantee.
+	// Retained pre-outage history must not bridge the recovered window.
 	a := NewWindowAnalyzer()
 
 	var samples []metrics.Sample
-	// Old segment, minutes 0-2 — clustered together, long before the gap.
+	// Pre-outage samples.
 	for m := 0; m <= 2; m++ {
 		samples = append(samples, sampleAt(m, 100, 0, 0, 0, 0, time.Millisecond, time.Millisecond))
 	}
-	// A long outage follows (implicit: the next sample jumps to minute 100
-	// — a ~98-minute gap), then a clean, contiguous recovery: minutes
-	// 100-105, exactly spanning the 5-minute ScaleUpWindow with no
-	// internal gaps.
+	// Sampling resumes at minute 100 after a long outage.
 	for m := 100; m <= 105; m++ {
 		samples = append(samples, sampleAt(m, 100, 0, 0, 0, 0, time.Millisecond, time.Millisecond))
 	}
@@ -703,19 +621,9 @@ func TestAnalyze_recoversAfterLongOutageWithoutPoisoningFromOldHistory(t *testin
 	}
 }
 
-// --- pre-merge review: trailingWindow must not deadlock windowFull under
-// ordinary scheduler jitter ---
 
-// TestTrailingWindow_jitterNeverPreventsFullSpan is the core regression: a
-// cutoff computed from real, jittered timestamps almost never lands
-// exactly on an existing sample, so a strict "drop everything before
-// cutoff" trim always returned a span some small delta under window —
-// windowFull's own span check could then never pass, no matter how long
-// collection ran. trailingWindow must reach one sample further back to
-// close that gap.
 func TestTrailingWindow_jitterNeverPreventsFullSpan(t *testing.T) {
-	// 31 samples about 60s apart, each offset by a few seconds of jitter —
-	// none of cutoff's exact multiples-of-5-minutes land on a real sample.
+	// Thirty-one samples include small scheduler jitter around one-minute cadence.
 	base := epoch
 	jitter := []time.Duration{0, 3, -2, 4, -1, 2, 0, -3, 1, 3, -2, 2, 0, 1, -1, 4, -3, 2, 1, -2, 0, 3, -1, 2, -3, 1, 0, 4, -2, 1, 0}
 	samples := make([]metrics.Sample, len(jitter))
@@ -740,14 +648,6 @@ func TestTrailingWindow_jitterNeverPreventsFullSpan(t *testing.T) {
 	}
 }
 
-// TestTrailingWindow_doesNotReachAcrossAGapItDoesNotNeedTo is the flip
-// side: when the natural cutoff trim already spans a full window on its
-// own, trailingWindow must not reach for a predecessor anyway — doing so
-// could pull in a sample from the far side of an arbitrarily large gap
-// (stale pre-outage history) for no benefit, since nothing needed
-// bridging. Directly exercises the boundary this fix must respect, ahead
-// of TestAnalyze_recoversAfterLongOutageWithoutPoisoningFromOldHistory's
-// full-pipeline version above.
 func TestTrailingWindow_doesNotReachAcrossAGapItDoesNotNeedTo(t *testing.T) {
 	samples := []metrics.Sample{
 		{DiskID: "disk1", Timestamp: epoch, Source: metrics.SourceGuest}, // stale, far pre-outage
@@ -767,10 +667,7 @@ func TestTrailingWindow_doesNotReachAcrossAGapItDoesNotNeedTo(t *testing.T) {
 }
 
 func TestAnalyze_baselineNotEstablishedFromIdleWindow(t *testing.T) {
-	// A full up-window where nothing was ever active in either direction —
-	// currentBaseline must decline to establish (issue #9), not freeze a
-	// bogus 0 in place forever. The baseline rule in docs/design.md §4.4
-	// would otherwise seed from the disk's first full window here.
+	// A full window with no active direction has no baseline data.
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
@@ -782,22 +679,13 @@ func TestAnalyze_baselineNotEstablishedFromIdleWindow(t *testing.T) {
 	}
 }
 
-// --- issue #17: bandwidth-aware scale-down sizing ---
 
-// blockSample builds one down-window sample of a workload doing opsPerSec
-// operations of blockSize bytes each, purely for demandP95Down's
-// ops-vs-bandwidth comparison — queue/latency/timestamps don't matter for
-// these tests.
 func blockSample(minute int, opsPerSec float64, blockSize int64) metrics.Sample {
 	return sampleAt(minute, opsPerSec, 0, opsPerSec*float64(blockSize), 0, 0, time.Millisecond, time.Millisecond)
 }
 
 func TestDemandP95Down_64KiBWorkloadIsBandwidthLimited(t *testing.T) {
-	// issue #17's own worked example: 900 ops/s at 64 KiB/op ≈ 59 MB/s,
-	// whose IOPS-equivalent (÷32768 using the ratio in docs/design.md §4.4) is 1800 — well
-	// above the 900 ops/s figure alone. Sizing from ops/s alone (900)
-	// would derive a target whose bandwidth ceiling sits below what this
-	// workload already sustains.
+	// 900 ops/s at 64 KiB each is about 59 MB/s, equivalent to 1800 provisioned IOPS.
 	window := make([]metrics.Sample, 6)
 	for i := range window {
 		window[i] = blockSample(i, 900, 64*1024)
@@ -820,9 +708,7 @@ func TestDemandP95Down_64KiBWorkloadIsBandwidthLimited(t *testing.T) {
 }
 
 func TestDemandP95Down_4KiBWorkloadIsIOPSLimited(t *testing.T) {
-	// The opposite shape: small blocks, high ops/s, low bandwidth — IOPS
-	// must determine the target, not the much smaller bandwidth-equivalent
-	// figure.
+	// Small blocks make IOPS, not bandwidth, the limiting resource.
 	window := make([]metrics.Sample, 6)
 	for i := range window {
 		window[i] = blockSample(i, 900, 4*1024)
@@ -845,17 +731,7 @@ func TestDemandP95Down_4KiBWorkloadIsIOPSLimited(t *testing.T) {
 }
 
 func TestDemandP95Down_alignedPerSampleMaxNotCombinedPercentiles(t *testing.T) {
-	// The exact failure mode issue #17 warns against: max(p95(ops),
-	// p95(bandwidth)) can silently understate demand, because the two
-	// percentiles can be driven by *different* samples — no single moment
-	// of the workload the disk actually served. 18 "background" samples
-	// have ops==bandwidth-equivalent==100 (nothing to disambiguate); one
-	// outlier sample spikes ops to 5000 while bandwidth stays low, and a
-	// different outlier sample spikes bandwidth-equivalent to 5000 while
-	// ops stays low. Neither individual percentile series (computed
-	// independently) ever climbs high enough to surface either spike at
-	// p95 — but the properly-aligned per-sample-max series does, because
-	// each sample's own max(ops, bandwidth) is 5000 for both outliers.
+	// Per-sample maxima must precede the percentile because independent p95s occur at different times.
 	window := make([]metrics.Sample, 0, 20)
 	for i := 0; i < 18; i++ {
 		window = append(window, sampleAt(i, 100, 0, 100*bytesPerIOPS, 0, 0, time.Millisecond, time.Millisecond))

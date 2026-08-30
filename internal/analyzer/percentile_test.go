@@ -20,11 +20,7 @@ func TestPercentile_empty(t *testing.T) {
 }
 
 func TestPercentile_knownSeries(t *testing.T) {
-	// 1..20 ms, nearest-rank: idx = ceil(p*n)-1.
-	// p10 -> ceil(2)-1=1  -> value 2
-	// p50 -> ceil(10)-1=9 -> value 10
-	// p95 -> ceil(19)-1=18 -> value 19
-	// p100 -> ceil(20)-1=19 -> value 20
+	// Nearest-rank indexes for values 1..20: p10=2, p50=10, p95=19, p100=20.
 	series := make([]time.Duration, 20)
 	for i := range series {
 		series[i] = time.Duration(i+1) * time.Millisecond
@@ -50,7 +46,7 @@ func TestPercentile_unsortedInputSortedInternally(t *testing.T) {
 	if got, want := percentile(series, 1.0), 9*time.Millisecond; got != want {
 		t.Errorf("percentile(unsorted, 1.0) = %v, want %v", got, want)
 	}
-	// Original slice must not be mutated.
+	// Percentile must not mutate the caller's slice.
 	if series[0] != 9*time.Millisecond {
 		t.Errorf("percentile mutated its input: %v", series)
 	}
