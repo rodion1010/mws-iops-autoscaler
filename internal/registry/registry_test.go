@@ -81,9 +81,7 @@ func TestSelect_selectedReturnsOnlyNamedDisks(t *testing.T) {
 }
 
 func TestSelect_selectedOneMissingIsFatal(t *testing.T) {
-	// issue #5, reopened: disks.selected is an exhaustive statement of
-	// operator intent, not a best-effort filter — one unmatched name must
-	// fail the whole call, not silently narrow the managed set.
+	// selected is exhaustive operator intent, not a best-effort filter.
 	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "datadisk"},
 		{DeviceName: "no-such-disk"},
@@ -121,10 +119,7 @@ func TestSelect_selectedAllMissingIsFatal(t *testing.T) {
 }
 
 func TestSelect_selectedRecoversOnceVMInventoryIsConsistent(t *testing.T) {
-	// The same Select call, retried against a VM snapshot where the
-	// previously-missing disk now exists — e.g. a later reconcile cycle
-	// after the disk was actually attached — must succeed cleanly, proving
-	// this isn't a permanent failure once triggered.
+	// The same selection succeeds once the missing disk appears in a later snapshot.
 	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "datadisk"},
 		{DeviceName: "not-yet-attached"},
@@ -148,14 +143,7 @@ func TestSelect_selectedRecoversOnceVMInventoryIsConsistent(t *testing.T) {
 }
 
 func TestSelect_selectedDuplicateLiveDeviceNameNeverSilentlyOverwrites(t *testing.T) {
-	// issue #5's other remaining criterion ("reject ambiguous duplicate
-	// live matches") is closed upstream, at compute.Discover (issue #4):
-	// a duplicate device_name attachment is excluded from vm.Disks
-	// entirely before Select ever sees it. This test documents that
-	// invariant from Select's side — if vm.Disks somehow still carried a
-	// duplicate (a caller bypassing Discover, e.g. in a test), the last
-	// entry silently wins the map, which is exactly why Discover must be
-	// the one preventing this in the first place, not Select.
+	// Discover must remove duplicate live device names before Select builds its lookup map.
 	vm := testVM()
 	vm.Disks = append(vm.Disks, compute.StorageDisk{Alias: "datadisk-2", DeviceName: "datadisk"})
 	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "datadisk"}}}

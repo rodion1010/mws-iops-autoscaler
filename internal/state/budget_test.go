@@ -21,9 +21,6 @@ func TestLoadBudget_missingFileStartsEmpty(t *testing.T) {
 	}
 }
 
-// reserveConfirm is the common "attempt a change and it landed" sequence
-// used throughout this file — Reserve then Confirm, matching what
-// Agent.actuate does around a successful write.
 func reserveConfirm(t *testing.T, b *Budget, diskID, key string, before, target int64, ts time.Time) {
 	t.Helper()
 	if err := b.Reserve(diskID, key, before, target, ts); err != nil {
@@ -55,9 +52,7 @@ func TestBudget_reserveConfirmThenCountSince(t *testing.T) {
 }
 
 func TestBudget_pendingCountsTheSameAsConfirmed(t *testing.T) {
-	// issue #10: undercounting is the dangerous direction, so a
-	// reservation that was never resolved (this run crashed, or simply
-	// hasn't gotten to Confirm yet) must still consume the budget.
+	// Pending reservations count because undercounting is unsafe.
 	path := filepath.Join(t.TempDir(), "budget.jsonl")
 	b, _ := LoadBudget(path)
 
@@ -97,9 +92,7 @@ func TestBudget_countSinceExcludesEventsBeforeCutoff(t *testing.T) {
 }
 
 func TestLoadBudget_survivesRestart(t *testing.T) {
-	// The durability invariant in docs/design.md §9.4 requires that a restart not reset the
-	// budget. Simulate one by writing with one Budget instance and
-	// reloading with a fresh one over the same file.
+	// Reload through a new Budget instance to simulate restart durability.
 	path := filepath.Join(t.TempDir(), "budget.jsonl")
 
 	b1, err := LoadBudget(path)
@@ -120,14 +113,13 @@ func TestLoadBudget_survivesRestart(t *testing.T) {
 }
 
 func TestLoadBudget_survivesRestartWithPendingReservation(t *testing.T) {
-	// The literal issue #10 scenario: a crash between Reserve and
-	// Confirm/Release must not lose the reservation on reload.
+	// Crash between Reserve and resolution must preserve the reservation.
 	path := filepath.Join(t.TempDir(), "budget.jsonl")
 	b1, _ := LoadBudget(path)
 	if err := b1.Reserve("disk1", "key-1", 1000, 2000, epoch); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
-	// No Confirm/Release — simulates a crash right here.
+	// No Confirm or Release simulates the crash point.
 
 	b2, err := LoadBudget(path)
 	if err != nil {
@@ -143,15 +135,13 @@ func TestLoadBudget_survivesRestartWithPendingReservation(t *testing.T) {
 }
 
 func TestLoadBudget_rejectsCorruptionInTheMiddle(t *testing.T) {
-	// issue #10, reopened: corruption anywhere but the last line must
-	// fail closed, not be silently skipped — the previous behavior could
-	// only ever make the budget look more permissive than reality.
+	// Non-tail corruption fails closed.
 	path := filepath.Join(t.TempDir(), "budget.jsonl")
 	b1, _ := LoadBudget(path)
 	reserveConfirm(t, b1, "disk1", "key-1", 1000, 2000, epoch)
 	reserveConfirm(t, b1, "disk1", "key-2", 1000, 2000, epoch.Add(time.Minute))
 
-	// Splice a corrupted line into the middle of the file.
+	// Insert corruption into the middle of the log.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read budget file: %v", err)
@@ -175,9 +165,7 @@ func TestLoadBudget_rejectsCorruptionInTheMiddle(t *testing.T) {
 }
 
 func TestLoadBudget_recoversFromTornTailWrite(t *testing.T) {
-	// issue #10, reopened: a crash mid-append can only ever leave the
-	// *last* line torn (append() fsyncs before returning, so every prior
-	// line is already durable) — this is recoverable, not corruption.
+	// Only a final torn append is recoverable.
 	path := filepath.Join(t.TempDir(), "budget.jsonl")
 	b1, _ := LoadBudget(path)
 	reserveConfirm(t, b1, "disk1", "key-1", 1000, 2000, epoch)
@@ -192,8 +180,7 @@ func TestLoadBudget_recoversFromTornTailWrite(t *testing.T) {
 		t.Errorf("CountSince = %d, want 1 — the one complete, durable record must survive a torn tail", got)
 	}
 
-	// The recovery must itself be durable — reloading again must not see
-	// the torn bytes resurface.
+	// Recovery must remove torn bytes durably.
 	b3, err := LoadBudget(path)
 	if err != nil {
 		t.Fatalf("LoadBudget (second reload): %v", err)
@@ -204,9 +191,7 @@ func TestLoadBudget_recoversFromTornTailWrite(t *testing.T) {
 }
 
 func TestBudget_compactKeepsPendingRegardlessOfAge(t *testing.T) {
-	// issue #10, reopened: a still-unresolved reservation must never be
-	// compacted away, no matter how old — discarding it early would
-	// silently undo the undercounting guarantee Reserve exists to provide.
+	// Compaction must retain unresolved reservations regardless of age.
 	path := filepath.Join(t.TempDir(), "budget.jsonl")
 	b, _ := LoadBudget(path)
 	if err := b.Reserve("disk1", "old-pending", 1000, 2000, epoch.Add(-48*time.Hour)); err != nil {
@@ -239,8 +224,7 @@ func TestBudget_compactDropsOldResolvedEventsKeepsRecent(t *testing.T) {
 		t.Fatalf("CountSince after Compact = %d, want 1", got)
 	}
 
-	// Reload from disk to confirm the file itself was actually rewritten,
-	// not just the in-memory mirror.
+	// Reload to verify the durable file, not only in-memory state.
 	reloaded, err := LoadBudget(path)
 	if err != nil {
 		t.Fatalf("LoadBudget after Compact: %v", err)

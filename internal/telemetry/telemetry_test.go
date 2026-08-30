@@ -45,8 +45,7 @@ func TestRecordDecision_exposesExpectedSeries(t *testing.T) {
 	body := scrape(t, r)
 
 	wantSubstrings := []string{
-		// issue #19: provisioned_iops reports Current (observed/applied
-		// state), never Target — a decision alone must never move it.
+		// Decisions expose Current as provisioned state; Target remains intent.
 		`iops_autoscaler_disk_provisioned_iops{class="independent",disk="datadisk",vm="vm-1"} 1000`,
 		`iops_autoscaler_disk_proposed_target_iops{class="independent",disk="datadisk",vm="vm-1"} 1200`,
 		`iops_autoscaler_disk_observed_iops{disk="datadisk",op="read",vm="vm-1"} 700`,
@@ -68,17 +67,12 @@ func TestRecordDecision_exposesExpectedSeries(t *testing.T) {
 			t.Errorf("scraped output missing %q\n--- full output ---\n%s", want, body)
 		}
 	}
-	// RecordDecision itself never touches vm_cap_reached (issue #19) —
-	// only RecordVMCapReached does, so the series shouldn't even exist yet.
+	// RecordDecision must not create the VM-wide cap series.
 	if strings.Contains(body, "iops_autoscaler_vm_cap_reached") {
 		t.Error("vm_cap_reached must not be set by RecordDecision — only RecordVMCapReached sets it")
 	}
 }
 
-// TestRecordDecision_neverMovesProvisionedOnDryRunOrFailedWrite is issue
-// #19's core scenario: RecordDecision alone — the only call a dry-run or a
-// failed write ever produces — must never move disk_provisioned_iops off
-// the disk's actual current value, however far Target diverges from it.
 func TestRecordDecision_neverMovesProvisionedOnDryRunOrFailedWrite(t *testing.T) {
 	r := NewRegistry()
 	d := decider.Decision{DiskID: "d1", Action: decider.ActionScaleUp, Current: 1000, Target: 5000}
@@ -93,9 +87,6 @@ func TestRecordDecision_neverMovesProvisionedOnDryRunOrFailedWrite(t *testing.T)
 	}
 }
 
-// TestRecordAppliedIOPS_movesProvisionedOnlyOnVerifiedWrite covers the
-// other half: only a call to RecordAppliedIOPS — the caller's own
-// verified-write confirmation point — may move disk_provisioned_iops.
 func TestRecordAppliedIOPS_movesProvisionedOnlyOnVerifiedWrite(t *testing.T) {
 	r := NewRegistry()
 	d := decider.Decision{DiskID: "d1", Action: decider.ActionScaleUp, Current: 1000, Target: 1200}
@@ -155,10 +146,6 @@ func diskName(i int) string {
 	return "d2"
 }
 
-// TestRecordDecision_metricSourceClearsStaleActiveSeries is issue #19's
-// source-switch scenario: once a disk's active source changes, the
-// previously active source's series must read back 0, not stay at 1
-// forever.
 func TestRecordDecision_metricSourceClearsStaleActiveSeries(t *testing.T) {
 	r := NewRegistry()
 	r.RecordDecision("vm-1", "independent", decider.Decision{

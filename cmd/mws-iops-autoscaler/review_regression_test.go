@@ -16,10 +16,7 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/registry"
 )
 
-// replacementClient models a disk resource being deleted and recreated
-// under the same user-visible name. The replacement deliberately has the
-// same provisioned IOPS as the stale decision's Current: an IOPS-only
-// precondition cannot distinguish the two resources.
+// Model a same-name replacement with unchanged IOPS, which an IOPS-only check cannot distinguish.
 type replacementClient struct {
 	disk *compute.Disk
 	vm   *compute.VirtualMachine
@@ -77,11 +74,6 @@ func TestRegressionStaleDecisionNeverMutatesReplacementDisk(t *testing.T) {
 		m.Disk.IOPS = 1000
 		m.Disk.IncarnationID = "incarnation-a"
 
-		// newDiscoverableTestAgent, not newTestAgent: an incarnation
-		// mismatch now forces a rediscovery (P1 fix, mirroring
-		// ErrConcurrentModification) — discover() needs a real
-		// readiness/cfg/resolved/sampler to run against, not the minimal
-		// actuate-only wiring newTestAgent provides.
 		a := newDiscoverableTestAgent(t, actuator.NewComputeActuator(client), client)
 		a.managed = []registry.ManagedDisk{m}
 		d := decider.Decision{DiskID: m.Disk.DiskName, Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
@@ -103,21 +95,10 @@ func TestRegressionStaleDecisionNeverMutatesReplacementDisk(t *testing.T) {
 				Disks: []compute.StorageDisk{{
 					Alias: "bootdisk", DeviceName: "bootdisk", DiskName: "vm-1-boot",
 					Class: compute.ClassDependent, IOPS: 1000,
-					// IncarnationID deliberately NOT set here — a real
-					// GetVirtualMachine/translateVMResponse read never
-					// populates a live StorageDisk's IncarnationID at all
-					// (sdk_client.go; docs/platform-reference.md: "StorageDiskStatusResponse...
-					// does not carry metadata.id"). Setting it directly on
-					// this fixture (as an earlier version of this test did)
-					// would not exercise the write path's real incarnation
-					// check — only its own fresh GetDisk call, below, ever
-					// learns the resource's actual metadata.id.
+					// Real VM reads omit IncarnationID; only the fresh GetDisk below can verify identity.
 				}},
 			},
-			// This is what the write path's fresh GetDisk(vm-1-boot) call
-			// actually reads — a genuinely different incarnation than the
-			// stale decision's, even though the VM read above reports no
-			// incarnation at all.
+			// The fresh disk read returns the replacement incarnation.
 			disk: &compute.Disk{Name: "vm-1-boot", SpecIOPS: 1000, IncarnationID: "incarnation-b"},
 		}
 		m := dependentDisk()
@@ -301,14 +282,7 @@ func TestRegressionRecreatedDiskStartsWithFreshLatencyBaseline(t *testing.T) {
 	if got.Baseline.P95 != 10*time.Millisecond {
 		t.Fatalf("replacement baseline = %s, want 10ms: it must not inherit incarnation-a's 1ms baseline", got.Baseline.P95)
 	}
-	// reconcile passes m.Disk.IdentityKey() (DiskName+"\x00"+IncarnationID)
-	// to Analyze so the analyzer's own internal baseline map is keyed
-	// incarnation-safely (the fix above) — but that value is only meant to
-	// be a state-lookup key, never a display-facing identifier. Analysis.
-	// DiskID must still read as the plain, human-readable disk name (as
-	// Decision.DiskID, the journal and every Prometheus label already do;
-	// see the display-facing identity invariant in docs/design.md §5.2) —
-	// never the composite form with its embedded "\x00".
+	// Analyzer state uses the composite identity key, but exported DiskID must remain human-readable.
 	if got.DiskID != recreated.Disk.DiskName {
 		t.Errorf("Analysis.DiskID = %q, want the plain disk name %q, not the analyzer's internal composite state key",
 			got.DiskID, recreated.Disk.DiskName)

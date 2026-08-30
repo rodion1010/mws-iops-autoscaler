@@ -22,8 +22,7 @@ func newTestGuestSource(t *testing.T, path string, clock *time.Time) *GuestSourc
 	g := NewGuestSource()
 	g.procDiskstatsPath = path
 	g.resolveSymlink = func(guestPath string) (string, error) {
-		// datadisk -> sdb, matching docs/development.md's confirmed live mapping;
-		// anything else is unresolvable, exercising the skip path.
+		// datadisk resolves to sdb; all other names exercise the unresolved path.
 		if guestPath == "/dev/disk/by-id/mws-datadisk" {
 			return "sdb", nil
 		}
@@ -97,7 +96,7 @@ func TestGuestSource_unresolvableDiskSkipped(t *testing.T) {
 
 func TestGuestSource_deviceMissingFromDiskstatsSkipped(t *testing.T) {
 	dir := t.TempDir()
-	// No sdb line at all in the file.
+	// diskstats contains no sdb entry.
 	path := writeDiskstats(t, dir, "   8       0 sda 1 1 1 1 1 1 1 1 1 1 1\n")
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)
@@ -143,8 +142,7 @@ func TestVerifyPath_unresolvableSymlink(t *testing.T) {
 
 func TestVerifyPath_deviceMissingFromDiskstats(t *testing.T) {
 	dir := t.TempDir()
-	// No sdb line at all — the symlink itself would resolve, but the
-	// kernel device it points at never shows up in /proc/diskstats.
+	// The symlink resolves, but its kernel device is absent from diskstats.
 	path := writeDiskstats(t, dir, "   8       0 sda 1 1 1 1 1 1 1 1 1 1 1\n")
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)

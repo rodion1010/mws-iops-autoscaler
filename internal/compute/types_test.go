@@ -2,7 +2,6 @@ package compute
 
 import "testing"
 
-// --- pre-merge review: DiskName alone is not a safe long-term identity ---
 
 func TestStorageDisk_IdentityKey_differsAcrossIncarnations(t *testing.T) {
 	original := StorageDisk{DiskName: "vm-1-data", IncarnationID: "incarnation-1"}

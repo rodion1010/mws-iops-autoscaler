@@ -40,8 +40,7 @@ func TestUpdateIndependentDiskIOPS_dryRunVerifiesButDoesNotMutate(t *testing.T) 
 }
 
 func TestUpdateIndependentDiskIOPS_dryRunCatchesConflict(t *testing.T) {
-	// issue #16 acceptance criterion: dry-run exercises the same
-	// precondition checks as a real write, not a weaker subset of them.
+	// Dry-run enforces the same preconditions as a real write.
 	c := newFakeClient()
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 5000, Etag: "etag-1"} // live moved since discovery
 
@@ -90,8 +89,7 @@ func TestUpdateIndependentDiskIOPS_emptyEtagOnReReadFailsLocally(t *testing.T) {
 
 func TestUpdateIndependentDiskIOPS_conflictWhenLiveDiffersFromExpected(t *testing.T) {
 	c := newFakeClient()
-	// An operator raised the disk from 1000 to 5000 after discovery ran —
-	// the scenario from issue #16's own example.
+	// An external actor raised the disk after discovery.
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 5000, Etag: "etag-1"}
 
 	before := *c.disks["datadisk"]
@@ -130,7 +128,7 @@ func TestUpdateDependentDiskIOPS_success(t *testing.T) {
 		t.Errorf("applied = %d, want 3000", got)
 	}
 
-	// Every other disk's entry must have reached the fake untouched.
+	// Every non-target attachment must reach the client unchanged.
 	updated := c.vms["iops-test-vm"].Disks
 	for _, d := range updated {
 		if d.DeviceName == "datadisk" && d.Class != ClassIndependent {
@@ -197,7 +195,6 @@ func TestUpdateDependentDiskIOPS_deviceNotFound(t *testing.T) {
 	}
 }
 
-// --- issue #20: reject ambiguous attachment identities before writing ---
 
 func TestUpdateDependentDiskIOPS_duplicateAliasRefusedWithoutWriting(t *testing.T) {
 	c := newFakeClient()
@@ -334,18 +331,13 @@ func TestUpdateDependentDiskIOPS_appliedMismatchIsFailure(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDisk()
 
-	// The fake echoes back req.Disks as-is (always a match), so the
-	// mismatch case needs a wrapper that wants a different value than
-	// UpdateDependentDiskIOPS asked for — simulating the platform silently
-	// applying something else.
+	// The wrapper simulates a platform response with a different applied value.
 	mc := &mismatchDependentClient{fakeClient: c, wrongIOPS: 4000}
 	if _, err := UpdateDependentDiskIOPS(context.Background(), mc, "iops-test-vm", "bootdisk", 1000, 3000, "", false, ""); err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded despite the platform applying a different value than requested")
 	}
 }
 
-// mismatchDependentClient wraps fakeClient to make UpdateDependentDisk
-// report an applied value different from what was requested.
 type mismatchDependentClient struct {
 	*fakeClient
 	wrongIOPS int64
@@ -364,20 +356,8 @@ func (m *mismatchDependentClient) UpdateDependentDisk(ctx context.Context, req D
 	return vm, nil
 }
 
-// --- regression: dependent-path incarnation check needs its own fresh
-// GetDisk read — a VM read alone never carries a disk's metadata.id ---
 
-// vmWithDependentDiskNamed mirrors vmWithDependentDisk but sets DiskName on
-// the dependent attachment and, crucially, leaves IncarnationID empty —
-// exactly what a real GetVirtualMachine/translateVMResponse read produces.
-// sdk_client.go's translateVMResponse never populates StorageDisk.
-// IncarnationID from a VM read for either disk class (docs/platform-reference.md:
-// "StorageDiskStatusResponse... does not carry metadata.id"); only a
-// separate GetDisk call does. A fixture that set IncarnationID here
-// directly (as an earlier version of this test did) would never catch a
-// regression in the incarnation check — the check would silently read
-// whatever the fixture happened to carry rather than what the write path
-// itself resolves via its own fresh read.
+// vmWithDependentDiskNamed matches a real VM read: DiskName set, IncarnationID empty.
 func vmWithDependentDiskNamed(diskName string) *VirtualMachine {
 	return &VirtualMachine{
 		Name: "iops-test-vm",
@@ -391,8 +371,7 @@ func vmWithDependentDiskNamed(diskName string) *VirtualMachine {
 func TestUpdateDependentDiskIOPS_incarnationMismatchRefusedViaFreshDiskRead(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
-	// The disk was deleted and recreated under the same name — a different
-	// incarnation now sits at the resource a fresh GetDisk actually reads.
+	// A replacement incarnation now exists under the same disk name.
 	c.disks["iops-test-vm-boot"] = &Disk{Name: "iops-test-vm-boot", IncarnationID: "incarnation-b"}
 
 	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "incarnation-a", false, "")
@@ -424,10 +403,7 @@ func TestUpdateDependentDiskIOPS_incarnationMatchViaFreshDiskReadSucceeds(t *tes
 func TestUpdateDependentDiskIOPS_emptyLiveIncarnationFailsClosedWhenExpectedIsKnown(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
-	// The fresh GetDisk read returns a disk with no metadata.id at all —
-	// unexplained, given an expected incarnation exists at all (Discover
-	// successfully read one for this disk earlier). Must not be treated as
-	// "unavailable, so allow" the way an empty *expected* value is.
+	// Expected identity exists, but the fresh disk read cannot provide a live ID.
 	c.disks["iops-test-vm-boot"] = &Disk{Name: "iops-test-vm-boot"}
 
 	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "incarnation-a", false, "")
@@ -440,11 +416,7 @@ func TestUpdateDependentDiskIOPS_emptyLiveIncarnationFailsClosedWhenExpectedIsKn
 }
 
 func TestUpdateDependentDiskIOPS_incarnationCheckSkippedWhenExpectedUnknown(t *testing.T) {
-	// expectedIncarnation == "" means Discover itself had no incarnation to
-	// hand the Decision — nothing to compare against, so the write proceeds
-	// on the pre-existing IOPS-only precondition, and no fresh GetDisk call
-	// is made at all: the target's DiskName isn't even registered in
-	// c.disks here, so a GetDisk attempt would fail if one were made.
+	// Empty expected identity degrades to IOPS-only checks and skips the extra GetDisk.
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
 
@@ -460,9 +432,7 @@ func TestUpdateDependentDiskIOPS_incarnationCheckSkippedWhenExpectedUnknown(t *t
 func TestUpdateDependentDiskIOPS_incarnationCheckReadFailurePropagates(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
-	// No entry registered in c.disks — the incarnation check's GetDisk read
-	// fails, and that failure must propagate (fail closed) rather than be
-	// silently treated as "no incarnation, allow."
+	// The required fresh GetDisk fails and must fail the write closed.
 
 	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "incarnation-a", false, "")
 	if err == nil {
@@ -474,11 +444,7 @@ func TestUpdateDependentDiskIOPS_incarnationCheckReadFailurePropagates(t *testin
 }
 
 func TestDirectionPreserved(t *testing.T) {
-	// issue #16's explicit acceptance criterion, tested directly rather
-	// than only indirectly through the equality check it's meant to keep
-	// holding even if that check is ever loosened: "a scale-up request can
-	// never write a value below the live current; future scale-down can
-	// never write above it."
+	// Direction safety remains independently enforced even if equality checks change.
 	cases := []struct {
 		name                          string
 		expectedCurrent, target, live int64
