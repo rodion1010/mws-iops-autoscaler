@@ -633,15 +633,39 @@ func TestValidateCollectionIntervalAgainstWindows_catchesPerDiskOverride(t *test
 	}
 }
 
-func TestValidateCollectionIntervalAgainstWindows_equalToWindowIsValid(t *testing.T) {
+func TestValidateCollectionIntervalAgainstWindows_equalToWindowIsRejected(t *testing.T) {
+	// A collection_interval exactly equal to a window is NOT evaluable: at
+	// that cadence a trailing span of the same length holds exactly two
+	// real samples, one short of analyzer.windowFull's minimum of three, so
+	// the window can never fill. It must be rejected, not accepted (an
+	// earlier version of this rule wrongly passed the equal case).
 	rc := &ResolvedConfig{
 		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
 			ScaleUpWindow: 5 * time.Minute, ScaleDownWindow: 30 * time.Minute,
 		}},
-		Runtime: ResolvedRuntime{CollectionInterval: 5 * time.Minute}, // exactly equal, not longer
+		Runtime: ResolvedRuntime{CollectionInterval: 5 * time.Minute}, // equal to scale_up_window
+	}
+	errs := validateCollectionIntervalAgainstWindows(rc)
+	if len(errs) != 1 {
+		t.Fatalf("validateCollectionIntervalAgainstWindows() = %v, want exactly one error — interval equal to a window can never fill it", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "scale_up_window") {
+		t.Errorf("error = %v, want it to name scale_up_window", errs[0])
+	}
+}
+
+func TestValidateCollectionIntervalAgainstWindows_strictlyShorterThanWindowIsValid(t *testing.T) {
+	// Strictly shorter than the shortest window is fine — a natural or
+	// reached-back predecessor can supply the third sample a full window
+	// needs.
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
+			ScaleUpWindow: 5 * time.Minute, ScaleDownWindow: 30 * time.Minute,
+		}},
+		Runtime: ResolvedRuntime{CollectionInterval: 4 * time.Minute}, // shorter than scale_up_window
 	}
 	if errs := validateCollectionIntervalAgainstWindows(rc); len(errs) != 0 {
-		t.Errorf("validateCollectionIntervalAgainstWindows() = %v, want none — interval equal to (not longer than) a window is valid", errs)
+		t.Errorf("validateCollectionIntervalAgainstWindows() = %v, want none — a strictly shorter interval is valid", errs)
 	}
 }
 

@@ -111,6 +111,9 @@ behavior does the work.
   inherit a stale latency baseline the same way it used to inherit stale samples/cooldown/budget state.
   Left unaddressed in this pass (out of the reviewed scope, which named samples/cooldown/budget
   specifically) — a natural next candidate for the same fix, not a discovered-and-ignored gap.
+  **Addressed in ADR-019**, which keys `Analyze` on `IdentityKey()` (along with the guest-source
+  counter state and the write-path incarnation precondition, the other exposures this ADR's keying
+  did not itself cover).
 
 ## Action Items
 

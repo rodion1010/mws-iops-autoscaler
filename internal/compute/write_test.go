@@ -11,7 +11,7 @@ func TestUpdateIndependentDiskIOPS_success(t *testing.T) {
 	c := newFakeClient()
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 1000, Etag: "etag-1"}
 
-	got, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, false, "idem-1")
+	got, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, "", false, "idem-1")
 	if err != nil {
 		t.Fatalf("UpdateIndependentDiskIOPS: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestUpdateIndependentDiskIOPS_dryRunVerifiesButDoesNotMutate(t *testing.T) 
 	c := newFakeClient()
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 1000, Etag: "etag-1"}
 
-	got, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, true, "")
+	got, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, "", true, "")
 	if err != nil {
 		t.Fatalf("UpdateIndependentDiskIOPS (dry-run): %v", err)
 	}
@@ -45,7 +45,7 @@ func TestUpdateIndependentDiskIOPS_dryRunCatchesConflict(t *testing.T) {
 	c := newFakeClient()
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 5000, Etag: "etag-1"} // live moved since discovery
 
-	_, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, true, "")
+	_, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, "", true, "")
 	if err == nil {
 		t.Fatal("UpdateIndependentDiskIOPS (dry-run) succeeded despite live current differing from expected")
 	}
@@ -63,7 +63,7 @@ func TestUpdateIndependentDiskIOPS_appliedMismatchIsFailure(t *testing.T) {
 	wrong := int64(2000)
 	c.independentApplied = &wrong
 
-	_, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, false, "")
+	_, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, "", false, "")
 	if err == nil {
 		t.Fatal("UpdateIndependentDiskIOPS succeeded despite the platform applying a different value than requested")
 	}
@@ -76,7 +76,7 @@ func TestUpdateIndependentDiskIOPS_emptyEtagOnReReadFailsLocally(t *testing.T) {
 	c := newFakeClient()
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 1000} // no Etag
 
-	_, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, false, "")
+	_, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 3000, "", false, "")
 	if err == nil {
 		t.Fatal("UpdateIndependentDiskIOPS succeeded despite an empty etag on the pre-write re-read")
 	}
@@ -95,7 +95,7 @@ func TestUpdateIndependentDiskIOPS_conflictWhenLiveDiffersFromExpected(t *testin
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 5000, Etag: "etag-1"}
 
 	before := *c.disks["datadisk"]
-	_, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 2000, false, "")
+	_, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 1000, 2000, "", false, "")
 	if err == nil {
 		t.Fatal("UpdateIndependentDiskIOPS succeeded despite live current (5000) differing from expected (1000)")
 	}
@@ -122,7 +122,7 @@ func TestUpdateDependentDiskIOPS_success(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDisk()
 
-	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "idem-1")
+	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "", false, "idem-1")
 	if err != nil {
 		t.Fatalf("UpdateDependentDiskIOPS: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestUpdateDependentDiskIOPS_dryRunVerifiesButDoesNotMutate(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDisk()
 
-	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, true, "")
+	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "", true, "")
 	if err != nil {
 		t.Fatalf("UpdateDependentDiskIOPS (dry-run): %v", err)
 	}
@@ -159,7 +159,7 @@ func TestUpdateDependentDiskIOPS_dryRunCatchesConflict(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDisk() // bootdisk live IOPS is 1000
 
-	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 5000, 6000, true, "")
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 5000, 6000, "", true, "")
 	if err == nil {
 		t.Fatal("UpdateDependentDiskIOPS (dry-run) succeeded despite live current differing from expected")
 	}
@@ -173,7 +173,7 @@ func TestUpdateDependentDiskIOPS_conflictWhenLiveDiffersFromExpected(t *testing.
 	c.vms["iops-test-vm"] = vmWithDependentDisk() // bootdisk live IOPS is 1000
 
 	before := append([]StorageDisk(nil), c.vms["iops-test-vm"].Disks...)
-	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 5000, 6000, false, "")
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 5000, 6000, "", false, "")
 	if err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded despite live current (1000) differing from expected (5000)")
 	}
@@ -192,7 +192,7 @@ func TestUpdateDependentDiskIOPS_deviceNotFound(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDisk()
 
-	if _, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "no-such-disk", 1000, 3000, false, ""); err == nil {
+	if _, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "no-such-disk", 1000, 3000, "", false, ""); err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded for a device_name not present on the VM")
 	}
 }
@@ -211,7 +211,7 @@ func TestUpdateDependentDiskIOPS_duplicateAliasRefusedWithoutWriting(t *testing.
 	}
 	c.dependentWriteErr = errors.New("must never be reached")
 
-	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "")
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "", false, "")
 	if err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded despite two attachments sharing one alias")
 	}
@@ -235,7 +235,7 @@ func TestUpdateDependentDiskIOPS_duplicateTargetDeviceNameRefusedWithoutWriting(
 	}
 	c.dependentWriteErr = errors.New("must never be reached")
 
-	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "")
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "", false, "")
 	if err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded despite two attachments sharing the target device_name")
 	}
@@ -258,7 +258,7 @@ func TestUpdateDependentDiskIOPS_emptyTargetAliasRefusedWithoutWriting(t *testin
 	}
 	c.dependentWriteErr = errors.New("must never be reached")
 
-	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "")
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "", false, "")
 	if err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded despite the target attachment having an empty alias")
 	}
@@ -282,7 +282,7 @@ func TestUpdateDependentDiskIOPS_validMultiDiskVMSucceeds(t *testing.T) {
 		},
 	}
 
-	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, "idem-1")
+	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "", false, "idem-1")
 	if err != nil {
 		t.Fatalf("UpdateDependentDiskIOPS on a valid multi-disk VM: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestUpdateDependentDiskIOPS_refusesIndependentDisk(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = vmWithDependentDisk()
 
-	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "datadisk", 1000, 3000, false, "")
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "datadisk", 1000, 3000, "", false, "")
 	if err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded on an independent disk — it must be routed through UpdateIndependentDiskIOPS instead (ADR-003)")
 	}
@@ -315,7 +315,7 @@ func TestUpdateDependentDiskIOPS_etagConflictAbortsNeverForces(t *testing.T) {
 
 	before := append([]StorageDisk(nil), c.vms["iops-test-vm"].Disks...)
 
-	if _, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, false, ""); err == nil {
+	if _, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "", false, ""); err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded despite a simulated etag conflict")
 	}
 
@@ -339,7 +339,7 @@ func TestUpdateDependentDiskIOPS_appliedMismatchIsFailure(t *testing.T) {
 	// UpdateDependentDiskIOPS asked for — simulating the platform silently
 	// applying something else.
 	mc := &mismatchDependentClient{fakeClient: c, wrongIOPS: 4000}
-	if _, err := UpdateDependentDiskIOPS(context.Background(), mc, "iops-test-vm", "bootdisk", 1000, 3000, false, ""); err == nil {
+	if _, err := UpdateDependentDiskIOPS(context.Background(), mc, "iops-test-vm", "bootdisk", 1000, 3000, "", false, ""); err == nil {
 		t.Fatal("UpdateDependentDiskIOPS succeeded despite the platform applying a different value than requested")
 	}
 }
@@ -362,6 +362,115 @@ func (m *mismatchDependentClient) UpdateDependentDisk(ctx context.Context, req D
 		}
 	}
 	return vm, nil
+}
+
+// --- regression: dependent-path incarnation check needs its own fresh
+// GetDisk read — a VM read alone never carries a disk's metadata.id ---
+
+// vmWithDependentDiskNamed mirrors vmWithDependentDisk but sets DiskName on
+// the dependent attachment and, crucially, leaves IncarnationID empty —
+// exactly what a real GetVirtualMachine/translateVMResponse read produces.
+// sdk_client.go's translateVMResponse never populates StorageDisk.
+// IncarnationID from a VM read for either disk class (CLAUDE.md:
+// "StorageDiskStatusResponse... does not carry metadata.id"); only a
+// separate GetDisk call does. A fixture that set IncarnationID here
+// directly (as an earlier version of this test did) would never catch a
+// regression in the incarnation check — the check would silently read
+// whatever the fixture happened to carry rather than what the write path
+// itself resolves via its own fresh read.
+func vmWithDependentDiskNamed(diskName string) *VirtualMachine {
+	return &VirtualMachine{
+		Name: "iops-test-vm",
+		Etag: "etag-1",
+		Disks: []StorageDisk{
+			{Alias: "bootdisk", DeviceName: "bootdisk", Class: ClassDependent, DiskType: "nbs-pl2", SizeRaw: "20GB", IOPS: 1000, DiskName: diskName},
+		},
+	}
+}
+
+func TestUpdateDependentDiskIOPS_incarnationMismatchRefusedViaFreshDiskRead(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
+	// The disk was deleted and recreated under the same name — a different
+	// incarnation now sits at the resource a fresh GetDisk actually reads.
+	c.disks["iops-test-vm-boot"] = &Disk{Name: "iops-test-vm-boot", IncarnationID: "incarnation-b"}
+
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "incarnation-a", false, "")
+	if err == nil {
+		t.Fatal("UpdateDependentDiskIOPS succeeded despite a fresh GetDisk read reporting a different incarnation than expected")
+	}
+	if !errors.Is(err, ErrIncarnationMismatch) {
+		t.Errorf("error = %v, want it to wrap ErrIncarnationMismatch", err)
+	}
+	if c.vms["iops-test-vm"].Disks[0].IOPS != 1000 {
+		t.Errorf("bootdisk IOPS = %d, want unchanged 1000 — a mismatch must refuse before writing", c.vms["iops-test-vm"].Disks[0].IOPS)
+	}
+}
+
+func TestUpdateDependentDiskIOPS_incarnationMatchViaFreshDiskReadSucceeds(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
+	c.disks["iops-test-vm-boot"] = &Disk{Name: "iops-test-vm-boot", IncarnationID: "incarnation-a"}
+
+	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "incarnation-a", false, "")
+	if err != nil {
+		t.Fatalf("UpdateDependentDiskIOPS: %v", err)
+	}
+	if got != 3000 {
+		t.Errorf("applied = %d, want 3000", got)
+	}
+}
+
+func TestUpdateDependentDiskIOPS_emptyLiveIncarnationFailsClosedWhenExpectedIsKnown(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
+	// The fresh GetDisk read returns a disk with no metadata.id at all —
+	// unexplained, given an expected incarnation exists at all (Discover
+	// successfully read one for this disk earlier). Must not be treated as
+	// "unavailable, so allow" the way an empty *expected* value is.
+	c.disks["iops-test-vm-boot"] = &Disk{Name: "iops-test-vm-boot"}
+
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "incarnation-a", false, "")
+	if err == nil {
+		t.Fatal("UpdateDependentDiskIOPS succeeded despite an empty live incarnation when one was expected")
+	}
+	if !errors.Is(err, ErrIncarnationMismatch) {
+		t.Errorf("error = %v, want it to wrap ErrIncarnationMismatch", err)
+	}
+}
+
+func TestUpdateDependentDiskIOPS_incarnationCheckSkippedWhenExpectedUnknown(t *testing.T) {
+	// expectedIncarnation == "" means Discover itself had no incarnation to
+	// hand the Decision — nothing to compare against, so the write proceeds
+	// on the pre-existing IOPS-only precondition, and no fresh GetDisk call
+	// is made at all: the target's DiskName isn't even registered in
+	// c.disks here, so a GetDisk attempt would fail if one were made.
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
+
+	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "", false, "")
+	if err != nil {
+		t.Fatalf("UpdateDependentDiskIOPS: %v", err)
+	}
+	if got != 3000 {
+		t.Errorf("applied = %d, want 3000", got)
+	}
+}
+
+func TestUpdateDependentDiskIOPS_incarnationCheckReadFailurePropagates(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = vmWithDependentDiskNamed("iops-test-vm-boot")
+	// No entry registered in c.disks — the incarnation check's GetDisk read
+	// fails, and that failure must propagate (fail closed) rather than be
+	// silently treated as "no incarnation, allow."
+
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 1000, 3000, "incarnation-a", false, "")
+	if err == nil {
+		t.Fatal("UpdateDependentDiskIOPS succeeded despite the incarnation-check GetDisk read failing")
+	}
+	if c.vms["iops-test-vm"].Disks[0].IOPS != 1000 {
+		t.Error("bootdisk was mutated despite a failed incarnation-check read")
+	}
 }
 
 func TestDirectionPreserved(t *testing.T) {

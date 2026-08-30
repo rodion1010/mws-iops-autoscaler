@@ -384,7 +384,27 @@ func (a *Agent) reconcile(ctx context.Context) {
 		diskID := m.Disk.DiskName
 		samples := a.sampler.Samples(a.diskRef(m))
 		ep := toEvaluationPolicy(m.Policy.Advanced, a.maxSampleAge, a.maxSampleGap)
-		an := a.analyzer.Analyze(diskID, samples, ep, m.Disk.IOPS, now)
+		// m.Disk.IdentityKey(), not the bare DiskName, keys the analyzer's
+		// own per-disk baseline state — the same key the Sampler's ring
+		// buffer uses (pre-merge review). A disk deleted and recreated
+		// under the same name must establish its own latency baseline from
+		// its own samples, never inherit the previous incarnation's frozen
+		// one; a fresh IncarnationID makes it a distinct key that starts
+		// cold, exactly as the Sampler already does for its buffer.
+		an := a.analyzer.Analyze(m.Disk.IdentityKey(), samples, ep, m.Disk.IOPS, now)
+		// Analyze's diskID parameter above is doing double duty as the
+		// analyzer's own internal baseline-state map key — it is not meant
+		// to be display-facing, and Analysis.DiskID is simply whatever that
+		// parameter was (analyzer.go: out := Analysis{DiskID: diskID}).
+		// Restored to the plain, human-readable name here so a.DiskID never
+		// carries IdentityKey()'s "\x00"-joined composite form into any
+		// future consumer — mirroring ADR-018's own "display-facing
+		// identifiers are unchanged" rule for Decision.DiskID/journal/
+		// telemetry. Nothing today reads Analysis.DiskID (Decide's diskID
+		// comes from the plain diskID param below, not from an.DiskID), but
+		// leaving the composite key on an exported field it's not built for
+		// is a footgun for the next thing that does.
+		an.DiskID = diskID
 		analyses[diskID] = an
 		// Only once this disk has ever had a real sample (pre-merge
 		// review) — an.SampleAge is meaningless before that (nothing to
@@ -445,19 +465,24 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 		a.actuate(ctx, m, d, now)
 
-		// actuate() forces a rediscovery on ErrConcurrentModification,
-		// which bumps a.generation the moment it succeeds. Every decision
-		// already made this cycle — including every siblingP95 and vm
-		// value computed above, all derived from the managed/iopsPool
-		// snapshot captured at the top — was computed from data that
-		// rediscovery has just superseded. Abort the rest of this cycle
-		// rather than keep deciding against it; the next reconcile tick
-		// starts fresh from the new snapshot.
+		// actuate() forces a rediscovery on either ErrConcurrentModification
+		// or ErrIncarnationMismatch. If it succeeded, a.generation bumped and
+		// the managed/iopsPool snapshot this cycle decided against is
+		// superseded. If it *failed*, invalidateManaged() cleared
+		// a.managedValid instead — the snapshot is now suspect (a disk's
+		// Current, or its very presence on the VM, may no longer be
+		// accurate) even though generation did not move. Either way every
+		// decision already made this cycle — every siblingP95 and vm value
+		// above — was computed from data that no longer holds. Abort the
+		// rest of the cycle rather than keep deciding (and actuating)
+		// against it; the next reconcile tick starts fresh once discovery
+		// recovers.
 		a.mu.Lock()
 		currentGeneration := a.generation
+		stillValid := a.managedValid
 		a.mu.Unlock()
-		if currentGeneration != startGeneration {
-			log.Printf("reconcile: managed snapshot changed mid-cycle (forced rediscovery after a concurrent-modification conflict) — aborting the rest of this reconcile cycle rather than act on now-stale data")
+		if currentGeneration != startGeneration || !stillValid {
+			log.Printf("reconcile: managed snapshot superseded or invalidated mid-cycle (forced rediscovery after a conflict or incarnation mismatch) — aborting the rest of this reconcile cycle rather than act on now-stale data")
 			return
 		}
 	}
@@ -509,10 +534,11 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	}
 
 	target := actuator.Target{
-		VMName:     a.vmName,
-		DeviceName: m.Disk.DeviceName,
-		DiskName:   m.Disk.DiskName,
-		Class:      m.Disk.Class,
+		VMName:        a.vmName,
+		DeviceName:    m.Disk.DeviceName,
+		DiskName:      m.Disk.DiskName,
+		Class:         m.Disk.Class,
+		IncarnationID: m.Disk.IncarnationID,
 	}
 
 	a.tracker.BeginResize(identity)
@@ -534,6 +560,60 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 			return
 		}
 
+		// A pre-write refusal is unambiguous where a bare write error is
+		// not: both write paths return ErrConcurrentModification and
+		// ErrIncarnationMismatch *before* ever sending the mutating
+		// request, so nothing landed. The reservation must be released
+		// outright — never resolved from a live read (which for a value
+		// that has since moved, or a replacement disk, can say nothing
+		// about a write that never happened) and never left pending, which
+		// would silently spend a budget slot on a change that was refused.
+		if errors.Is(err, compute.ErrConcurrentModification) {
+			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
+				log.Printf("actuate %s (%s): failed to release the reservation for a write refused pre-flight (concurrent modification): %v", diskID, m.Disk.DeviceName, rerr)
+			}
+			// The live value moved since this Decision's snapshot (issue
+			// #16), so d.Target is no longer meaningful. Force a rediscovery
+			// now rather than waiting up to DiscoveryInterval, so the next
+			// reconcile cycle decides again from a snapshot no older than
+			// this moment instead of retrying the same stale target. A
+			// rediscovery failure here is logged by discover() itself and,
+			// via invalidateManaged(), stops the current reconcile cycle
+			// from acting on the now-suspect snapshot.
+			log.Printf("actuate %s (%s): %v — forcing rediscovery before the next decision", diskID, m.Disk.DeviceName, err)
+			if derr := a.discover(ctx); derr != nil {
+				log.Printf("actuate %s (%s): rediscovery after conflict failed: %v", diskID, m.Disk.DeviceName, derr)
+			}
+			return
+		}
+		if errors.Is(err, compute.ErrIncarnationMismatch) {
+			// The disk this Decision targeted was deleted and recreated
+			// under the same name — a genuinely different resource. Nothing
+			// was written, so release the reservation.
+			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
+				log.Printf("actuate %s (%s): failed to release the reservation for a write refused against a replacement disk: %v", diskID, m.Disk.DeviceName, rerr)
+			}
+			// Force a rediscovery, mirroring the concurrent-modification
+			// branch above — not to retry against the disk this Decision
+			// targeted (there is nothing to retry: that resource is gone),
+			// but because the *whole snapshot* this reconcile cycle is
+			// working from is now proven wrong for at least this one disk.
+			// Every sibling's VMState (siblingP95IOPS, the VM's IOPS pool)
+			// was computed from the same captured-at-cycle-start managed
+			// set, so it is exactly as suspect as it would be after a
+			// concurrent-modification conflict. A successful rediscovery
+			// bumps a.generation and picks up the replacement's own fresh
+			// identity; a failed one invalidates the snapshot via
+			// invalidateManaged(). Either way reconcile's own
+			// generation/managedValid check below aborts the rest of this
+			// cycle rather than act on now-stale data.
+			log.Printf("actuate %s (%s): %v — forcing rediscovery to pick up the replacement before the next decision", diskID, m.Disk.DeviceName, err)
+			if derr := a.discover(ctx); derr != nil {
+				log.Printf("actuate %s (%s): rediscovery after incarnation mismatch failed: %v", diskID, m.Disk.DeviceName, derr)
+			}
+			return
+		}
+
 		// A real write's error does not prove the change never landed —
 		// the platform may have applied it before the response reached
 		// this process (timeout, connection reset, etc). Releasing
@@ -546,22 +626,6 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 		// already applies at startup for an identically ambiguous
 		// situation.
 		a.resolveReservationAfterWriteFailure(ctx, m, d, idempotencyKey, now)
-
-		if errors.Is(err, compute.ErrConcurrentModification) {
-			// The write path already refused to touch anything (issue
-			// #16) — the live value moved since this Decision's snapshot
-			// was taken, so d.Target is no longer meaningful. Force a
-			// rediscovery now rather than waiting up to DiscoveryInterval,
-			// so the next reconcile cycle decides again from a snapshot no
-			// older than this moment, instead of retrying the same stale
-			// target. A rediscovery failure here is already logged by
-			// discover() itself; nothing more to do about it in this path.
-			log.Printf("actuate %s (%s): %v — forcing rediscovery before the next decision", diskID, m.Disk.DeviceName, err)
-			if derr := a.discover(ctx); derr != nil {
-				log.Printf("actuate %s (%s): rediscovery after conflict failed: %v", diskID, m.Disk.DeviceName, derr)
-			}
-			return
-		}
 		log.Printf("actuate %s (%s): %v", diskID, m.Disk.DeviceName, err)
 		return
 	}
@@ -740,6 +804,9 @@ func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (in
 		if err != nil {
 			return 0, err
 		}
+		if err := verifyLiveIncarnation(m.Disk.DiskName, m.Disk.IncarnationID, disk.IncarnationID); err != nil {
+			return 0, err
+		}
 		return disk.SpecIOPS, nil
 	case compute.ClassDependent:
 		vm, err := a.client.GetVirtualMachine(ctx, a.vmName)
@@ -748,6 +815,9 @@ func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (in
 		}
 		for _, d := range vm.Disks {
 			if d.DeviceName == m.Disk.DeviceName {
+				if err := verifyLiveIncarnation(m.Disk.DiskName, m.Disk.IncarnationID, d.IncarnationID); err != nil {
+					return 0, err
+				}
 				return d.IOPS, nil
 			}
 		}
@@ -755,6 +825,25 @@ func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (in
 	default:
 		return 0, fmt.Errorf("disk %q has unknown class %q", m.Disk.DiskName, m.Disk.Class)
 	}
+}
+
+// verifyLiveIncarnation fails a live-state read whose resource is a
+// different incarnation than the reservation/decision being resolved. A
+// disk deleted and recreated under the same name can sit at the same IOPS
+// as the old incarnation's Target, which would make a live read of the
+// *replacement* look like a verdict on the *original's* write — it is not:
+// nothing about the new disk's current value says whether the old disk's
+// write landed. Returning an error here routes both callers
+// (reconcilePendingBudget and resolveReservationAfterWriteFailure) into
+// their fail-closed "leave the reservation pending" branch. Only asserts a
+// mismatch when both incarnations are known, mirroring the write path's own
+// incarnationMatches: an absent metadata.id on either side degrades to the
+// pre-existing IOPS-only resolution rather than blocking it outright.
+func verifyLiveIncarnation(diskName, expected, live string) error {
+	if expected == "" || live == "" || expected == live {
+		return nil
+	}
+	return fmt.Errorf("disk %q live incarnation %q differs from the reservation's %q — a different resource was created under the same name; its live state cannot resolve this reservation", diskName, live, expected)
 }
 
 func toEvaluationPolicy(a config.ResolvedAdvanced, maxSampleAge, maxSampleGap time.Duration) analyzer.EvaluationPolicy {

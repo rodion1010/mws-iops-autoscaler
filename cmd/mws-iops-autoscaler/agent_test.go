@@ -69,16 +69,51 @@ type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
+// testResolvedPolicy is a realistic resolved policy for the hand-built
+// managed disks below. In production every ManagedDisk carries one
+// (registry.Select resolves it from config defaults); a zero policy would
+// leave the evaluation windows at 0, which no real disk ever has, so any
+// test that feeds real samples through the Analyzer needs this to exercise
+// the window/baseline path at all.
+func testResolvedPolicy() config.ResolvedPolicy {
+	return config.ResolvedPolicy{
+		MinIOPS: 1000,
+		MaxIOPS: 10000,
+		Advanced: config.ResolvedAdvanced{
+			ScaleUpWindow:             5 * time.Minute,
+			ScaleDownWindow:           30 * time.Minute,
+			UtilizationThreshold:      0.95,
+			QueueDepthThreshold:       1,
+			LatencyMode:               "relative",
+			LatencyBaselineMultiplier: 1.5,
+			ScaleUpUtilization:        0.8,
+			ScaleDownUtilization:      0.4,
+			CooldownScaleUp:           5 * time.Minute,
+			CooldownScaleDown:         30 * time.Minute,
+			MinChangeIOPS:             100,
+			MaxScaleUpRatio:           2.0,
+			MaxScaleDownRatio:         0.5,
+			MaxChangesPer24h:          4,
+		},
+	}
+}
+
 func dependentDisk() registry.ManagedDisk {
-	return registry.ManagedDisk{Disk: compute.StorageDisk{
-		Alias: "bootdisk", DeviceName: "bootdisk", Class: compute.ClassDependent, DiskName: "vm-1-boot",
-	}}
+	return registry.ManagedDisk{
+		Disk: compute.StorageDisk{
+			Alias: "bootdisk", DeviceName: "bootdisk", Class: compute.ClassDependent, DiskName: "vm-1-boot",
+		},
+		Policy: testResolvedPolicy(),
+	}
 }
 
 func independentDisk() registry.ManagedDisk {
-	return registry.ManagedDisk{Disk: compute.StorageDisk{
-		Alias: "datadisk", DeviceName: "datadisk", Class: compute.ClassIndependent, DiskName: "vm-1-data",
-	}}
+	return registry.ManagedDisk{
+		Disk: compute.StorageDisk{
+			Alias: "datadisk", DeviceName: "datadisk", Class: compute.ClassIndependent, DiskName: "vm-1-data",
+		},
+		Policy: testResolvedPolicy(),
+	}
 }
 
 func TestActuate_refusesScaleDownWhenDisabled_dependent(t *testing.T) {
@@ -612,6 +647,92 @@ func TestReconcile_abortsRestOfCycleAfterConcurrentModificationRediscovery(t *te
 
 	if len(act.calls) != 1 {
 		t.Errorf("Actuator.Apply called %d times, want 1 — the cycle must abort after the first disk's conflict-triggered rediscovery, never reaching the second disk", len(act.calls))
+	}
+}
+
+// incarnationMismatchOnFirstCallActuator mirrors conflictOnFirstCallActuator
+// for compute.ErrIncarnationMismatch — used to prove reconcile() treats a
+// replacement-disk refusal exactly like a concurrent-modification conflict:
+// both invalidate the whole cycle's snapshot, not just the one disk that
+// triggered them.
+type incarnationMismatchOnFirstCallActuator struct {
+	calls []decider.Decision
+}
+
+func (a *incarnationMismatchOnFirstCallActuator) Apply(_ context.Context, d decider.Decision, _ actuator.Target, _ bool, _ string) (actuator.Applied, error) {
+	a.calls = append(a.calls, d)
+	if len(a.calls) == 1 {
+		return actuator.Applied{}, fmt.Errorf("simulated: %w", compute.ErrIncarnationMismatch)
+	}
+	return actuator.Applied{DiskID: d.DiskID, IOPS: d.Target}, nil
+}
+
+// TestReconcile_abortsRestOfCycleAfterIncarnationMismatchRediscovery is the
+// P1 finding from the second review pass: an ErrIncarnationMismatch refusal
+// used to release the budget reservation but never force a rediscovery,
+// leaving the rest of the cycle to actuate every other disk against a
+// snapshot already proven wrong for the replaced one. It must abort the
+// cycle exactly as a concurrent-modification conflict does.
+func TestReconcile_abortsRestOfCycleAfterIncarnationMismatchRediscovery(t *testing.T) {
+	client := &stubClient{
+		vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
+			{Alias: "first", DeviceName: "first", Class: compute.ClassIndependent, DiskName: "vm-1-first"},
+			{Alias: "second", DeviceName: "second", Class: compute.ClassIndependent, DiskName: "vm-1-second"},
+		}},
+		disks: map[string]*compute.Disk{
+			"vm-1-first":  {Name: "vm-1-first", SpecIOPS: 1000},
+			"vm-1-second": {Name: "vm-1-second", SpecIOPS: 1000},
+		},
+	}
+	act := &incarnationMismatchOnFirstCallActuator{}
+	a := newDiscoverableTestAgent(t, act, client)
+	a.maxDiscoveryAge = time.Hour
+	a.analyzer = analyzer.NewWindowAnalyzer()
+	a.decider = perDiskDecider{byDisk: map[string]decider.Action{
+		"vm-1-first":  decider.ActionScaleUp,
+		"vm-1-second": decider.ActionScaleUp,
+	}}
+
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+
+	a.reconcile(context.Background())
+
+	if len(act.calls) != 1 {
+		t.Errorf("Actuator.Apply called %d times, want 1 — the cycle must abort after the first disk's incarnation-mismatch-triggered rediscovery, never reaching the second disk", len(act.calls))
+	}
+}
+
+// TestActuate_incarnationMismatchReleasesReservationAndForcesRediscovery
+// proves both halves of the actuate()-level fix directly: the reservation
+// is released (nothing was ever sent), and a rediscovery is forced — unlike
+// an earlier version of this handling, which released the reservation but
+// left the stale managed snapshot in place until the next scheduled
+// DiscoveryInterval tick.
+func TestActuate_incarnationMismatchReleasesReservationAndForcesRediscovery(t *testing.T) {
+	conflictErr := fmt.Errorf("update independent disk %q: %w (expected incarnation \"incarnation-a\", live \"incarnation-b\")",
+		"vm-1-data", compute.ErrIncarnationMismatch)
+	client := &stubClient{vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1"}}
+	act := erroringActuator{err: conflictErr}
+	a := newDiscoverableTestAgent(t, act, client)
+	a.managed = []registry.ManagedDisk{independentDisk()}
+
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := len(a.tracker.PendingChanges()); got != 0 {
+		t.Errorf("PendingChanges() = %d, want 0 — an incarnation mismatch proves nothing was written, so the reservation must be released", got)
+	}
+	// The stub VM has no disks at all, so a successful forced rediscovery
+	// replaces the stale single-disk snapshot with an empty one — proof
+	// that discover() actually ran, not just that the reservation was
+	// released.
+	if len(a.managed) != 0 {
+		t.Errorf("managed = %+v, want empty — an incarnation mismatch must force rediscovery, not leave the stale snapshot in place", a.managed)
+	}
+	if client.getVMCalls != 1 {
+		t.Errorf("GetVirtualMachine called %d times, want 1 — an incarnation mismatch must force rediscovery, not wait for the next scheduled cycle", client.getVMCalls)
 	}
 }
 
