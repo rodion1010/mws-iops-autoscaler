@@ -273,6 +273,12 @@ unused headroom.
 **Acceptance Criteria:**
 - [ ] Triggers on sustained low demand over `scale_down_window`, with every saturation signal quiet:
       queue low, latency at baseline, no throttling
+- [ ] Also requires both IOPS and bandwidth utilization sustained below `saturation.utilization_threshold`
+      (pre-merge review) — queue depth, latency, and throttle detection are all IOPS-denominated and
+      blind on their own to a large-block, low-ops/s workload saturating its bandwidth ceiling; without
+      this, such a disk could trigger scale-down while still genuinely bandwidth-bound. Mirrors the
+      saturation gate's own either-resource check (ADR-008), inverted: quiet requires *both* resources
+      below threshold, not merely "not both at or above"
 - [ ] Target is computed as `p95_demand / target.scale_down_utilization`, deliberately leaving
       headroom so the new limit does not sit flush against current demand
 - [ ] `p95_demand` is bandwidth-aware (issue #17): the p95, over `scale_down_window`, of each

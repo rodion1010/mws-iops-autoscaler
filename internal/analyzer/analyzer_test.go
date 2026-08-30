@@ -304,6 +304,31 @@ func TestAnalyze_underutilizedOnSustainedQuiet(t *testing.T) {
 	}
 }
 
+// TestAnalyze_notUnderutilizedWhenBandwidthElevated is the mirror of
+// ADR-008's own bandwidth-bound saturation fix, applied to the quiet
+// direction: a large-block, low-ops/s workload can still be saturating
+// its bandwidth ceiling even though queue depth, latency, and throttle
+// detection — all IOPS-denominated signals — read as idle. Must not
+// classify as Underutilized on IOPS-side quiet alone.
+func TestAnalyze_notUnderutilizedWhenBandwidthElevated(t *testing.T) {
+	a := NewWindowAnalyzer()
+	// specIOPS(1000) x bytesPerIOPS(32768) is the disk's bandwidth
+	// ceiling; 0.99 of it is comfortably above testPolicy's default 0.98
+	// utilization_threshold while ReadOps(100) alone reads as quiet.
+	const nearCeilingBytes = 0.99 * 1000 * 32768
+	samples := make([]metrics.Sample, 0, 31)
+	for m := 0; m <= 30; m++ {
+		samples = append(samples, sampleAt(m, 100, 0, nearCeilingBytes, 0, 0, time.Millisecond, time.Millisecond))
+	}
+	got := a.Analyze("disk1", samples, testPolicy, specIOPS, asOf(samples))
+	if !got.WindowFullDown {
+		t.Fatal("test setup: expected WindowFullDown = true (span is exactly 30m)")
+	}
+	if got.Underutilized {
+		t.Error("Underutilized = true, want false — bandwidth utilization near its ceiling must block the quiet verdict even though ops/s, queue, and latency all look idle")
+	}
+}
+
 func TestAnalyze_notUnderutilizedWhenQueueBuiltUpMidWindow(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 31)

@@ -115,8 +115,17 @@ type Analysis struct {
 	WindowFillUpRatio   float64
 	WindowFillDownRatio float64
 
-	Saturated     bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
-	Underutilized bool // every signal quiet AND sustained over ScaleDownWindow (US-010); false if !WindowFullDown
+	Saturated bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
+	// Underutilized requires resource_gate to never trigger (both IOPS and
+	// bandwidth utilization below threshold, every sample — the mirror of
+	// Saturated's own gate, ADR-008) in addition to every other signal
+	// quiet, all sustained over ScaleDownWindow (US-010); false if
+	// !WindowFullDown. The resource-gate term exists because queue depth,
+	// latency, and throttle detection are all IOPS-denominated and blind
+	// to a large-block workload saturating its bandwidth ceiling at a low
+	// ops/s count — without it, such a disk could read as quiet on IOPS
+	// alone while its bandwidth stayed pinned.
+	Underutilized bool
 
 	IOPSP95Down float64 // p95 served ops/s over ScaleDownWindow — observability, and one of EffectiveDemandP95Down's two inputs
 

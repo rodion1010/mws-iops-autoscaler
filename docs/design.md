@@ -331,6 +331,33 @@ not near either of its provisioned limits it cannot be limit-starved, so the exp
 skipped. A large-block, throughput-heavy workload saturates bandwidth long before it saturates IOPS
 count; gating on IOPS alone would silently miss it — the whole reason ADR-008 exists.
 
+**Underutilization detection is `saturated`'s mirror, not a separate mechanism** (issue: bandwidth must
+gate `Underutilized` too, not only scale-down target sizing — §4.5's `EffectiveDemandP95Down`):
+
+```
+resource_quiet :=
+      iops_utilization      < policy.saturation.utilization_threshold
+  AND bandwidth_utilization < policy.saturation.utilization_threshold
+
+underutilized :=
+      window_full_down
+  AND resource_quiet
+  AND queue_depth < policy.saturation.queue_depth_threshold
+  AND (!baseline_established OR latency.P95 <= baseline.P95 × policy.saturation.latency.baseline_multiplier)
+  AND !throttling_detected
+  AND sustained over policy.evaluation.scale_down_window
+```
+
+`resource_quiet` requires **both** resources below threshold, every sample — not merely "not
+`resource_gate`" (De Morgan's makes that the much weaker claim that *some* sample had both quiet, not
+that *every* sample did; `sustained` here means the latter, same as everywhere else in this section).
+Without it, a large-block, low-ops/s workload saturating its bandwidth ceiling could still read as
+`underutilized`: `queue_depth`, `latency.P95`, and `throttling_detected` are all IOPS-denominated
+signals, blind on their own to a bottleneck that never shows up as an elevated op count. Reusing
+`policy.saturation.utilization_threshold` (rather than a new config field) keeps one invariant true in
+both directions: a disk can never simultaneously be a `saturated` candidate on one resource (sustained
+at-or-above threshold) and an `underutilized` one (sustained below threshold, both resources) at once.
+
 **Latency is baseline-relative, never absolute.** `p95 > 10 ms` is wrong for everyone; acceptable
 latency is workload-specific. The baseline is a long rolling low-percentile of the disk's own
 observed latency, **frozen against updates** while the disk is saturated so a throttled period cannot
@@ -690,7 +717,7 @@ type Analysis struct {
     WindowFullDown bool // span ≥ scale_down_window
 
     Saturated     bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
-    Underutilized bool // every signal quiet AND sustained over scale_down_window (US-010); false if !WindowFullDown
+    Underutilized bool // resource_quiet AND every other signal quiet AND sustained (§4.4); false if !WindowFullDown
 
     // IOPSP95Down/BandwidthP95DownIOPSEquiv/LimitingResourceDown are the
     // down-window demand breakdown, for the journal (issue #17).

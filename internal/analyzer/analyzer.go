@@ -111,6 +111,7 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 			downWriteP95 <= scaledDuration(baseline.P95, p.LatencyBaselineMultiplier))
 
 	out.Underutilized = out.Fresh && out.WindowFullDown &&
+		sustainedResourceBelow(downWindow, specIOPS, p.UtilizationThreshold) &&
 		sustainedQueueBelow(downWindow, p.QueueDepthThreshold) &&
 		latencyAtBaseline &&
 		!sustainedThrottle(downWindow, specIOPS)
@@ -314,6 +315,34 @@ func sustainedResourceGate(window []metrics.Sample, specIOPS int64, threshold fl
 	for _, s := range window {
 		gate := iopsUtilization(s, specIOPS) >= threshold || bandwidthUtilization(s, specIOPS) >= threshold
 		if !gate {
+			return false
+		}
+	}
+	return true
+}
+
+// sustainedResourceBelow is sustainedResourceGate's mirror image for the
+// quiet direction (issue: bandwidth must gate Underutilized too, not only
+// scale-down target sizing). Every sample must have BOTH IOPS and
+// bandwidth utilization below threshold — not merely "not sustained-gate",
+// which by De Morgan's is the much weaker claim that at least one sample
+// had both below threshold, not that every sample did. Without this, a
+// large-block workload saturating its bandwidth ceiling at a low ops/s
+// count could still read as Underutilized: queue depth, latency, and
+// throttle detection are all IOPS-denominated signals (design.md §4.4/
+// §4.5) and blind to a bandwidth-only bottleneck on their own — the same
+// asymmetry ADR-008 already fixed for the Saturated gate, now closed for
+// its mirror. Reuses policy.saturation.utilization_threshold rather than a
+// new config field: this keeps the same invariant ADR-008 already
+// established (whichever resource is closer to its ceiling decides) and
+// means a disk can never simultaneously be a candidate for Saturated (via
+// this same threshold, sustained the other direction) and Underutilized.
+func sustainedResourceBelow(window []metrics.Sample, specIOPS int64, threshold float64) bool {
+	if len(window) == 0 {
+		return false
+	}
+	for _, s := range window {
+		if iopsUtilization(s, specIOPS) >= threshold || bandwidthUtilization(s, specIOPS) >= threshold {
 			return false
 		}
 	}
