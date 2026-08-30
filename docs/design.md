@@ -7,11 +7,11 @@
 **Derived from `docs/prd-mws-iops-autoscaler.md`, which is the primary document.** The PRD states the
 requirements; this document describes how they are met. It does not introduce, widen or drop a
 requirement on its own — when a design decision changes one, the PRD is amended in the same change
-(see the sync rule in `docs/README.md`).
+(see the update rule in `docs/README.md`).
 
 Companion documents: requirements in `docs/prd-mws-iops-autoscaler.md`, configuration model in
-`docs/configuration.md`, measured platform behaviour in `docs/platform-reference.md`, and exceptional
-decision rationale (when needed) in `docs/adr/`.
+`docs/configuration.md`, measured platform behaviour in `docs/platform-reference.md`, and temporary
+unresolved decision requests (when needed) in `docs/adr/`.
 
 ---
 

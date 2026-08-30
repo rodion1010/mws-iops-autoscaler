@@ -9,7 +9,7 @@
 | [`development.md`](development.md) | Credential handling, developer setup and the reference test environment |
 | [`../PLATFORM_DEPENDENCIES.md`](../PLATFORM_DEPENDENCIES.md) | Upstream gaps, temporary workarounds and removal conditions |
 | [`TODO.md`](TODO.md) | Parking lot; nothing is implemented from here without an explicit decision |
-| [`adr/`](adr/) | ADR policy and retained rationale for exceptional decisions; never the current architecture |
+| [`adr/`](adr/) | Temporary decision requests awaiting Product Lead input; normally empty |
 | [`../CLAUDE.md`](../CLAUDE.md) | Repository instructions for coding agents |
 
 ## Source-of-truth model
@@ -22,9 +22,9 @@ A requirement exists once it is in the PRD. A design document cannot silently in
 drop a requirement. Conversely, an implementation detail does not belong in the PRD merely because
 it is important to the code.
 
-ADRs preserve rationale when the decision meets the criteria in `CLAUDE.md`; they are not the
-canonical description of the current architecture. A reader should be able to understand the current
-system from `design.md` without reconstructing a chain of ADR amendments.
+`design.md` contains every accepted architectural decision. ADRs are temporary proposals used only
+when an agent needs the Product Lead to resolve a material ambiguity; after the decision, the ADR is
+deleted and the result is written into its canonical document.
 
 ## Update rule
 
@@ -38,7 +38,7 @@ A change updates only the documents whose own contracts changed:
 3. Change `configuration.md` when the user-facing schema, default or validation behaviour changes.
 4. Change `platform-reference.md` when an external fact is verified or corrected.
 5. Change `PLATFORM_DEPENDENCIES.md` when an upstream limitation, status or workaround changes.
-6. Add an ADR only for an exceptional decision that satisfies the repository's ADR policy.
+6. Add a temporary ADR only when an unresolved material choice requires Product Lead input.
 
 If a measured platform fact invalidates a requirement or design, update the fact's canonical record
 first, then update every affected contract. After moving or replacing a statement, search the whole

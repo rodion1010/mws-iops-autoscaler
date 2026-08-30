@@ -8,8 +8,9 @@ Platform facts referenced here live in `docs/platform-reference.md` at the repo 
 > `docs/platform-reference.md` for verified external platform behaviour. A design document cannot
 > silently introduce, widen or drop a requirement.
 >
-> Update only the documents whose own contracts changed. Exceptional decision rationale may use an
-> ADR when it meets the repository policy; ADRs never duplicate the current design. See
+> Update only the documents whose own contracts changed. If an agent cannot resolve a material
+> choice from those contracts, it may use a temporary proposed ADR to request a decision from the
+> Product Lead. After the decision, the ADR is deleted and the canonical documents are updated. See
 > `docs/README.md` for the full source-of-truth and update rules.
 
 ---
