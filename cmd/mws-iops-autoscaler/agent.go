@@ -375,7 +375,7 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 			return
 		}
 
-		// A transport error is ambiguous; resolve from fresh state before releasing budget.
+		// An unclassified error may be post-write; resolve it from fresh state before releasing budget.
 		a.resolveReservationAfterWriteFailure(ctx, m, d, idempotencyKey, now)
 		log.Printf("actuate %s (%s): %v", diskID, m.Disk.DeviceName, err)
 		return

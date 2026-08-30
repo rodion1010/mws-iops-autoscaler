@@ -11,9 +11,8 @@ import (
 // the stale target.
 var ErrConcurrentModification = errors.New("live current differs from the decision's expected current — concurrent modification")
 
-// ErrIncarnationMismatch marks a pre-write refusal when a same-name disk has been
-// replaced since the decision was computed. IOPS equality is insufficient to identify
-// the resource; callers must rediscover and must not retry the stale target.
+// ErrIncarnationMismatch marks a pre-write refusal when live identity differs from
+// the decision or cannot be verified. Callers must rediscover and must not retry the stale target.
 var ErrIncarnationMismatch = errors.New("live disk incarnation differs from the decision's expected incarnation — the disk was replaced under the same name")
 
 // incarnationMatches fails closed when an expected identity cannot be verified.

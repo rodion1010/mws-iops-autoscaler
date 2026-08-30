@@ -11,7 +11,7 @@ const (
 	ClassDependent DiskClass = "dependent"
 )
 
-// StorageDisk is one translated VM disk attachment with class-specific fields populated.
+// StorageDisk is a VM attachment returned raw by GetVirtualMachine or enriched by Discover.
 type StorageDisk struct {
 	Alias      string // spec.storage.disks[].name — alias unique within the VM, not globally
 	Boot       bool
@@ -23,12 +23,13 @@ type StorageDisk struct {
 	DiskType string // e.g. "nbs-pl2"
 	SizeRaw  string // bytesize.ByteSize.RawValue(), reparsed unchanged on write
 
-	// Provisioned IOPS from a separate live disk read performed during discovery.
+	// IOPS comes from the inline VM spec on raw dependent attachments.
+	// Discover overwrites it from GetDisk for every managed disk.
 	IOPS                           int64 // spec.iops, current provisioned limit
 	BaseIOPS, ExtraIOPS, TotalIOPS int64 // status.iops breakdown
 
-	// IncarnationID is metadata.id, which distinguishes same-name replacement resources.
-	// It may be empty only when the platform response omits identity.
+	// IncarnationID is metadata.id and distinguishes same-name replacement resources.
+	// GetVirtualMachine never populates it; Discover obtains it from GetDisk.
 	IncarnationID string
 }
 
