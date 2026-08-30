@@ -10,7 +10,7 @@ documented intent
 ## Context
 
 ADR-001 already named the risk: guest's `QueueDepth` is operations-denominated, platform's is
-byte-denominated (`compute_vm_disk_write_queue_length`, CLAUDE.md), and `metrics.QueueDepth` carries an
+byte-denominated (`compute_vm_disk_write_queue_length`, docs/platform-reference.md), and `metrics.QueueDepth` carries an
 explicit `Unit` field so "mixing them silently would be a real bug" never happens undetected. That
 field existed; nothing read it.
 
@@ -60,7 +60,7 @@ Rejected for now: no workload block-size model exists anywhere in this codebase 
 byte-denominated *queue backlog* (not a bandwidth *rate*, which `bytesPerIOPS` already converts
 elsewhere, ADR-008/ADR-016) into an operations count. Inventing one to convert a signal that isn't
 produced by any implemented source yet is exactly the kind of speculative feature this codebase avoids
-(CLAUDE.md's own don't-build-around-absence caveat cuts the other way here: there's nothing to build
+(docs/platform-reference.md's own don't-build-around-absence caveat cuts the other way here: there's nothing to build
 around yet, and guessing a conversion model without data risks being wrong in a way that's worse than
 simply not using the signal).
 

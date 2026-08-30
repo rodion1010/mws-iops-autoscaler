@@ -1,7 +1,7 @@
 # MWS IOPS Autoscaler — Configuration
 
 Derived from `docs/prd-mws-iops-autoscaler.md` (the primary document) and `docs/design.md`, with the
-platform constraints from `CLAUDE.md` folded in. The user-facing surface described here follows the
+platform constraints from `docs/platform-reference.md` folded in. The user-facing surface described here follows the
 PRD's requirements — it does not define them.
 
 > **All numeric defaults below are design defaults, not production-validated values.** They must be

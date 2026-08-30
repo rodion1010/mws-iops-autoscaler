@@ -87,7 +87,7 @@ not merely infer from etag equality.
 ### Option B: Add the etag/current check only on the dependent path (skip the independent path)
 
 Rejected — the issue's own worked example is specifically an independent-disk scenario (a standalone
-disk's IOPS raised externally), and CLAUDE.md documents `metadata.etag` as the concurrency precondition
+disk's IOPS raised externally), and docs/platform-reference.md documents `metadata.etag` as the concurrency precondition
 for `UpdateDisk` just as it does for `UpdateVirtualMachine`. Leaving the independent path unconditional
 would have fixed the less risky path (VM writes touch every sibling disk's collection entry) and left
 the more common one (a standalone data disk, the primary target of this whole project) exposed.

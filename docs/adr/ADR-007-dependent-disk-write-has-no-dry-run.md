@@ -33,10 +33,10 @@ type UpdateVirtualMachineRequest struct {
 }
 ```
 
-The SDK is generated directly from MWS's own OpenAPI spec (CLAUDE.md, "API" §), so an absent field
+The SDK is generated directly from MWS's own OpenAPI spec (docs/platform-reference.md, "API" §), so an absent field
 here reflects an absent query parameter on that operation in the spec itself, not an SDK authoring
 gap. This has not been confirmed by a live call in this session (no credentials available) — treat it
-as strong evidence from a primary source, not yet a `[V]` measured fact in CLAUDE.md's terms.
+as strong evidence from a primary source, not yet a `[V]` measured fact in docs/platform-reference.md's terms.
 
 ## Decision
 
@@ -69,7 +69,7 @@ by the platform, per disk.
 
 ### Option C: Send `?validateOnly=true` on the VM endpoint anyway, hoping it is accepted and ignored
 
-Rejected, untested: CLAUDE.md's own measured section already shows this platform returning confusing
+Rejected, untested: docs/platform-reference.md's own measured section already shows this platform returning confusing
 errors for unsupported request shapes elsewhere (the misleading `503` for a wrong credential type on
 metrics, rather than a clean `403`). Sending an undeclared query parameter risks a similarly opaque
 failure instead of a clean no-op, and this has not been tested live to know which.
@@ -89,7 +89,7 @@ failure instead of a clean no-op, and this has not been tested live to know whic
 
 **Revisit when**
 - A live call against the test environment confirms (or overturns) that `UpdateVirtualMachine`
-  genuinely has no dry-run path — promote this from "strong evidence" to `[V]` in CLAUDE.md either
+  genuinely has no dry-run path — promote this from "strong evidence" to `[V]` in docs/platform-reference.md either
   way.
 - If the platform ever adds `validateOnly` to the VM update operation, this ADR's asymmetry goes away
   and US-013 can drop the per-class distinction. Tracked as a platform feature request in

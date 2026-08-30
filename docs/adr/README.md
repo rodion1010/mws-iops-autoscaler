@@ -22,10 +22,13 @@
 | [018](ADR-018-disk-identity-key-for-long-term-state.md) | Samples, cooldown, and the change budget key on DiskName + IncarnationID, not DiskName alone | Accepted |
 | [019](ADR-019-incarnation-safety-write-path-and-remaining-state.md) | Incarnation safety extended to the write precondition, guest counters, and the latency baseline | Accepted |
 
-ADRs are **derived from the PRD**, which is the primary document: it states the requirement, an ADR
-records how the requirement is met and why that way. An ADR never introduces or drops a requirement
-on its own — when a decision here changes one, the PRD is amended in the same change. See the sync
-rule in `docs/README.md`.
 
-Requirements live in `docs/prd-mws-iops-autoscaler.md`. Measured platform behaviour lives in
-`CLAUDE.md`. Architecture and testing strategy are in `docs/design.md`; configuration in `docs/configuration.md`.
+These records preserve the rationale that existed when each decision was made. They are not the
+canonical description of the current system: that role belongs to `docs/design.md`. A reader must
+not need to replay the ADR sequence to reconstruct current behaviour.
+
+Create a new ADR only when the decision satisfies the criteria in `CLAUDE.md`. Product requirements
+remain in `docs/prd-mws-iops-autoscaler.md`; verified platform behaviour is in
+`docs/platform-reference.md`; configuration is in `docs/configuration.md`. When an ADR is
+superseded, retain it only when its historical rationale remains useful and mark its status and
+replacement explicitly.

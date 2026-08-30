@@ -21,7 +21,7 @@ saturated :=
 This repo's own E2E test plan (design.md §8.4) requires a bandwidth-bound scenario to pass: `fio
 bs=64k` pins the disk at its throughput ceiling while IOPS utilization sits around 51% (roughly
 513/1000 ops — large blocks mean fewer, bigger operations). NBS-PL2's IOPS and bandwidth are linked by
-a fixed ratio (CLAUDE.md, "Disk NBS-PL2": `MB/s = IOPS × 32 / 1024`), so a large-block workload
+a fixed ratio (docs/platform-reference.md, "Disk NBS-PL2": `MB/s = IOPS × 32 / 1024`), so a large-block workload
 saturates bandwidth long before it saturates the IOPS count. Under the gate as written, that scenario
 can never reach a decision: IOPS utilization (0.51) never clears 0.98, so queue and latency — even
 though they clearly show unmet demand — are never even checked. The algorithm and the test the repo
@@ -50,7 +50,7 @@ saturated :=
 ```
 
 `bandwidth_utilization = (read_bytes/s + write_bytes/s) / (spec.iops × 32768)` — the denominator is
-the disk's own effective throughput ceiling, using the exact per-IOPS byte figure CLAUDE.md measured
+the disk's own effective throughput ceiling, using the exact per-IOPS byte figure docs/platform-reference.md measured
 (`33554432 Bps` at 1000 IOPS = 32768 bytes/IOPS), not an approximation.
 
 **The config field is renamed** `saturation.iops_utilization_threshold` →

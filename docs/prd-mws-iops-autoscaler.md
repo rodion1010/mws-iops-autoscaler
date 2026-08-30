@@ -1,7 +1,7 @@
 # PRD: MWS IOPS Autoscaler
 
 Status: draft · Last updated: 2026-08-28
-Platform facts referenced here live in `CLAUDE.md` at the repo root.
+Platform facts referenced here live in `docs/platform-reference.md` at the repo root.
 
 > **This PRD is the primary document.** It states *what* is being built and *why*. `docs/design.md`
 > and `docs/adr/` are derived from it and answer *how*; `docs/configuration.md` follows from both.
@@ -421,7 +421,7 @@ controller is naturally run that way rather than installed on a host.
 
 **Acceptance Criteria:**
 - [ ] Container image, built from the same static binary as US-015
-- [ ] Documented deployment example against the test environment (`CLAUDE.md`, "Test environment")
+- [ ] Documented deployment example against the test environment (`docs/development.md`, "Reference test project")
 - [ ] Typecheck/lint passes
 
 ---
@@ -760,14 +760,14 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
 `DiskSpecRequest` schema with per-field mutability. `local` mode is no longer blocked.
 
 - **OQ-2 — resolved.** Measured against a live project. `<service>` = `compute`; the full metric
-  name and label set is recorded in `CLAUDE.md` ("Prometheus export — measured"). No read queue
+  name and label set is recorded in `docs/platform-reference.md` ("Prometheus export — measured"). No read queue
   metric exists — only `compute_vm_disk_write_queue_length`; read-heavy saturation in `fleet` rests
   on latency alone (design.md §10, item 4).
 - **OQ-3 — resolved.** Dependent disks are supported via the VM write path (ADR-003, US-011a). They
   are not excluded, and boot disks are therefore in scope. A dependent disk can also be converted to
   independent (`spec-to-ref`), but that is one-way and changes deletion semantics, so the agent only
   ever *recommends* it.
-- **OQ-4 — resolved.** Measured against a live project (`CLAUDE.md`, "Timing, measured"):
+- **OQ-4 — resolved.** Measured against a live project (`docs/platform-reference.md`, "Timing, measured"):
   publication every 30 s, a 60 s trailing averaging window, 62–90 s publication lag (mean 75 s).
   Worst case detection latency ≈ 135 s — the hard floor on window length; the 15 s figure in the docs
   is the console refresh, not the API's granularity. All configured windows (§7) already clear this

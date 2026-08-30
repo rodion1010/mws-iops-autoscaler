@@ -11,7 +11,7 @@ The agent runs in two modes with fundamentally different access:
 - **`local`** — inside the VM whose disks it manages. The guest filesystem is right there.
 - **`fleet`** — outside, managing many VMs. There is no guest access and nobody is going to grant it.
 
-Two metric sources exist, measured (`CLAUDE.md`):
+Two metric sources exist, measured (`docs/platform-reference.md`):
 
 | | Guest (`/proc/diskstats`, `iostat`) | Platform (`monitoring.mwsapis.ru`) |
 |---|---|---|
