@@ -15,7 +15,7 @@ inherit stale history" — but that protection only fires when a disk actually *
 under one identity and a *different* disk appears under another. It does nothing for the case where the
 same `DiskName` string keeps appearing, cycle after cycle, because the platform allows a name to be
 reused: `DiskName` is the disk's `name` field, which is **user-settable** for an independent disk
-(Terraform's `mws_compute_disk.disk` field is required, chosen by the caller — CLAUDE.md "Disk resource
+(Terraform's `mws_compute_disk.disk` field is required, chosen by the caller — docs/platform-reference.md "Disk resource
 identity"). Deleting a disk and creating a new one under the identical name is an ordinary
 infra-as-code "replace," not a contrived edge case.
 
@@ -28,7 +28,7 @@ ADR-013) could resolve a reservation left over from the *old* disk's crash-inter
 the *new* disk's live IOPS — a coincidental match confirms or releases a change that has nothing to do
 with what's actually being verified.
 
-CLAUDE.md's own SDK research settles what the stable identifier actually is: `GetDisk`'s response
+docs/platform-reference.md's own SDK research settles what the stable identifier actually is: `GetDisk`'s response
 carries `metadata.id`, and the SDK's own generated comment on the `name` field reads *"Deprecated:
 отказываемся в пользу metadata.id"* — the platform's own stated direction is away from name as
 identity. `metadata.id` is assigned at creation and is not reused.
@@ -103,7 +103,7 @@ behavior does the work.
   but touches a fair number of call sites.
 
 **Revisit when**
-- `metadata.id` is verified against a live API response in this project (CLAUDE.md still marks this
+- `metadata.id` is verified against a live API response in this project (docs/platform-reference.md still marks this
   SDK-only) — if the field's real-world behavior differs from the generated model in some way, this
   decision's assumptions should be re-checked against that.
 - The Analyzer's own latency baseline (`WindowAnalyzer.baselines`/`established`, keyed by plain
@@ -134,6 +134,6 @@ behavior does the work.
        `cmd/mws-iops-autoscaler`'s `reconcilePendingBudget` recreate scenario (a stale reservation never
        matches the replacement disk's live state); every pre-existing Tracker-state assertion updated
        to query by `IdentityKey()`.
-8. [x] `CLAUDE.md`: new "Disk resource identity" section documenting the SDK's own `metadata.id`
+8. [x] `docs/platform-reference.md`: new "Disk resource identity" section documenting the SDK's own `metadata.id`
        field and its `name`-is-deprecated comment.
 9. [x] `docs/design.md` §4.1 and §5.2 synced.

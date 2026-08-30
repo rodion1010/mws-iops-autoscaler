@@ -62,7 +62,7 @@ US-016's permission preflight ("verifies it can list disks, read the VM type, an
 failing with a message naming the missing capability rather than a raw 403") needs to tell apart two
 different failures that currently look identical: a service that **exists but isn't enabled** for
 this project (actionable — the operator enables it) versus a service that **doesn't exist for this
-project or tier at all** (a different problem — enabling it isn't an option). CLAUDE.md already
+project or tier at all** (a different problem — enabling it isn't an option). docs/platform-reference.md already
 documents that enabling a service is a separate prerequisite from granting roles, and that a project
 without it returns 403 regardless of role; without a full catalog to check against, the preflight
 can't distinguish which of the two is actually true.
@@ -89,7 +89,7 @@ remediation), per US-016's own stated goal of naming the missing capability prec
 
 **Problem / Current behavior**
 The `monitoring.metricExporter` role — required to read Prometheus metrics from
-`monitoring.mwsapis.ru` (CLAUDE.md, "Monitoring") — is not part of the platform's built-in Project
+`monitoring.mwsapis.ru` (docs/platform-reference.md, "Monitoring") — is not part of the platform's built-in Project
 Admin role.
 
 **Expected / Desired behavior**
@@ -100,7 +100,7 @@ documented so it isn't discovered by surprise.
 **Autoscaler impact**
 `fleet` mode always needs platform metrics, and `local` mode needs them when comparison/shadow mode
 (US-005b) is enabled. An operator who is a Project Admin can reasonably assume that's sufficient and
-hit an unexpected authorization failure on first run — made worse by CLAUDE.md's own measured finding
+hit an unexpected authorization failure on first run — made worse by docs/platform-reference.md's own measured finding
 that the *wrong* credential type against this endpoint returns a misleading `503` instead of a clean
 `403`.
 
@@ -121,7 +121,7 @@ narrower, custom role that doesn't include Project Admin's full set.
 
 ## 3. Platform disk metrics
 
-One functional area (the Prometheus export of disk metrics, CLAUDE.md "Prometheus export"), several
+One functional area (the Prometheus export of disk metrics, docs/platform-reference.md "Prometheus export"), several
 distinct problems within it — tracked as separate sub-items since each has its own status.
 
 ### 3.1 No read queue depth metric (bytes)
@@ -131,7 +131,7 @@ distinct problems within it — tracked as separate sub-items since each has its
 
 **Problem / Current behavior**
 `compute_vm_disk_write_queue_length` is exported; there is no equivalent metric for read queue depth
-at all (CLAUDE.md: "write queue only — no read queue metric exists").
+at all (docs/platform-reference.md: "write queue only — no read queue metric exists").
 
 **Expected / Desired behavior**
 A platform metric for read queue depth, in bytes, mirroring the existing write metric.
@@ -156,8 +156,7 @@ footing as the existing write-queue one, narrowing the `local`/`fleet` capabilit
 ### 3.2 No queue depth metrics in I/O request count
 
 **Type:** Metrics Issue
-**Status:** Planned — CLAUDE.md's "Platform changes committed by the NBS team" section already
-records a commitment to add operations-denominated queue depth. It is not confirmed whether that
+**Status:** Planned — confirmed with the NBS team on 2026-08-28. It is not confirmed whether the
 addition covers both read and write, or which.
 
 **Problem / Current behavior**
@@ -179,7 +178,7 @@ via `/proc/diskstats`'s `aqu-sz`, narrowing the gap that motivated ADR-001 (desi
 it is never silently compared against or mixed with the operations-denominated guest metric (US-005a).
 
 **Platform ticket:** TBD
-**Owner / Team:** TBD (NBS team, per CLAUDE.md)
+**Owner / Team:** NBS team (commitment confirmed 2026-08-28)
 
 **Follow-up after resolution**
 Prefer the operations-denominated metric over the byte-denominated fallback once it exists and is
@@ -189,12 +188,11 @@ byte-denominated path once it's no longer the only option, keeping it only as a 
 ### 3.3 Disk utilization metrics always read zero
 
 **Type:** Bug
-**Status:** Planned — CLAUDE.md's "Platform changes committed by the NBS team" section records the
-NBS team's commitment to fix this.
+**Status:** Planned — the NBS team confirmed the fix on 2026-08-28.
 
 **Problem / Current behavior**
 `compute_vm_disk_ops_peak_quota_utilization` and `compute_vm_disk_bytes_peak_quota_utilization` exist
-but read `0` under all measured conditions, including at full disk saturation (CLAUDE.md, "measured
+but read `0` under all measured conditions, including at full disk saturation (docs/platform-reference.md, "measured
 against a live project": "read 0 even at full saturation — do not use"). They cannot serve as a real
 autoscaling signal today.
 
@@ -213,7 +211,7 @@ idle," until the bug is fixed — code carries an explicit comment that this int
 revisited once the fix ships, since a real idle disk will then legitimately report `0` too.
 
 **Platform ticket:** TBD
-**Owner / Team:** NBS team (per CLAUDE.md)
+**Owner / Team:** NBS team (commitment confirmed 2026-08-28)
 
 **Follow-up after resolution**
 Switch to reading the platform metric directly per US-005a's existing fallback interface (prefer the

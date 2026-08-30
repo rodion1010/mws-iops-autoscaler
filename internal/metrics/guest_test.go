@@ -22,7 +22,7 @@ func newTestGuestSource(t *testing.T, path string, clock *time.Time) *GuestSourc
 	g := NewGuestSource()
 	g.procDiskstatsPath = path
 	g.resolveSymlink = func(guestPath string) (string, error) {
-		// datadisk -> sdb, matching CLAUDE.md's confirmed live mapping;
+		// datadisk -> sdb, matching docs/development.md's confirmed live mapping;
 		// anything else is unresolvable, exercising the skip path.
 		if guestPath == "/dev/disk/by-id/mws-datadisk" {
 			return "sdb", nil

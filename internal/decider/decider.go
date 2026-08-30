@@ -8,7 +8,7 @@ import (
 )
 
 // platformMaxIOPS is the disk-level ceiling the platform itself enforces
-// (CLAUDE.md "IOPS limits") — always part of the clamp regardless of what
+// (docs/platform-reference.md "IOPS limits") — always part of the clamp regardless of what
 // policy.limits.max_iops or VM headroom allow.
 const platformMaxIOPS = 10000
 

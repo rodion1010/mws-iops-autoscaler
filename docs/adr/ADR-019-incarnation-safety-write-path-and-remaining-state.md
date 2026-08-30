@@ -8,7 +8,7 @@
 
 ADR-018 made the agent's cross-cycle *state* — the Sampler ring buffer, the cooldown clock, and the
 24h change budget — key on `DiskName + IncarnationID` (`IdentityKey()`) rather than `DiskName` alone,
-so a disk deleted and recreated under the same name (an ordinary infra-as-code "replace", CLAUDE.md
+so a disk deleted and recreated under the same name (an ordinary infra-as-code "replace", docs/platform-reference.md
 "Disk resource identity") starts each of those systems clean. That pass deliberately scoped itself to
 those three state stores and named two exposures it left open:
 
@@ -63,7 +63,7 @@ functions as a new `expectedIncarnation` precondition.
 - **Dependent path** (`UpdateDependentDiskIOPS`): **cannot** reuse its own pre-write re-read the same
   way. That re-read is `GetVirtualMachine`, and `sdk_client.go`'s `translateVMResponse` — the one place
   a VM response becomes `StorageDisk` values — never populates `IncarnationID` from a VM read, for
-  either disk class (CLAUDE.md: *"`StorageDiskStatusResponse`... does not carry `metadata.id`"*). Only
+  either disk class (docs/platform-reference.md: *"`StorageDiskStatusResponse`... does not carry `metadata.id`"*). Only
   a separate `GetDisk` call does. So this path makes that call itself, immediately before the write,
   using the target attachment's own `DiskName` (`validateDependentWriteTarget` returns it) — the exact
   same call `Discover` already makes per managed disk (discovery.go), just repeated here so the check is

@@ -21,7 +21,7 @@ both sources**." The stated reason was to avoid a repeat of the `QueueDepth` uni
 statistical quantities depending on `Source`, an invisible footgun.
 
 That reasoning correctly identifies a real risk but draws the wrong conclusion from it. `platform`
-is not just "another average-producing source" — CLAUDE.md's measured Prometheus export confirms
+is not just "another average-producing source" — docs/platform-reference.md's measured Prometheus export confirms
 `compute_vm_disk_read_latency_hist_bucket`/`_count`/`_sum` are a real histogram, not an average: a
 platform-side p95 computed directly from those buckets for a single scrape is a materially more
 accurate statistic than a p95 estimated by windowing a series of per-interval averages, which is a
@@ -61,7 +61,7 @@ const (
 	LatencyWindowedAvg LatencyStatKind = "windowed_avg"
 	// LatencyHistogram: a real quantile computed directly from the
 	// platform's exported bucket histogram
-	// (compute_vm_disk_{read,write}_latency_hist_*, CLAUDE.md) for a
+	// (compute_vm_disk_{read,write}_latency_hist_*, docs/platform-reference.md) for a
 	// single scrape — no windowing needed for accuracy, though the
 	// Analyzer may still window it for sustain-over-time checks.
 	// `platform` only; `guest` has no histogram to read.

@@ -418,7 +418,7 @@ func validateDeviceName(name string) error {
 
 // validateMetricsSource checks the mode/source combinations from
 // docs/configuration.md §8. In local mode, opting into the platform source
-// requires a monitoring API key on disk (CLAUDE.md "Monitoring" — a
+// requires a monitoring API key on disk (docs/platform-reference.md "Monitoring" — a
 // different credential from the compute IAM token).
 func validateMetricsSource(cfg *Config) []error {
 	source := cfg.Runtime.Metrics.Source
@@ -445,7 +445,7 @@ func validateMetricsSource(cfg *Config) []error {
 }
 
 // monitoringAPIKeyPathEnv names the file holding the monitoring API key
-// (CLAUDE.md's own Prometheus scrape example uses a bearer_token_file, not
+// (docs/platform-reference.md's own Prometheus scrape example uses a bearer_token_file, not
 // an inline value — the compute IAM token has no equivalent, it comes from
 // the metadata service instead).
 const monitoringAPIKeyPathEnv = "MWS_MONITORING_API_KEY_PATH"

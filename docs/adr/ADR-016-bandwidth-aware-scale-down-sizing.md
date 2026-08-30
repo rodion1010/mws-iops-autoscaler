@@ -9,7 +9,7 @@ ceiling" reasoning from the saturation gate to scale-down target sizing
 ## Context
 
 ADR-008 fixed the saturation gate so a large-block, low-ops/s workload could still trigger scale-up:
-NBS-PL2 ties provisioned IOPS and bandwidth at one fixed ratio (`bytesPerIOPS = 32768`, CLAUDE.md), so
+NBS-PL2 ties provisioned IOPS and bandwidth at one fixed ratio (`bytesPerIOPS = 32768`, docs/platform-reference.md), so
 `bandwidth_utilization` had to become a second way to clear the gate alongside `iops_utilization`.
 
 Scale-down sizing (design.md §4.3, US-010) had the identical, un-fixed bug: `target =
@@ -74,7 +74,7 @@ op-heavy and block-heavy bursts). `TestDemandP95Down_alignedPerSampleMaxNotCombi
 
 ### Option C: Leave scale-down sizing IOPS-only; treat bandwidth as scale-up's problem only
 
-Rejected. The billing and provisioning model (CLAUDE.md, "Billing") is symmetric — a lowered IOPS
+Rejected. The billing and provisioning model (docs/platform-reference.md, "Billing") is symmetric — a lowered IOPS
 limit lowers the bandwidth ceiling by the same fixed ratio it raised it by — so a bandwidth-heavy
 workload that scale-up correctly sized (ADR-008) can just as easily be undersized again on the very
 next scale-down cycle if that path ignores bandwidth. Fixing one direction and not the other reproduces

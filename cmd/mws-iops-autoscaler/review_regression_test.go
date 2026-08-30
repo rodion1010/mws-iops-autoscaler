@@ -106,7 +106,7 @@ func TestRegressionStaleDecisionNeverMutatesReplacementDisk(t *testing.T) {
 					// IncarnationID deliberately NOT set here — a real
 					// GetVirtualMachine/translateVMResponse read never
 					// populates a live StorageDisk's IncarnationID at all
-					// (sdk_client.go; CLAUDE.md: "StorageDiskStatusResponse...
+					// (sdk_client.go; docs/platform-reference.md: "StorageDiskStatusResponse...
 					// does not carry metadata.id"). Setting it directly on
 					// this fixture (as an earlier version of this test did)
 					// would not exercise the write path's real incarnation

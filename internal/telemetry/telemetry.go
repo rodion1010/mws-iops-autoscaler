@@ -4,7 +4,7 @@
 // writes_total/write_duration_seconds (no Actuator exists yet to report a
 // write outcome — M6) and cost_delta_iops_hours (no billing-rate model is
 // designed anywhere yet) — registering a metric with nothing real behind it
-// would repeat the exact *_quota_utilization-reads-zero trap CLAUDE.md
+// would repeat the exact *_quota_utilization-reads-zero trap docs/platform-reference.md
 // documents as a platform bug, not something to imitate.
 package telemetry
 

@@ -371,7 +371,7 @@ func (m *mismatchDependentClient) UpdateDependentDisk(ctx context.Context, req D
 // the dependent attachment and, crucially, leaves IncarnationID empty —
 // exactly what a real GetVirtualMachine/translateVMResponse read produces.
 // sdk_client.go's translateVMResponse never populates StorageDisk.
-// IncarnationID from a VM read for either disk class (CLAUDE.md:
+// IncarnationID from a VM read for either disk class (docs/platform-reference.md:
 // "StorageDiskStatusResponse... does not carry metadata.id"); only a
 // separate GetDisk call does. A fixture that set IncarnationID here
 // directly (as an earlier version of this test did) would never catch a

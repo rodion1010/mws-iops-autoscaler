@@ -20,7 +20,7 @@ Implementing that literally means reconstructing every untouched disk entry's `b
 `storage.disks[]` is a collection, and MWS's Upsert semantics treat an existing element **omitted**
 from the request as deleted, so every alias has to appear in the body regardless.
 
-That reconstruction is where the risk actually lives. CLAUDE.md's "DiskSpecRequest mutability"
+That reconstruction is where the risk actually lives. docs/platform-reference.md's "DiskSpecRequest mutability"
 findings are explicit: `name`, `boot`, `deviceName`, and `diskType` are immutable on update, and the
 API accepts them **omitted entirely** — there is no requirement to resend the current value, only a
 rule that if you do, it must match. A value round-tripped through a response→domain→request
@@ -88,8 +88,8 @@ independent where the user wants that.
 
 **Cons**
 - Relies on the platform's documented immutability behavior (fields may be omitted, not just
-  resent-unchanged) holding as described in CLAUDE.md rather than the client enforcing it directly.
-  Mitigated: this is exactly what CLAUDE.md's "DiskSpecRequest mutability" section verified against
+  resent-unchanged) holding as described in docs/platform-reference.md rather than the client enforcing it directly.
+  Mitigated: this is exactly what docs/platform-reference.md's "DiskSpecRequest mutability" section verified against
   the OpenAPI spec's own immutability notes, not an assumption.
 
 ### Option C: Convert every dependent disk to independent to avoid the VM write path entirely
@@ -111,7 +111,7 @@ change the agent must never perform unprompted. Unaffected by this ADR.
 - None identified beyond Option B's already-mitigated con above.
 
 **Revisit when**
-- The platform's immutable-field-omission behavior changes (i.e., CLAUDE.md's verified findings no
+- The platform's immutable-field-omission behavior changes (i.e., docs/platform-reference.md's verified findings no
   longer hold) — re-verify with `validateOnly`-style testing before trusting omission again.
 
 ## Action Items

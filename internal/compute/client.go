@@ -34,7 +34,7 @@ type Client interface {
 
 // IndependentUpdateRequest is a partial update: only Iops (plus the
 // optimistic-concurrency Etag, issue #16) is sent (docs/configuration.md;
-// CLAUDE.md "DiskSpecRequest mutability" — iops has no immutability note,
+// docs/platform-reference.md "DiskSpecRequest mutability" — iops has no immutability note,
 // everything else does).
 type IndependentUpdateRequest struct {
 	DiskName       string

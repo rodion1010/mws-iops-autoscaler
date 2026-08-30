@@ -8,7 +8,7 @@ import (
 )
 
 // bytesPerIOPS is NBS-PL2's fixed IOPS-to-bandwidth ratio, measured in
-// CLAUDE.md: "compute_vm_disk_read_latency..." aside, the throughput figure
+// docs/platform-reference.md: "compute_vm_disk_read_latency..." aside, the throughput figure
 // itself is `MB/s = IOPS × 32 / 1024`, i.e. exactly 32768 bytes per IOPS
 // unit (33554432 Bps at 1000 IOPS). Used for bandwidth_utilization (ADR-008).
 const bytesPerIOPS = 32768
@@ -361,7 +361,7 @@ func sustainedResourceBelow(window []metrics.Sample, specIOPS int64, threshold f
 // Guest is the only MetricSource implemented today and always produces
 // QueueDepthOps (ADR-001), so a false return is unreachable through the
 // real pipeline right now — it exists so a future platform-sourced window
-// (QueueDepthBytes, CLAUDE.md: "write_queue_length ... byte-denominated")
+// (QueueDepthBytes, docs/platform-reference.md: "write_queue_length ... byte-denominated")
 // is rejected outright the moment M7 lands, rather than silently compared
 // against a threshold calibrated for a different unit. "Reject unknown
 // units instead of silently evaluating them" is the issue's own proposed

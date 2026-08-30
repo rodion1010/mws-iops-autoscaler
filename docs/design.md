@@ -10,7 +10,7 @@ requirement on its own — when a design decision changes one, the PRD is amende
 (see the sync rule in `docs/README.md`).
 
 Companion documents: requirements in `docs/prd-mws-iops-autoscaler.md`, decisions in `docs/adr/`,
-measured platform behaviour in `CLAUDE.md`, configuration model in `docs/configuration.md`.
+measured platform behaviour in `docs/platform-reference.md`, configuration model in `docs/configuration.md`.
 
 ---
 
@@ -157,7 +157,7 @@ product risk lives.
    GET /compute/v1/projects/{p}/disks/{d}
    ├─ spec.iops (current provisioned), status.iops {base, extra, total}
    │    spec.iops <= 0 → invalid current IOPS, excluded (issue #4)
-   └─ metadata.id → IncarnationID (CLAUDE.md "Disk resource identity") — degrades to
+   └─ metadata.id → IncarnationID (docs/platform-reference.md "Disk resource identity") — degrades to
         DiskName-only identity if absent, never excludes the disk (pre-merge review)
 
  local mode only, for each disk that reached this point:
@@ -324,7 +324,7 @@ of sustain, and none of them collapse to "check only the newest sample":
   carries sustain in its own definition the same way.
 
 `bandwidth_utilization = (read_bytes/s + write_bytes/s) / (spec.iops × 32768)` — NBS-PL2's fixed
-IOPS-to-bandwidth ratio (CLAUDE.md: `MB/s = IOPS × 32 / 1024`), using the exact measured bytes/IOPS
+IOPS-to-bandwidth ratio (docs/platform-reference.md: `MB/s = IOPS × 32 / 1024`), using the exact measured bytes/IOPS
 figure, not an approximation. `spec.iops` is already read by `Discover` (M1) on the same cycle — no
 extra API call.
 
@@ -420,7 +420,7 @@ roughly a third of the service it wants. Both forms are clamped to
 `dL/dt` (`Analysis.QueueGrowthRate`) is only summed with `served` (ops/s) when
 `Analysis.QueueGrowthRateValid` is true — the Analyzer sets it false whenever the up-window's
 `QueueDepth` is not entirely `local`'s own ops unit (issue #18), since `fleet`'s queue metric is
-byte-denominated (CLAUDE.md) and `served + dL/dt` is only dimensionally valid for ops/s. An invalid
+byte-denominated (docs/platform-reference.md) and `served + dL/dt` is only dimensionally valid for ops/s. An invalid
 growth rate falls through to the closed-workload form exactly as a growth rate that's simply not above
 `queueGrowthThreshold` does — never a raw bytes/s number added onto an ops/s figure, however large
 that number is. Today `local` (guest) is the only implemented source and always produces the ops unit,
@@ -564,7 +564,7 @@ its collection key (`name`) plus the one field actually changing. Earlier drafts
 round-tripped a full disk spec — `boot`, `deviceName`, `diskType`, `size` — reconstructed from the
 GET response and resent as an assertion that nothing else had changed. That is strictly worse than
 omitting those fields: `name`/`boot`/`deviceName`/`diskType` are immutable on update and the API
-accepts them omitted entirely (CLAUDE.md "DiskSpecRequest mutability"), so a value resent through a
+accepts them omitted entirely (docs/platform-reference.md "DiskSpecRequest mutability"), so a value resent through a
 lossy response→domain→request translation risks a mismatch the platform would reject or, worse,
 silently accept as an unintended change. Sending the collection key alone carries the same
 concurrency guarantee (the etag) without manufacturing a value for a field the write never intended
@@ -614,7 +614,7 @@ type DiskRef struct {
     DeviceName string // unprefixed: "datadisk"
 
     // IncarnationID is compute.StorageDisk.IncarnationID (the platform's
-    // own metadata.id, CLAUDE.md "Disk resource identity"), carried here
+    // own metadata.id, docs/platform-reference.md "Disk resource identity"), carried here
     // so the Sampler's ring buffer can be keyed by IdentityKey() instead
     // of DiskID alone (pre-merge review — see that method's own comment).
     IncarnationID string
@@ -673,7 +673,7 @@ const (
     // produce; platform's fallback when no histogram is available.
     LatencyWindowedAvg LatencyStatKind = "windowed_avg"
     // LatencyHistogram: a real quantile computed directly from platform's
-    // exported bucket histogram (CLAUDE.md) for a single scrape — no
+    // exported bucket histogram (docs/platform-reference.md) for a single scrape — no
     // windowing needed for accuracy. platform only.
     LatencyHistogram LatencyStatKind = "histogram"
 )
@@ -1052,7 +1052,7 @@ one combined low-percentile over both read and write latencies, not tracked sepa
 M5 wires every metric above except `writes_total`, `write_duration_seconds` (no Actuator exists yet to
 report a write outcome — M6), and `cost_delta_iops_hours` (needs a billing-rate model not designed
 anywhere yet) — registering a metric with nothing real to report would repeat the exact
-`*_quota_utilization`-reads-zero trap CLAUDE.md documents as a platform bug, not something to imitate.
+`*_quota_utilization`-reads-zero trap docs/platform-reference.md documents as a platform bug, not something to imitate.
 Those three are added when their producing subsystem exists.
 
 `metric_source` and `staleness` are there because ADR-001 accepts two sources: when `local` and
@@ -1368,3 +1368,15 @@ milestone introduces.
    together. Needs multi-disk load data.
 7. **Minimum economically meaningful scale-down.** Given the 100-IOPS step and per-minute metering,
    below some delta a change costs more in churn than it saves.
+
+---
+
+## 11. External algorithm references
+
+- [AWS RDS storage autoscaling](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIOPS.Autoscaling.html):
+  dwell time of at least five minutes, at most four modifications per 24 hours, a hard
+  `MaxAllocatedStorage` ceiling, no scale-down, and a step based on the largest of 10 GiB, 10% of
+  current size, or predicted seven-hour growth.
+- [Azure Database for MySQL Flexible Server — autoscale IOPS](https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-storage-iops):
+  uses Storage IO Percent as its signal and charges for consumed operations, unlike MWS provisioned
+  IOPS billing.
