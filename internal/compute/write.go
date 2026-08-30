@@ -18,6 +18,35 @@ import (
 // same target.
 var ErrConcurrentModification = errors.New("live current differs from the decision's expected current — concurrent modification")
 
+// ErrIncarnationMismatch is wrapped into the error returned by either write
+// path when the disk re-read immediately before the write carries a
+// different metadata.id (IncarnationID) than the Decision being applied was
+// computed from. IOPS equality alone cannot catch this: a disk deleted and
+// recreated under the same name (an ordinary infra-as-code "replace",
+// CLAUDE.md "Disk resource identity") is a genuinely different resource that
+// may happen to sit at the same provisioned IOPS as the stale Decision's
+// Current, so the pre-write concurrency check would pass and this write
+// would silently mutate the wrong disk. Like ErrConcurrentModification this
+// is a pre-write refusal — nothing is ever sent to the platform — but it is
+// distinct because the remedy differs: the resource the Decision targeted no
+// longer exists, so there is nothing to retry against; the next discovery
+// cycle onboards the replacement with its own fresh sampling and identity.
+var ErrIncarnationMismatch = errors.New("live disk incarnation differs from the decision's expected incarnation — the disk was replaced under the same name")
+
+// incarnationMatches reports whether a live-read incarnation is safe to
+// write against given the incarnation the caller expected. A mismatch is
+// only asserted when both are known: an empty expected (the caller carried
+// no incarnation) or an empty live (the platform returned no metadata.id)
+// degrades to the pre-existing IOPS-only precondition rather than refusing
+// every write, mirroring StorageDisk.IdentityKey's own "degrade gracefully
+// when IncarnationID is unavailable" contract.
+func incarnationMatches(expected, live string) bool {
+	if expected == "" || live == "" {
+		return true
+	}
+	return expected == live
+}
+
 // UpdateIndependentDiskIOPS writes a new IOPS limit on a standalone disk
 // (US-011). Only spec.iops (plus metadata.etag) is sent; the SDK's
 // UpdateDisk already targets ?updateOnly=true, so this can never
@@ -39,13 +68,22 @@ var ErrConcurrentModification = errors.New("live current differs from the decisi
 // ValidateOnly through, so a dry run reports a would-be conflict exactly
 // like a real run would. UpdateDependentDiskIOPS below has no server-side
 // validateOnly option: the VM update endpoint does not accept it at all.
-func UpdateIndependentDiskIOPS(ctx context.Context, c Client, diskName string, expectedCurrent, target int64, validateOnly bool, idempotencyKey string) (int64, error) {
+func UpdateIndependentDiskIOPS(ctx context.Context, c Client, diskName string, expectedCurrent, target int64, expectedIncarnation string, validateOnly bool, idempotencyKey string) (int64, error) {
 	live, err := c.GetDisk(ctx, diskName)
 	if err != nil {
 		return 0, fmt.Errorf("update independent disk %q: re-read before write: %w", diskName, err)
 	}
 	if live.Etag == "" {
 		return 0, fmt.Errorf("update independent disk %q: no etag on re-read — refusing to write without optimistic concurrency", diskName)
+	}
+	// Before the IOPS precondition: prove this is even the same resource
+	// the Decision targeted. A same-name replacement can carry the same
+	// SpecIOPS as the stale Current, so the equality check below would pass
+	// and mutate the wrong disk (regression: a stale decision must never
+	// touch a replacement disk).
+	if !incarnationMatches(expectedIncarnation, live.IncarnationID) {
+		return 0, fmt.Errorf("update independent disk %q: %w (expected incarnation %q, live %q)",
+			diskName, ErrIncarnationMismatch, expectedIncarnation, live.IncarnationID)
 	}
 	if live.SpecIOPS != expectedCurrent {
 		return 0, fmt.Errorf("update independent disk %q: %w (expected current %d, live %d)",
@@ -111,17 +149,17 @@ func UpdateIndependentDiskIOPS(ctx context.Context, c Client, diskName string, e
 // Both are checked before any attachment is selected, so an ambiguous
 // inventory returns a descriptive error without ever reaching
 // UpdateDependentDisk (issue #20's own acceptance criterion).
-func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string) (targetAlias string, liveCurrent int64, err error) {
+func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string) (targetAlias string, liveCurrent int64, liveIncarnation string, err error) {
 	aliasCount := make(map[string]int, len(disks))
 	for _, d := range disks {
 		if d.Alias == "" {
-			return "", 0, fmt.Errorf("update dependent disk: VM %q has an attachment (device_name %q) with an empty alias — refusing to write an ambiguous collection", vmName, d.DeviceName)
+			return "", 0, "", fmt.Errorf("update dependent disk: VM %q has an attachment (device_name %q) with an empty alias — refusing to write an ambiguous collection", vmName, d.DeviceName)
 		}
 		aliasCount[d.Alias]++
 	}
 	for alias, count := range aliasCount {
 		if count > 1 {
-			return "", 0, fmt.Errorf("update dependent disk: VM %q has %d attachments sharing alias %q — refusing to write an ambiguous collection", vmName, count, alias)
+			return "", 0, "", fmt.Errorf("update dependent disk: VM %q has %d attachments sharing alias %q — refusing to write an ambiguous collection", vmName, count, alias)
 		}
 	}
 
@@ -133,26 +171,26 @@ func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string
 	}
 	switch len(matches) {
 	case 0:
-		return "", 0, fmt.Errorf("update dependent disk: device_name %q not found on VM %q", deviceName, vmName)
+		return "", 0, "", fmt.Errorf("update dependent disk: device_name %q not found on VM %q", deviceName, vmName)
 	case 1:
 		target := matches[0]
 		if target.Class != ClassDependent {
-			return "", 0, fmt.Errorf("update dependent disk: device_name %q on VM %q is independent, not dependent", deviceName, vmName)
+			return "", 0, "", fmt.Errorf("update dependent disk: device_name %q on VM %q is independent, not dependent", deviceName, vmName)
 		}
 		// target.Alias is already known non-empty from the pass above —
 		// re-asserted here, explicitly, as its own named precondition
 		// (issue #20's acceptance criteria list it separately from
 		// uniqueness) rather than only ever implied by it.
 		if target.Alias == "" {
-			return "", 0, fmt.Errorf("update dependent disk: device_name %q on VM %q has an empty alias", deviceName, vmName)
+			return "", 0, "", fmt.Errorf("update dependent disk: device_name %q on VM %q has an empty alias", deviceName, vmName)
 		}
-		return target.Alias, target.IOPS, nil
+		return target.Alias, target.IOPS, target.IncarnationID, nil
 	default:
-		return "", 0, fmt.Errorf("update dependent disk: device_name %q attached %d times on VM %q — refusing an ambiguous target", deviceName, len(matches), vmName)
+		return "", 0, "", fmt.Errorf("update dependent disk: device_name %q attached %d times on VM %q — refusing an ambiguous target", deviceName, len(matches), vmName)
 	}
 }
 
-func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName string, expectedCurrent, target int64, dryRun bool, idempotencyKey string) (int64, error) {
+func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName string, expectedCurrent, target int64, expectedIncarnation string, dryRun bool, idempotencyKey string) (int64, error) {
 	vm, err := c.GetVirtualMachine(ctx, vmName)
 	if err != nil {
 		return 0, fmt.Errorf("update dependent disk: re-read VM %q: %w", vmName, err)
@@ -173,7 +211,7 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 	// and more than one attachment sharing deviceName would let
 	// targetAlias silently pick whichever the loop below saw last,
 	// mutating an arbitrary attachment instead of the intended one.
-	targetAlias, liveCurrent, err := validateDependentWriteTarget(vm.Disks, deviceName, vmName)
+	targetAlias, liveCurrent, liveIncarnation, err := validateDependentWriteTarget(vm.Disks, deviceName, vmName)
 	if err != nil {
 		return 0, err
 	}
@@ -182,6 +220,14 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 		aliases[i] = d.Alias
 	}
 
+	// Prove the attachment is still the resource the Decision targeted
+	// before the IOPS precondition — a same-name replacement can sit at the
+	// same IOPS (regression: a stale decision must never touch a
+	// replacement disk).
+	if !incarnationMatches(expectedIncarnation, liveIncarnation) {
+		return 0, fmt.Errorf("update dependent disk %q on VM %q: %w (expected incarnation %q, live %q)",
+			deviceName, vmName, ErrIncarnationMismatch, expectedIncarnation, liveIncarnation)
+	}
 	if liveCurrent != expectedCurrent {
 		return 0, fmt.Errorf("update dependent disk %q on VM %q: %w (expected current %d, live %d)",
 			deviceName, vmName, ErrConcurrentModification, expectedCurrent, liveCurrent)

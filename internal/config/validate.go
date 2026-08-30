@@ -139,11 +139,23 @@ func validateCollectionIntervalAgainstWindows(resolved *ResolvedConfig) []error 
 		if window <= 0 {
 			return // validateAdvancedRanges already rejects this
 		}
-		if interval > window {
+		// interval must be strictly shorter than the window, not merely
+		// "not longer" (regression: an accepted cadence must be able to
+		// fill its window). At exactly window cadence a trailing span of
+		// that same length contains exactly two real samples — the newest
+		// and the one landing on its far boundary — and analyzer.windowFull
+		// needs minSamplesForWindowMirror (3) before any window is ever
+		// "full"; the boundary sample also leaves the span at exactly
+		// `window`, so trailingWindow never reaches back for a third. So a
+		// collection_interval equal to (or longer than) a window can never
+		// produce an evaluable window, however long the agent runs. A
+		// strictly shorter interval can: a natural or reached-back
+		// predecessor supplies the third sample.
+		if interval >= window {
 			errs = append(errs, fmt.Errorf(
-				"runtime.metrics.collection_interval: %s is too long relative to %s.advanced.evaluation.%s (%s) — "+
-					"at most one sample could ever fall within that window, so it could never become evaluable",
-				interval, path, field, window))
+				"runtime.metrics.collection_interval: %s is not shorter than %s.advanced.evaluation.%s (%s) — "+
+					"at that cadence fewer than %d samples can ever fall within the window, so it could never become evaluable",
+				interval, path, field, window, minSamplesForWindowMirror))
 		}
 	}
 

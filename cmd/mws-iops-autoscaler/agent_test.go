@@ -69,16 +69,51 @@ type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
+// testResolvedPolicy is a realistic resolved policy for the hand-built
+// managed disks below. In production every ManagedDisk carries one
+// (registry.Select resolves it from config defaults); a zero policy would
+// leave the evaluation windows at 0, which no real disk ever has, so any
+// test that feeds real samples through the Analyzer needs this to exercise
+// the window/baseline path at all.
+func testResolvedPolicy() config.ResolvedPolicy {
+	return config.ResolvedPolicy{
+		MinIOPS: 1000,
+		MaxIOPS: 10000,
+		Advanced: config.ResolvedAdvanced{
+			ScaleUpWindow:             5 * time.Minute,
+			ScaleDownWindow:           30 * time.Minute,
+			UtilizationThreshold:      0.95,
+			QueueDepthThreshold:       1,
+			LatencyMode:               "relative",
+			LatencyBaselineMultiplier: 1.5,
+			ScaleUpUtilization:        0.8,
+			ScaleDownUtilization:      0.4,
+			CooldownScaleUp:           5 * time.Minute,
+			CooldownScaleDown:         30 * time.Minute,
+			MinChangeIOPS:             100,
+			MaxScaleUpRatio:           2.0,
+			MaxScaleDownRatio:         0.5,
+			MaxChangesPer24h:          4,
+		},
+	}
+}
+
 func dependentDisk() registry.ManagedDisk {
-	return registry.ManagedDisk{Disk: compute.StorageDisk{
-		Alias: "bootdisk", DeviceName: "bootdisk", Class: compute.ClassDependent, DiskName: "vm-1-boot",
-	}}
+	return registry.ManagedDisk{
+		Disk: compute.StorageDisk{
+			Alias: "bootdisk", DeviceName: "bootdisk", Class: compute.ClassDependent, DiskName: "vm-1-boot",
+		},
+		Policy: testResolvedPolicy(),
+	}
 }
 
 func independentDisk() registry.ManagedDisk {
-	return registry.ManagedDisk{Disk: compute.StorageDisk{
-		Alias: "datadisk", DeviceName: "datadisk", Class: compute.ClassIndependent, DiskName: "vm-1-data",
-	}}
+	return registry.ManagedDisk{
+		Disk: compute.StorageDisk{
+			Alias: "datadisk", DeviceName: "datadisk", Class: compute.ClassIndependent, DiskName: "vm-1-data",
+		},
+		Policy: testResolvedPolicy(),
+	}
 }
 
 func TestActuate_refusesScaleDownWhenDisabled_dependent(t *testing.T) {

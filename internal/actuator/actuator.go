@@ -23,6 +23,15 @@ type Target struct {
 	DeviceName string // unprefixed (ADR-004) — dependent-path target
 	DiskName   string // cloud resource name — independent-path target (GetDisk/UpdateDisk)
 	Class      compute.DiskClass
+
+	// IncarnationID is the disk's metadata.id the Decision was computed
+	// against — passed to the write path as a pre-write precondition so a
+	// disk deleted and recreated under the same name (a genuinely different
+	// resource that may sit at the same IOPS) is refused rather than
+	// silently mutated (compute.ErrIncarnationMismatch). Empty when the
+	// platform served no metadata.id, in which case the write path degrades
+	// to its IOPS-only concurrency check.
+	IncarnationID string
 }
 
 // Applied is the value actually verified from the write's response, never
@@ -66,7 +75,7 @@ func (a *ComputeActuator) Apply(ctx context.Context, d decider.Decision, target 
 		// — the write path re-verifies it against a fresh read immediately
 		// before writing and aborts on any mismatch, in either direction
 		// (issue #16).
-		applied, err := compute.UpdateIndependentDiskIOPS(ctx, a.Client, target.DiskName, d.Current, d.Target, dryRun, idempotencyKey)
+		applied, err := compute.UpdateIndependentDiskIOPS(ctx, a.Client, target.DiskName, d.Current, d.Target, target.IncarnationID, dryRun, idempotencyKey)
 		if err != nil {
 			return Applied{}, err
 		}
@@ -78,7 +87,7 @@ func (a *ComputeActuator) Apply(ctx context.Context, d decider.Decision, target 
 		// still exercise the fresh-read/conflict/direction checks below,
 		// even though (ADR-007) there is no server-side validateOnly for
 		// this path to also confirm against.
-		applied, err := compute.UpdateDependentDiskIOPS(ctx, a.Client, target.VMName, target.DeviceName, d.Current, d.Target, dryRun, idempotencyKey)
+		applied, err := compute.UpdateDependentDiskIOPS(ctx, a.Client, target.VMName, target.DeviceName, d.Current, d.Target, target.IncarnationID, dryRun, idempotencyKey)
 		if err != nil {
 			return Applied{}, err
 		}

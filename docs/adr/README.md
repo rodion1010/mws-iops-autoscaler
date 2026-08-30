@@ -20,6 +20,7 @@
 | [016](ADR-016-bandwidth-aware-scale-down-sizing.md) | Scale-down sizing uses the aligned per-sample max of IOPS and bandwidth demand, not `IOPSP95Down` alone | Accepted |
 | [017](ADR-017-queue-unit-guard-before-iops-demand-math.md) | Queue-depth unit is checked, not assumed, before it enters IOPS demand math | Accepted |
 | [018](ADR-018-disk-identity-key-for-long-term-state.md) | Samples, cooldown, and the change budget key on DiskName + IncarnationID, not DiskName alone | Accepted |
+| [019](ADR-019-incarnation-safety-write-path-and-remaining-state.md) | Incarnation safety extended to the write precondition, guest counters, and the latency baseline | Accepted |
 
 ADRs are **derived from the PRD**, which is the primary document: it states the requirement, an ADR
 records how the requirement is met and why that way. An ADR never introduces or drops a requirement

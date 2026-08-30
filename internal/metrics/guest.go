@@ -26,7 +26,7 @@ type GuestSource struct {
 	now               func() time.Time
 
 	mu       sync.Mutex
-	prev     map[string]diskStats // keyed by DiskRef.DiskID
+	prev     map[string]diskStats // keyed by DiskRef.IdentityKey()
 	prevTime map[string]time.Time
 }
 
@@ -58,6 +58,26 @@ func (g *GuestSource) Sample(_ context.Context, disks []DiskRef) ([]Sample, erro
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// Drop the counter baseline for any disk no longer in the managed set.
+	// A disk that disappeared — detached, or deleted and recreated under
+	// the same name — must not leave stale cumulative counters behind that
+	// a later reattach would compute a bogus delta against (a huge spike,
+	// or a negative that silently zeroes). Keyed by IdentityKey() so a
+	// recreated disk's new IncarnationID is itself a fresh key: the old
+	// incarnation's entry falls out of `keep` and is dropped here, exactly
+	// as any other disk that left the set, and the new incarnation cold
+	// starts rather than deltaing across the replacement boundary.
+	keep := make(map[string]bool, len(disks))
+	for _, d := range disks {
+		keep[d.IdentityKey()] = true
+	}
+	for key := range g.prev {
+		if !keep[key] {
+			delete(g.prev, key)
+			delete(g.prevTime, key)
+		}
+	}
+
 	var out []Sample
 	for _, d := range disks {
 		kernelDevice, err := g.resolveSymlink(d.GuestPath())
@@ -71,10 +91,11 @@ func (g *GuestSource) Sample(_ context.Context, disks []DiskRef) ([]Sample, erro
 			continue
 		}
 
-		prevStats, hadPrev := g.prev[d.DiskID]
-		prevTime := g.prevTime[d.DiskID]
-		g.prev[d.DiskID] = curr
-		g.prevTime[d.DiskID] = now
+		key := d.IdentityKey()
+		prevStats, hadPrev := g.prev[key]
+		prevTime := g.prevTime[key]
+		g.prev[key] = curr
+		g.prevTime[key] = now
 		if !hadPrev {
 			continue
 		}
