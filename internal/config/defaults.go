@@ -23,12 +23,12 @@ const (
 
 // ResolvedAdvanced is the advanced parameter set with nothing left to
 // inherit. It has no CollectionInterval — that's ResolvedRuntime's alone
-// (ADR-010): sampling cadence is process-wide, never per-policy.
+// (docs/design.md §4.2): sampling cadence is process-wide, never per-policy.
 type ResolvedAdvanced struct {
 	ScaleUpWindow   time.Duration
 	ScaleDownWindow time.Duration
 
-	UtilizationThreshold      float64 // gates on IOPS or bandwidth, whichever is higher (ADR-008)
+	UtilizationThreshold      float64 // gates on IOPS or bandwidth, whichever is higher (docs/design.md §4.4)
 	QueueDepthThreshold       float64
 	LatencyMode               string
 	LatencyBaselineMultiplier float64
@@ -51,7 +51,7 @@ type ResolvedAdvanced struct {
 // nothing in this package resolves a PresetName from config. The type and
 // the registry exist now so that exposing presets in Phase 5 is additive
 // (a field, a name→ResolvedAdvanced lookup, and a validation rule) rather
-// than a rework of the resolver. See ADR-006's Phase 5 amendment.
+// than a rework of the resolver. See the deferred presets plan in docs/configuration.md §1.
 type PresetName string
 
 const (
@@ -65,7 +65,7 @@ const (
 const DefaultPresetName = PresetBalanced
 
 // presets is the full registry, transcribed from docs/configuration.md §3
-// and ADR-006 (performance's values there are already corrected — see that
+// and docs/configuration.md §1 (performance's values there are already corrected — see that
 // ADR for why the first draft's 2m/3m pair was wrong). Phase 1 reads only
 // presets[DefaultPresetName]; performance and cost sit here unused until
 // Phase 5 exposes a way to select them.
@@ -87,7 +87,7 @@ var presets = map[PresetName]ResolvedAdvanced{
 		MaxChangesPer24h:          48,
 	},
 	PresetPerformance: {
-		ScaleUpWindow:             3 * time.Minute, // ADR-006: first draft had 2m, violated §8's cooldown rule
+		ScaleUpWindow:             3 * time.Minute, // docs/configuration.md §1: first draft had 2m, violated §8's cooldown rule
 		ScaleDownWindow:           60 * time.Minute,
 		UtilizationThreshold:      0.95,
 		QueueDepthThreshold:       1,
@@ -122,7 +122,7 @@ var presets = map[PresetName]ResolvedAdvanced{
 
 // defaultAdvanced is Phase 1's one built-in parameter set — presets[DefaultPresetName].
 // Named presets (performance/cost) are laid out above but not selectable
-// until Phase 5 (ADR-006): implementing the cross-field validation in
+// until Phase 5 (docs/configuration.md §1): implementing the cross-field validation in
 // validate.go against the first-draft preset table found "performance"'s
 // own values (2m scale_up_window, 3m cooldown.scale_up) violated the very
 // rule that set of numbers is supposed to satisfy. Rather than keep three

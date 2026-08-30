@@ -398,9 +398,8 @@ func (a *Agent) reconcile(ctx context.Context) {
 		// parameter was (analyzer.go: out := Analysis{DiskID: diskID}).
 		// Restored to the plain, human-readable name here so a.DiskID never
 		// carries IdentityKey()'s "\x00"-joined composite form into any
-		// future consumer — mirroring ADR-018's own "display-facing
-		// identifiers are unchanged" rule for Decision.DiskID/journal/
-		// telemetry. Nothing today reads Analysis.DiskID (Decide's diskID
+		// future consumer, preserving the display-facing identity invariant in
+		// docs/design.md §5.2 for Decision.DiskID, journal and telemetry. Nothing today reads Analysis.DiskID (Decide's diskID
 		// comes from the plain diskID param below, not from an.DiskID), but
 		// leaving the composite key on an exported field it's not built for
 		// is a footgun for the next thing that does.
@@ -551,7 +550,7 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 			// validateOnly call, which by contract never mutates even if
 			// the response is lost; a dependent disk's write function
 			// returns before ever calling UpdateDependentDisk at all
-			// (ADR-007, no server-side dry run exists for it). Safe to
+			// (docs/design.md §4.7, no server-side dry run exists for it). Safe to
 			// release unconditionally — there is no live state to check.
 			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
 				log.Printf("actuate %s (%s): failed to release the dry-run budget reservation after an error: %v", diskID, m.Disk.DeviceName, rerr)

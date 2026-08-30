@@ -25,7 +25,7 @@ const (
 
 // Load reads and strictly parses the config file at path. Unknown keys at any
 // nesting level are rejected (docs/configuration.md §8): this is what retires
-// the superseded `device:` / `disk_id:` selectors (ADR-004) and the platform-
+// the superseded `device:` / `disk_id:` selectors (docs/design.md §4.1) and the platform-
 // fixed `billing_step_iops` (§2 field notes) as a side effect of strict
 // decoding, without a dedicated check for either.
 //

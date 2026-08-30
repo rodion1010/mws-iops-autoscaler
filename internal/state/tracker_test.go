@@ -92,7 +92,7 @@ func TestTracker_releaseChangeFreesTheSlot(t *testing.T) {
 }
 
 func TestTracker_budgetSurvivesRestartCooldownDoesNot(t *testing.T) {
-	// The exact property ADR-013 exists for: reload the budget from the
+	// Exercise the durability invariant in docs/design.md §9.4: reload the budget from the
 	// same file (simulating a restart) into a *new* Tracker, and confirm
 	// the count carries over while cooldown state — correctly — starts
 	// fresh, since a new Tracker has no in-memory history at all.
@@ -122,7 +122,7 @@ func TestTracker_budgetSurvivesRestartCooldownDoesNot(t *testing.T) {
 
 	s := tr2.State("disk1", epoch.Add(time.Hour))
 	if s.ChangesInLast24h != 4 {
-		t.Errorf("ChangesInLast24h after restart = %d, want 4 — the budget must survive (ADR-013)", s.ChangesInLast24h)
+		t.Errorf("ChangesInLast24h after restart = %d, want 4 — the budget must survive (docs/design.md §9.4)", s.ChangesInLast24h)
 	}
 	if !s.LastChangeUp.IsZero() {
 		t.Errorf("LastChangeUp after restart = %v, want zero — cooldowns are deliberately not persisted", s.LastChangeUp)

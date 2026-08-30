@@ -1,5 +1,5 @@
 // Package state is the durable+in-memory state Guardrails needs across
-// reconcile cycles and process restarts (ADR-013): cooldown timestamps stay
+// reconcile cycles and process restarts (docs/design.md §9.4): cooldown timestamps stay
 // in memory — safe, because internal/config's validation enforces
 // cooldown <= its paired window, so the cold-start wait after a restart is
 // never shorter than the cooldown a restart forgot — but the 24h change
@@ -46,7 +46,7 @@ const (
 )
 
 // ChangeEvent is one persisted record in the budget's append-only
-// intent/result log — the minimal durable state ADR-013/issue #10
+// intent/result log — the minimal durable state docs/design.md §9.4/issue #10
 // require: enough to reconstruct "how many changes has this disk had in
 // the trailing 24h" on startup, and enough to reconcile an in-flight
 // change against live state after a crash. Not a full decision journal

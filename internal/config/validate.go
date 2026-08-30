@@ -66,7 +66,7 @@ const minSamplesForWindowMirror = 3
 // ResolvedConfig.SamplerCapacity the orchestrator uses to size the real
 // buffer — one formula, checked here and used there, rather than two
 // independently-reasoned-about approximations that could disagree. Below
-// this floor, WindowFullUp/WindowFullDown (ADR-010) can never become true
+// this floor, WindowFullUp/WindowFullDown (docs/design.md §4.2) can never become true
 // for any disk, for any window, no matter how long the agent runs: the
 // ring buffer would evict down to fewer samples than analyzer.Analyze's
 // own minimum before a window could ever fill.
@@ -82,7 +82,7 @@ const minSamplesForWindowMirror = 3
 // become evaluable, without requiring every future change to that formula
 // to remember this invariant on its own.
 //
-// This alone is not sufficient (pre-merge review, ADR-010's third
+// This alone is not sufficient (pre-merge review, docs/design.md §4.2's third
 // refinement): SamplerCapacity sizes ONE buffer against only the single
 // longest scale_down_window across every policy, so a much shorter window
 // elsewhere — the VM policy's own scale_up_window, or a per-disk override
@@ -213,7 +213,7 @@ func validateResolvedPolicy(path string, rp ResolvedPolicy) []error {
 	}
 	if rp.Advanced.CooldownScaleDown > rp.Advanced.ScaleDownWindow {
 		errs = append(errs, fmt.Errorf(
-			"%s.advanced.cooldown.scale_down: %s is longer than scale_down_window (%s) — the agent could never act, and a restart could not safely forget a longer-than-window cooldown (ADR-013)",
+			"%s.advanced.cooldown.scale_down: %s is longer than scale_down_window (%s) — the agent could never act, and a restart could not safely forget a longer-than-window cooldown",
 			path, rp.Advanced.CooldownScaleDown, rp.Advanced.ScaleDownWindow))
 	}
 
@@ -355,7 +355,7 @@ func validateAdvancedGate(path string, a *AdvancedSpec) []error {
 
 // validateDiskSelection checks disks.mode is one of the two documented
 // strategies (docs/configuration.md §4.2) and that only the fields that
-// strategy actually uses are set, then checks device_name form (ADR-004)
+// strategy actually uses are set, then checks device_name form (docs/design.md §4.1)
 // and duplicates within whichever list applies.
 func validateDiskSelection(d *DisksSpec) []error {
 	var errs []error
@@ -402,16 +402,16 @@ func validateDiskSelection(d *DisksSpec) []error {
 }
 
 // validateDeviceName rejects a kernel device path and the mws- prefix
-// (docs/configuration.md §4.1, ADR-004).
+// (docs/configuration.md §4.1, docs/design.md §4.1).
 func validateDeviceName(name string) error {
 	if name == "" {
 		return fmt.Errorf("device_name must not be empty")
 	}
 	if strings.HasPrefix(name, "/dev/") {
-		return fmt.Errorf("device_name %q is a kernel device path — use the disk's device_name instead (ADR-004)", name)
+		return fmt.Errorf("device_name %q is a kernel device path — use the disk's device_name instead", name)
 	}
 	if strings.HasPrefix(name, "mws-") {
-		return fmt.Errorf("device_name %q carries the mws- prefix — write it unprefixed, as it was set at attach time (ADR-004)", name)
+		return fmt.Errorf("device_name %q carries the mws- prefix — write it unprefixed, as it was set at attach time", name)
 	}
 	return nil
 }

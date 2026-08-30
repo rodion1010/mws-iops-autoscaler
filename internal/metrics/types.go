@@ -20,7 +20,7 @@ const (
 )
 
 // QueueDepthUnit is explicit because the two sources are not comparable:
-// guest gives operations, platform gives bytes (ADR-001). Carrying the unit
+// guest gives operations, platform gives bytes (docs/design.md §4.2). Carrying the unit
 // on the value, not just in a comment, is deliberate — a silent mix would be
 // a real and hard-to-spot bug (design.md §5.2).
 type QueueDepthUnit string
@@ -37,7 +37,7 @@ type QueueDepth struct {
 
 // DiskRef is the identity of a managed disk, resolved once at discovery
 // (design.md §5.2). DeviceName is the single identifier shared by config,
-// guest and metrics (ADR-004): stored unprefixed, with the "mws-" prefix
+// guest and metrics (docs/design.md §4.1): stored unprefixed, with the "mws-" prefix
 // applied here when reading either side.
 type DiskRef struct {
 	DiskID     string // cloud resource name — used for API writes, never written in config
@@ -84,7 +84,7 @@ func (d DiskRef) IdentityKey() string {
 // same windowed-average method otherwise. Which method backed a given
 // percentile travels with the value (LatencyStatKind, design.md §5.2),
 // the same move this package already makes for QueueDepth's unit — see
-// ADR-011 for why forcing both sources through one uniform, coarser
+// docs/design.md §5.2 for why forcing both sources through one uniform, coarser
 // method was the wrong fix for that risk.
 type Sample struct {
 	DiskID      string

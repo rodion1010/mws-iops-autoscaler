@@ -306,8 +306,8 @@ func TestRegressionRecreatedDiskStartsWithFreshLatencyBaseline(t *testing.T) {
 	// incarnation-safely (the fix above) — but that value is only meant to
 	// be a state-lookup key, never a display-facing identifier. Analysis.
 	// DiskID must still read as the plain, human-readable disk name (as
-	// Decision.DiskID/the journal/every Prometheus label already do,
-	// ADR-018's own "display-facing identifiers are unchanged" rule) —
+	// Decision.DiskID, the journal and every Prometheus label already do;
+	// see the display-facing identity invariant in docs/design.md §5.2) —
 	// never the composite form with its embedded "\x00".
 	if got.DiskID != recreated.Disk.DiskName {
 		t.Errorf("Analysis.DiskID = %q, want the plain disk name %q, not the analyzer's internal composite state key",

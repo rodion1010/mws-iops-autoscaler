@@ -176,8 +176,8 @@ func headroomCeiling(vm VMState, p EffectivePolicy) int64 {
 // !a.BaselineEstablished branch is defensive, not reachable through the
 // real pipeline: analyzer.Analyze always sets BaselineEstablished the same
 // cycle WindowFullUp first becomes true, and Saturated already requires
-// WindowFullUp — Saturated ⟹ BaselineEstablished by construction (ADR-012's
-// amendment note). It stays here so Decide never divides by zero if ever
+// WindowFullUp — Saturated ⟹ BaselineEstablished by construction (the baseline
+// invariant in docs/design.md §4.4). It stays here so Decide never divides by zero if ever
 // handed an Analysis built by hand in a test that violates the invariant.
 func demand(a analyzer.Analysis) (float64, bool) {
 	// a.QueueGrowthRateValid gates this sum (issue #18): ServedIOPS is

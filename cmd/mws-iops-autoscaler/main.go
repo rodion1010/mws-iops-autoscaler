@@ -37,7 +37,7 @@ func run(args []string) int {
 	configPath := fs.String("config", "", "path to the config file (required)")
 	validateOnly := fs.Bool("validate-config", false, "parse and validate the config, then exit")
 	dryRun := fs.Bool("dry-run", false, "discover, sample and decide, but apply no change (US-013)")
-	stateDir := fs.String("state-dir", "/var/lib/mws-iops-autoscaler", "directory for the durable 24h change budget (ADR-013)")
+	stateDir := fs.String("state-dir", "/var/lib/mws-iops-autoscaler", "directory for the durable 24h change budget")
 	journalPath := fs.String("journal", "", "decision journal output path (default: stdout)")
 	listenAddr := fs.String("listen", ":9435", "address for /metrics, /healthz, /readyz")
 	if err := fs.Parse(args); err != nil {

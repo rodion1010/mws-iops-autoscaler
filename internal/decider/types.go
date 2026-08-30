@@ -2,7 +2,7 @@
 // into a clamped, rate-limited Decision — demand estimation and guardrails
 // (design.md §4.5/§3.2, M4). It is pure: cooldown/budget state is read from
 // an explicit GuardrailState the caller resolves, never owned or persisted
-// here (design.md §3.3's "chain of pure functions" principle, and ADR-013
+// here (design.md §3.3's "chain of pure functions" principle, and docs/design.md §9.4
 // — the 24h budget's durable record lives outside this package).
 package decider
 
@@ -53,7 +53,7 @@ type EffectivePolicy struct {
 }
 
 // GuardrailState is cooldown/budget state as of now, resolved by the caller
-// from wherever it is tracked (ADR-013: the 24h counter is persisted,
+// from wherever it is tracked (docs/design.md §9.4: the 24h counter is persisted,
 // cooldown timestamps are not). ResizeInProgress covers both directions:
 // one in-flight write blocks either.
 type GuardrailState struct {
@@ -74,7 +74,7 @@ type Decision struct {
 	Inputs  analyzer.Analysis // full evidence, for the journal
 
 	// VMHeadroomIOPS and BudgetRemaining are carried forward from vm/state
-	// (§4.6, ADR-013) so a journal/metrics consumer (M5) doesn't need
+	// (§4.6, docs/design.md §9.4) so a journal/metrics consumer (M5) doesn't need
 	// those inputs threaded through separately just to report on them —
 	// Decide already computed/received them.
 	VMHeadroomIOPS  int64

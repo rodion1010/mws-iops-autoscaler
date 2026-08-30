@@ -301,7 +301,7 @@ func TestUpdateDependentDiskIOPS_refusesIndependentDisk(t *testing.T) {
 
 	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "datadisk", 1000, 3000, "", false, "")
 	if err == nil {
-		t.Fatal("UpdateDependentDiskIOPS succeeded on an independent disk — it must be routed through UpdateIndependentDiskIOPS instead (ADR-003)")
+		t.Fatal("UpdateDependentDiskIOPS succeeded on an independent disk — it must be routed through UpdateIndependentDiskIOPS instead (docs/design.md §4.7)")
 	}
 	if !strings.Contains(err.Error(), "independent, not dependent") {
 		t.Errorf("error = %v, want it to name the class mismatch", err)

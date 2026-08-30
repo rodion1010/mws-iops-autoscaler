@@ -15,7 +15,7 @@ PRD's requirements — it does not define them.
 (§3) — there is no preset name to pick. The user-facing surface is limits plus disk selection.
 Controller internals stay adjustable (`advanced`) without breaking anyone's config.
 
-Named presets (`balanced` / `performance` / `cost`) are deferred past the MVP — see ADR-006. This
+Named presets (`balanced` / `performance` / `cost`) are deferred past the MVP — see §1. This
 section described three from the first draft; the `performance` one turned out to violate the
 `cooldown.scale_up > scale_up_window` rule in §8 once that rule was actually implemented, and rather
 than keep three tables mutually consistent under every future rule, Phase 1 ships one.
@@ -47,12 +47,12 @@ policy:
 
     evaluation:
       # No collection_interval here — sampling cadence is process-wide,
-      # set once by runtime.metrics.collection_interval below (ADR-010).
+      # set once by runtime.metrics.collection_interval below (design.md §4.2).
       scale_up_window: 5m
       scale_down_window: 30m
 
     saturation:
-      utilization_threshold: 0.98        # GATE, not a trigger — IOPS or bandwidth, whichever is higher (ADR-008)
+      utilization_threshold: 0.98        # GATE, not a trigger — IOPS or bandwidth, whichever is higher (design.md §4.4)
       queue_depth_threshold: 1
       latency:
         mode: relative                   # only "relative" is accepted — "absolute" is rejected by validation (§8, issue #6)
@@ -82,7 +82,7 @@ policy:
 |---|---|
 | `limits.min_iops` | Floor. 1000 is included in the disk's base price, so going lower is impossible and would save nothing. |
 | `limits.max_iops` | User ceiling. Clamped to 10000 and further to `3000 × vCPU` at runtime — **the platform does not enforce the VM cap**, the agent does. |
-| `saturation.utilization_threshold` | Precondition only, checked against **whichever of IOPS or bandwidth utilization is higher** (ADR-008) — a disk below it on both cannot be limit-starved, so signal checks are skipped. Never triggers a change on its own. |
+| `saturation.utilization_threshold` | Precondition only, checked against **whichever of IOPS or bandwidth utilization is higher** (design.md §4.4) — a disk below it on both cannot be limit-starved, so signal checks are skipped. Never triggers a change on its own. |
 | `saturation.queue_depth_threshold` | Units differ by source: operations in `local`, bytes in `fleet`. The agent will not compare across units — the Analyzer rejects a window whose samples are not all `local`'s own ops unit before evaluating this threshold or summing queue growth into an IOPS demand figure (issue #18), rather than silently comparing a bytes reading against an ops-calibrated number. |
 | `saturation.latency.baseline_multiplier` | Relative to the disk's own baseline. An absolute threshold is wrong for everyone; acceptable latency is workload-specific. |
 | `target.scale_up_utilization` | Applied to estimated demand *after* saturation is confirmed: `target = demand / 0.85`. |
@@ -96,7 +96,7 @@ policy:
 ## 3. Default parameter set
 
 Phase 1's one built-in `advanced` value set — what `policy.advanced` resolves to when nothing
-overrides it (ADR-006):
+overrides it (configuration.md §1):
 
 ```yaml
 evaluation:  {scale_up_window: 5m,  scale_down_window: 30m}
@@ -113,7 +113,7 @@ operator overrides individual fields through `policy.advanced` (opt-in, `advance
 not by naming a preset.
 
 A `performance`-leaning set (earlier up, slower down, more headroom) and a `cost`-leaning set (later
-up, tighter fit, faster down) were drafted alongside this one and are recorded in ADR-006 for when
+up, tighter fit, faster down) were drafted alongside this one and are recorded in §1 for when
 presets are reintroduced — post-MVP, they are not implemented, and the draft `performance` numbers
 were never valid: `cooldown.scale_up: 3m` against `scale_up_window: 2m` violates §8's own rule.
 
@@ -141,7 +141,7 @@ that prefix itself when resolving either. The config stays in the form the opera
 **Kernel device names (`/dev/vdb`, `/dev/sdb`) must never be used.** They are assigned in discovery
 order, which is not stable across reboots or attach/detach cycles: `/dev/vdb` today can be `/dev/vdc`
 tomorrow, and the agent would silently apply one disk's policy to another — a config that looks
-correct and is wrong. See ADR-004.
+correct and is wrong. See design.md §4.1.
 
 `deviceName` is unique **within a VM**, not globally. In `local` mode that is sufficient. In `fleet`
 mode disk selectors are always nested under their instance (§6.3), so the effective key is the pair
@@ -190,7 +190,7 @@ Rediscovery runs on an interval, so disks attached after startup are picked up w
 including recovering from this error once the VM's inventory becomes consistent with `selected` again.
 
 **Classification is automatic and not user-configurable.** Each disk is dependent (VM-owned, written
-through the VM spec) or independent (written through the disk API) — see ADR-003. Both are managed;
+through the VM spec) or independent (written through the disk API) — see design.md §4.7. Both are managed;
 the distinction only changes the write path.
 
 ---
@@ -358,9 +358,9 @@ value, and maintenance windows.
 - `scale_down_window < scale_up_window` (a scale-down faster than scale-up invites flapping)
 - `cooldown.scale_up > scale_up_window` (the agent could never act)
 - `cooldown.scale_down > scale_down_window` (same reason, and it's what keeps a restarted agent's
-  in-memory cooldown loss safe — ADR-013)
+  in-memory cooldown loss safe — design.md §9.4)
 - `advanced.evaluation.scale_up_window` or `scale_down_window` ≤ 0, or a `cooldown` duration < 0
-- `advanced.evaluation.collection_interval` — removed from the schema (ADR-010); rejected as an
+- `advanced.evaluation.collection_interval` — removed from the schema (design.md §4.2); rejected as an
   unknown key like any other superseded field
 - `saturation.utilization_threshold`, `target.scale_up_utilization`, or `target.scale_down_utilization`
   outside `(0, 1]`, or non-finite (`NaN`/`Inf` — see below)
@@ -382,7 +382,7 @@ value, and maintenance windows.
 - `runtime.metrics.collection_interval` too long relative to the configured evaluation windows for the
   Sampler's ring buffer to ever hold enough samples to fill one — `config.ResolvedConfig.SamplerCapacity()`
   (the same formula the orchestrator uses to actually size the buffer) must be ≥ 3, the Analyzer's own
-  `minSamplesForWindow` floor (ADR-010); below that, `WindowFullUp`/`WindowFullDown` could never become
+  `minSamplesForWindow` floor (design.md §4.2); below that, `WindowFullUp`/`WindowFullDown` could never become
   true no matter how long the agent ran (issue #6)
 - `runtime.metrics.collection_interval` longer than any *individual* configured window — the VM
   policy's own `scale_up_window`/`scale_down_window`, or a per-disk override's — even when

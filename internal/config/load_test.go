@@ -60,7 +60,7 @@ totally_unknown_field: true
 }
 
 func TestLoad_evaluationCollectionIntervalRejected(t *testing.T) {
-	// ADR-010: policy.advanced.evaluation.collection_interval was removed —
+	// docs/design.md §4.2: policy.advanced.evaluation.collection_interval was removed —
 	// sampling cadence is process-wide (runtime.metrics.collection_interval)
 	// and cannot vary per policy, so it is rejected as an unknown key like
 	// any other superseded field, not silently accepted and ignored.
@@ -79,7 +79,7 @@ disks: {mode: auto-discovery}
 runtime: {}
 `)
 	if _, err := Load(path); err == nil {
-		t.Fatal("Load succeeded with evaluation.collection_interval set — it must be rejected as an unknown key (ADR-010)")
+		t.Fatal("Load succeeded with evaluation.collection_interval set — it must be rejected as an unknown key (docs/design.md §4.2)")
 	}
 }
 
@@ -139,7 +139,7 @@ runtime: {}
 }
 
 func TestLoad_supersededDeviceSelector(t *testing.T) {
-	// ADR-004: the `device:` and `disk_id:` selectors from the first
+	// docs/design.md §4.1: the `device:` and `disk_id:` selectors from the first
 	// configuration.md draft must stay rejected — as unknown keys, not as a
 	// dedicated check (load.go's doc comment).
 	dir := t.TempDir()

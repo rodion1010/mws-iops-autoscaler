@@ -25,7 +25,7 @@ type modePeek struct {
 // resolver (resolve.go) can tell "not set, inherit" apart from a zero value.
 //
 // Phase 1 ships one built-in default parameter set — no preset field. Named
-// presets (balanced/performance/cost) are deferred; see ADR-006.
+// presets (balanced/performance/cost) are deferred; see docs/configuration.md §1.
 type PolicySpec struct {
 	Limits   *LimitsSpec   `yaml:"limits"`
 	Advanced *AdvancedSpec `yaml:"advanced"`
@@ -51,7 +51,7 @@ type AdvancedSpec struct {
 	Budget     *BudgetSpec     `yaml:"budget"`
 }
 
-// EvaluationSpec has no collection_interval of its own (ADR-010) — sampling
+// EvaluationSpec has no collection_interval of its own (docs/design.md §4.2) — sampling
 // cadence is process-wide (runtime.metrics.collection_interval), since one
 // Sampler ticks one source for every managed disk in a single call; a
 // per-policy override could never actually be honored. Window readiness is
@@ -64,7 +64,7 @@ type EvaluationSpec struct {
 
 type SaturationSpec struct {
 	// UtilizationThreshold gates on whichever of IOPS or bandwidth
-	// utilization is higher, not IOPS alone (ADR-008).
+	// utilization is higher, not IOPS alone (docs/design.md §4.4).
 	UtilizationThreshold *float64     `yaml:"utilization_threshold"`
 	QueueDepthThreshold  *float64     `yaml:"queue_depth_threshold"`
 	Latency              *LatencySpec `yaml:"latency"`
@@ -106,7 +106,7 @@ type DisksSpec struct {
 	Selected []SelectedDiskSpec `yaml:"selected"`
 }
 
-// SelectedDiskSpec names one disk by device_name (ADR-004 — unprefixed, never
+// SelectedDiskSpec names one disk by device_name (docs/design.md §4.1 — unprefixed, never
 // a kernel device path) with an optional per-disk policy override.
 type SelectedDiskSpec struct {
 	DeviceName string      `yaml:"device_name"`
@@ -119,7 +119,7 @@ type RuntimeSpec struct {
 }
 
 // MetricsSpec.CollectionInterval is the single canonical sampling cadence
-// (ADR-010) — there is no policy-level equivalent to conflict with.
+// (docs/design.md §4.2) — there is no policy-level equivalent to conflict with.
 type MetricsSpec struct {
 	Source             string    `yaml:"source"` // guest | platform
 	CollectionInterval *Duration `yaml:"collection_interval"`

@@ -179,7 +179,7 @@ func TestDecide_scaleDownNeverBelowMinIOPS(t *testing.T) {
 func TestDecide_scaleDownTargetRetainsHeadroomForBothIOPSAndBandwidth(t *testing.T) {
 	d := NewPolicyDecider(true)
 	// issue #17's own worked example: 900 ops/s at 64 KiB/op is ~59 MB/s,
-	// whose IOPS-equivalent (÷32768, ADR-008's own ratio) is 1800 — well
+	// whose IOPS-equivalent (÷32768 using the ratio in docs/design.md §4.4) is 1800 — well
 	// above the 900 ops/s figure alone. A target sized from IOPSP95Down
 	// alone would undersize the disk's actual bandwidth need; Decide must
 	// size from EffectiveDemandP95Down (the aligned per-sample max)

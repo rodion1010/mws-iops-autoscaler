@@ -137,7 +137,7 @@ at all (docs/platform-reference.md: "write queue only — no read queue metric e
 A platform metric for read queue depth, in bytes, mirroring the existing write metric.
 
 **Autoscaler impact**
-In `fleet` mode, the platform metric source is the only one available (ADR-001), so the saturation
+In `fleet` mode, the platform metric source is the only one available (docs/design.md §4.2), so the saturation
 detector has no queue-based signal for read-heavy workloads there — it falls back to latency alone
 (design.md §10, item 4). `local` mode is unaffected: the guest source (`/proc/diskstats`) already
 reports queue depth for both read and write, in operations.
@@ -151,7 +151,7 @@ no queue-depth confirmation for that direction.
 
 **Follow-up after resolution**
 Once available, fold the new read-queue signal into the `fleet`-mode saturation check on the same
-footing as the existing write-queue one, narrowing the `local`/`fleet` capability gap (ADR-001).
+footing as the existing write-queue one, narrowing the `local`/`fleet` capability gap (docs/design.md §4.2).
 
 ### 3.2 No queue depth metrics in I/O request count
 
@@ -171,7 +171,7 @@ depth as operation counts, not bytes.
 
 **Autoscaler impact**
 Would let `fleet` mode use the same operations-denominated saturation logic `local` mode already uses
-via `/proc/diskstats`'s `aqu-sz`, narrowing the gap that motivated ADR-001 (design.md §10, item 3).
+via `/proc/diskstats`'s `aqu-sz`, narrowing the local/fleet capability gap described in docs/design.md §4.2 (design.md §10, item 3).
 
 **Current workaround**
 `fleet` mode uses the existing byte-denominated `write_queue_length`, explicitly labelled as bytes so
@@ -200,7 +200,7 @@ autoscaling signal today.
 These metrics should reflect actual utilization relative to `spec.iops` / `spec.throughput`.
 
 **Autoscaler impact**
-Without them, the saturation gate (ADR-002 — utilization is a precondition/gate, never a trigger, but
+Without them, the saturation gate (docs/design.md §4.4 — utilization is a precondition/gate, never a trigger, but
 still needed) can't be read directly off the metrics export; it has to be computed, which costs an
 extra `GetDisk` call per disk just to obtain the denominator.
 
@@ -235,20 +235,20 @@ public API or CLI.
 Expose `managed` through the public API and CLI on the same footing as the console.
 
 **Autoscaler impact**
-ADR-003 already notes this gap directly: `managed` looked like a natural, direct signal for
+docs/design.md §4.7 already notes this gap directly: `managed` looked like a natural, direct signal for
 classifying a disk as dependent or independent (US-004a), but turned out to be unreachable
 programmatically. The autoscaler instead classifies from `spec.storage.disks[].disk` having `spec`
 (dependent) vs `ref` (independent), confirmed by `metadata.usages` containing `own`.
 
 **Current workaround**
 Classification never reads `managed` at all — it relies entirely on the `spec`/`ref` discriminator
-plus the `usages` confirmation signal (ADR-003).
+plus the `usages` confirmation signal (docs/design.md §4.7).
 
 **Platform ticket:** TBD
 **Owner / Team:** TBD (raised with platform tech lead, no named owner yet)
 
 **Follow-up after resolution**
-The current classification path is already complete and documented (ADR-003) — if `managed` becomes
+The current classification path is already complete and documented (docs/design.md §4.7) — if `managed` becomes
 available, it would at most serve as an additional cross-check, not a replacement. Not expected to be
 a required change, just an optional simplification to reconsider.
 
@@ -263,7 +263,7 @@ a required change, just an optional simplification to reconsider.
 `UpdateDisk` (the independent-disk write path) supports `ValidateOnly` and works as a genuine
 server-side dry run today. `UpdateVirtualMachine` (the dependent-disk write path) has no such
 parameter at all — confirmed against the generated `go.mws.cloud/go-sdk@v0.19.0` client source; see
-`docs/adr/ADR-007-dependent-disk-write-has-no-dry-run.md` for the detailed finding. More broadly,
+`docs/design.md` §4.7 for the current contract. More broadly,
 there is no consistent, guaranteed `validate_only` mode across every Upsert-shaped operation.
 
 **Expected / Desired behavior**
@@ -279,7 +279,7 @@ report computed intent and rely on its own client-side checks.
 
 **Current workaround**
 Independent disks: unaffected, `ValidateOnly=true` on `UpdateDisk` already works. Dependent disks: the
-dry-run report is explicitly labelled "computed, not server-checked" (ADR-007) rather than presented
+dry-run report is explicitly labelled "computed, not server-checked" (docs/design.md §4.7) rather than presented
 as a confirmed verdict, backed only by the client-side range/step/VM-pool checks the autoscaler
 already performs regardless of dry-run.
 
@@ -288,5 +288,5 @@ already performs regardless of dry-run.
 
 **Follow-up after resolution**
 Once `validate_only` exists for VM update, US-013 can drop the per-class distinction — dry-run reports
-become uniformly server-confirmed. `ADR-007` and the corresponding PRD acceptance criteria (US-013)
+become uniformly server-confirmed. `docs/design.md §4.7` and the corresponding PRD acceptance criteria (US-013)
 should be revisited and simplified at that point.

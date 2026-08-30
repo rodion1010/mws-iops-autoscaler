@@ -9,7 +9,7 @@
 | [`development.md`](development.md) | Credential handling, developer setup and the reference test environment |
 | [`../PLATFORM_DEPENDENCIES.md`](../PLATFORM_DEPENDENCIES.md) | Upstream gaps, temporary workarounds and removal conditions |
 | [`TODO.md`](TODO.md) | Parking lot; nothing is implemented from here without an explicit decision |
-| [`adr/`](adr/) | Historical rationale for exceptional architectural decisions |
+| [`adr/`](adr/) | ADR policy and retained rationale for exceptional decisions; never the current architecture |
 | [`../CLAUDE.md`](../CLAUDE.md) | Repository instructions for coding agents |
 
 ## Source-of-truth model

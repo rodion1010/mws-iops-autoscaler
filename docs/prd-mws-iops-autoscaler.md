@@ -3,16 +3,14 @@
 Status: draft · Last updated: 2026-08-28
 Platform facts referenced here live in `docs/platform-reference.md` at the repo root.
 
-> **This PRD is the primary document.** It states *what* is being built and *why*. `docs/design.md`
-> and `docs/adr/` are derived from it and answer *how*; `docs/configuration.md` follows from both.
-> A requirement exists once it is written here — no design document introduces, widens or drops one
-> on its own.
+> **This PRD is canonical for what is being built and why.** `docs/design.md` is canonical
+> for the current architecture, `docs/configuration.md` for the user-facing schema, and
+> `docs/platform-reference.md` for verified external platform behaviour. A design document cannot
+> silently introduce, widen or drop a requirement.
 >
-> **Sync rule.** Any change is written into this PRD, `docs/design.md` and `docs/adr/` in the same
-> change — always, without being asked. This holds even when the change is discovered from below: if
-> a measured platform fact invalidates a requirement, this PRD is amended first and an ADR records
-> the reasoning. A PRD that contradicts the design is worse than no PRD: it reads as current and is
-> not. See `docs/README.md` for the full rule.
+> Update only the documents whose own contracts changed. Exceptional decision rationale may use an
+> ADR when it meets the repository policy; ADRs never duplicate the current design. See
+> `docs/README.md` for the full source-of-truth and update rules.
 
 ---
 
@@ -74,7 +72,7 @@ itself so that I do not have to enumerate them.
 - [ ] Disks whose path does not resolve are skipped with a warning, not a crash
 - [ ] Config entries are matched to discovered disks by `device_name` in the unprefixed form
       (`datadisk`, not `mws-datadisk`); the agent applies the `mws-` prefix itself when resolving
-      the guest path and when matching the metric label (ADR-004)
+      the guest path and when matching the metric label (design.md §4.1)
 - [ ] Typecheck/lint passes
 
 ### US-003: Disk discovery — fleet mode
@@ -126,7 +124,7 @@ opt in broadly or narrowly.
 - [ ] **Disks are named by `device_name` in both modes, never by kernel device path** (`/dev/vdb` is
       assigned in discovery order and is not stable across reboots or re-attachment — a policy would
       silently land on the wrong disk). Written unprefixed; `(instance, device_name)` is the key in
-      fleet mode, where selectors nest under their instance. See ADR-004
+      fleet mode, where selectors nest under their instance. See design.md §4.1
 - [ ] `--validate-config` rejects a kernel device path, a prefixed `mws-` name, a duplicate
       `device_name` within one VM's list, a `device_name` matching no discovered disk, an unrecognized
       strategy name, and the exclusion/selection list belonging to the wrong strategy (e.g. `explicit`
@@ -137,7 +135,7 @@ opt in broadly or narrowly.
 
 ### US-005: Metric source — platform monitoring API
 **Description:** As the decider, I need disk metrics from the MWS monitoring API. `fleet` mode
-requires this source exclusively (no guest access); `local` mode can opt into it too (ADR-001), which
+requires this source exclusively (no guest access); `local` mode can opt into it too (design.md §4.2), which
 is how it gets validated before `fleet` depends on it with no fallback (US-005b).
 
 **Acceptance Criteria:**
@@ -176,7 +174,7 @@ on real load before `fleet` mode has to depend on the platform source with no gu
 - [ ] `local` mode can enable `GuestSource` and `PlatformSource` concurrently; `GuestSource` remains
       the only one eligible for actuation regardless of this mode's setting
 - [ ] Each source keeps its own window state and latency baseline — the two are not portable
-      (ADR-001) — and is analyzed and decided independently
+      (design.md §4.2) — and is analyzed and decided independently
 - [ ] Both `Decision`s are recorded in the decision journal every cycle, tagged by source, whether or
       not actuation is enabled
 - [ ] Divergence — a different `Action`, or a `Target` differing by more than a configurable
@@ -190,7 +188,7 @@ on real load before `fleet` mode has to depend on the platform source with no gu
 because they need no metrics credential, cross no network, and carry signals the platform lacks.
 
 **Acceptance Criteria:**
-- [ ] Guest is the **default** source in `local` mode; the platform source is opt-in (ADR-001)
+- [ ] Guest is the **default** source in `local` mode; the platform source is opt-in (design.md §4.2)
 - [ ] Reads `/proc/diskstats` at a configurable interval
 - [ ] Derives ops/s and throughput **split by read and write**, plus queue depth in operations (a
       single combined value — `/proc/diskstats`' time-in-queue field is not split by direction at
@@ -214,7 +212,7 @@ single noisy sample cannot trigger a change.
       per-interval averages (its only capability); `platform` computes a real quantile from its
       exported latency histogram when one is fresh, falling back to the same windowed-average method
       otherwise — the same present-and-fresh fallback pattern US-005a uses for utilization and queue
-      depth. Which method produced a given verdict is recorded, not silently uniform (ADR-011)
+      depth. Which method produced a given verdict is recorded, not silently uniform (design.md §5.2)
 - [ ] Refuses to emit a verdict until the window holds a minimum sample count
 - [ ] Window state survives nothing — a restart starts a fresh window and scales nothing until full
 - [ ] The rolling window is keyed on the disk's cloud resource name **plus** its platform-assigned
@@ -229,7 +227,7 @@ spikes do not throttle.
 
 **Acceptance Criteria:**
 - [ ] Utilization is a **gate, not a trigger**: at or above `saturation.utilization_threshold` on
-      **either IOPS or bandwidth utilization** (ADR-008 — NBS-PL2's fixed IOPS-to-bandwidth ratio
+      **either IOPS or bandwidth utilization** (design.md §4.4 — NBS-PL2's fixed IOPS-to-bandwidth ratio
       means a large-block workload saturates bandwidth well before it saturates IOPS count, so
       gating on IOPS alone would miss it) the disk *may* be starved; below both, it cannot be, and
       the signal checks are skipped
@@ -240,7 +238,7 @@ spikes do not throttle.
       depth and throttling signals need no latency baseline, and the baseline itself seeds from the
       first full window regardless of saturation (only *updates* to an established baseline are
       frozen during saturation, not its initial establishment); no blanket "wait for baseline" gate
-      may block every signal indefinitely (ADR-012)
+      may block every signal indefinitely (design.md §4.4)
 - [ ] A disk at 100% utilization with flat latency and an empty queue is efficient and **must not**
       be scaled up
 - [ ] Target is computed from estimated demand: `demand / target.scale_up_utilization`, not by
@@ -281,14 +279,14 @@ unused headroom.
       (pre-merge review) — queue depth, latency, and throttle detection are all IOPS-denominated and
       blind on their own to a large-block, low-ops/s workload saturating its bandwidth ceiling; without
       this, such a disk could trigger scale-down while still genuinely bandwidth-bound. Mirrors the
-      saturation gate's own either-resource check (ADR-008), inverted: quiet requires *both* resources
+      saturation gate's own either-resource check (design.md §4.4), inverted: quiet requires *both* resources
       below threshold, not merely "not both at or above"
 - [ ] Target is computed as `p95_demand / target.scale_down_utilization`, deliberately leaving
       headroom so the new limit does not sit flush against current demand
 - [ ] `p95_demand` is bandwidth-aware (issue #17): the p95, over `scale_down_window`, of each
       sample's own `max(ops, bandwidth ÷ bytesPerIOPS)` — not the max of two independently-computed
       percentiles — so a large-block, low-ops/s workload's target still retains headroom against its
-      actual bandwidth need, not just its op count (ADR-008's fixed IOPS-to-bandwidth ratio applies to
+      actual bandwidth need, not just its op count (the fixed IOPS-to-bandwidth ratio documented in design.md §4.4 applies to
       scale-down sizing exactly as it already does to the saturation gate)
 - [ ] Rounded to a 100-IOPS multiple and clamped by `max_scale_down_ratio`
 - [ ] Never goes below 1000 IOPS
@@ -320,7 +318,7 @@ unused headroom.
 - [ ] Sends a minimal partial body: every alias present (Upsert deletes an omitted collection element),
       but carrying nothing beyond `name` except the target alias's new `iops` — immutable fields
       (`boot`/`deviceName`/`diskType`/`size`) are never resent, since the API accepts them omitted
-      entirely (ADR-009)
+      entirely (design.md §4.7)
 - [ ] Sends `etag` and an idempotency key; refuses to write with an empty etag; an etag conflict
       aborts and retries next cycle, never forces
 - [ ] Before building the write, checks the target disk's live IOPS (from the same fresh VM read)
@@ -352,11 +350,11 @@ unused headroom.
       restarting cannot be used — deliberately or by routine redeploys/crash loops — to bypass it.
       Cooldowns may reset in memory on restart; this is safe because `--validate-config` requires
       each cooldown ≤ its paired window, so the cold-start wait after a restart is never shorter than
-      the cooldown it forgot (ADR-013)
+      the cooldown it forgot (design.md §9.4)
 - [ ] The hard cap holds under a crash mid-write, not just across a clean restart: the budget slot is
       durably reserved before a write is attempted, not only recorded after one succeeds, so a crash
       between the platform confirming a change and this process recording that fact can never silently
-      undercount it (ADR-013's M6 amendment, issue #10)
+      undercount it (the durability rule in design.md §9.4, issue #10)
 - [ ] A budget persistence failure at any point — reservation, confirmation, or release, not only at
       startup — permanently disables further writes for that process's lifetime and is surfaced on
       `/readyz` and `/metrics`, not merely logged (issue #10)
@@ -378,7 +376,7 @@ unused headroom.
 - [ ] **Independent disks:** each decision is sent with `ValidateOnly=true` (`UpdateDisk` supports
       it), so the platform runs its real validation (bounds, 100-IOPS step, permissions) without
       mutating — a dry run that catches genuine rejections rather than only printing intent
-- [ ] **Dependent disks:** no equivalent exists — `UpdateVirtualMachine` has no `validateOnly` (ADR-007).
+- [ ] **Dependent disks:** no equivalent exists — `UpdateVirtualMachine` has no `validateOnly` (design.md §4.7).
       The report states the computed decision and the agent's own client-side checks (range, step,
       VM pool guard), and is labelled as such — not presented as a server-confirmed verdict
 - [ ] Prints each decision with the values that drove it, the resulting IOPS delta, and — per disk —
@@ -470,7 +468,7 @@ needs, per mode, so that I do not have to grant it broad rights.
   never a single sample.
 - FR-10: Scale-up requires confirmed **saturation**. Utilization at/above the gate is a
   precondition; the trigger is queue depth, latency above the disk's own baseline, or throttling.
-  Utilization alone must never cause a scale-up (ADR-002).
+  Utilization alone must never cause a scale-up (design.md §4.4).
 - FR-11: Scale-down requires sustained low demand with every saturation signal quiet. Targets on
   both directions are computed as `demand / target_utilization`, never as a fixed percentage step.
 - FR-12: The agent must never set IOPS outside `[1000, min(10000, 3000 × vcpuCount)]`, and always on
@@ -494,7 +492,7 @@ needs, per mode, so that I do not have to grant it broad rights.
 - FR-15d: Dependent disks are written through `vm update --storage-disks`: read the VM, then send a
   minimal partial body — every current alias present (an omitted collection element is deleted by
   Upsert), carrying nothing but `name` except the target alias's new `iops` — with `etag` and an
-  idempotency key (ADR-009). Independent disks use the single-field disk path (FR-15).
+  idempotency key (design.md §4.7). Independent disks use the single-field disk path (FR-15).
 - FR-15e: Before that write, the agent must validate the fresh attachment list itself (issue #20) —
   every alias non-empty and unique, and exactly one attachment matching the requested `device_name` —
   and return a descriptive error without calling the write at all if either fails, rather than
@@ -572,7 +570,7 @@ needs, per mode, so that I do not have to grant it broad rights.
 The User Stories in §3 are not one delivery — they group into five phases. Each phase is shippable
 and independently useful; nothing here is "half a feature." `docs/design.md` §9.1 maps each phase
 onto its engineering milestones (`M`); the ordering rationale — **local mode ships complete before
-fleet mode is built at all** — is recorded in ADR-005.
+fleet mode is built at all** — is recorded in design.md §9.2.
 
 **Rule:** a story moves between phases only by editing this table — not by quietly slipping scope
 into whichever phase is being coded at the time.
@@ -655,7 +653,7 @@ inheritance, and the deployment shape.
 
 **Goal:** not yet broken into stories — deliberately left open rather than scheduled, per
 `docs/TODO.md`'s own rule. Likely candidates: fleet-scale soak/chaos, multi-project scheduling,
-cost/budget reporting across a fleet, and reintroducing named presets (ADR-006) once there is a
+cost/budget reporting across a fleet, and reintroducing named presets (configuration.md §1) once there is a
 reason to choose between tunings rather than one validated default. = design.md M11.
 
 ---
@@ -663,7 +661,7 @@ reason to choose between tunings rather than one validated default. = design.md 
 ## 7. Default Configuration
 
 The user-facing surface is limits plus disk selection. Controller internals are `advanced` and
-opt-in. Phase 1 ships one built-in default parameter set — no preset name to choose (ADR-006). Full
+opt-in. Phase 1 ships one built-in default parameter set — no preset name to choose (configuration.md §1). Full
 model, default values and examples: `docs/configuration.md`.
 
 | Parameter | Default | Rationale |
@@ -673,7 +671,7 @@ model, default values and examples: `docs/configuration.md`.
 | `billing_step_iops` | 100 | platform-fixed, not user-settable |
 | `discovery_interval` | 5 min | picks up newly attached disks |
 | **Saturation (gate + signals)** | | |
-| `utilization_threshold` | 0.98 | **gate only**, on whichever of IOPS/bandwidth utilization is higher (ADR-008) — never triggers a change by itself |
+| `utilization_threshold` | 0.98 | **gate only**, on whichever of IOPS/bandwidth utilization is higher (design.md §4.4) — never triggers a change by itself |
 | `queue_depth_threshold` | 1 | units differ by source: ops in `local`, bytes in `fleet` |
 | `latency.mode` | `relative` | absolute thresholds are wrong for every workload |
 | `latency.baseline_multiplier` | 1.5 | versus the disk's own observed baseline |
@@ -694,7 +692,7 @@ model, default values and examples: `docs/configuration.md`.
 **Why utilization is only a gate.** With provisioned billing the limit is already paid for, so a disk
 using all of it is efficient, not distressed. Scaling on utilization systematically over-provisions
 exactly the workloads that are behaving well. The trigger is unmet demand — queueing, latency above
-the disk's own baseline, throttling. See ADR-002.
+the disk's own baseline, throttling. See design.md §4.4.
 
 **Why latency is relative.** `p95 > 10 ms` is wrong for everyone; acceptable latency is
 workload-specific. Comparing against each disk's own baseline adapts automatically, at the cost of a
@@ -732,7 +730,7 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
   `deviceName` was not set at attach time. No serial-number probing, no heuristics. This removes the
   blocker that previously held back `local` mode. `deviceName` is therefore also the identifier the
   operator writes in config — unprefixed — since it is the one value shared by config, guest path and
-  metric label (ADR-004).
+  metric label (design.md §4.1).
 - **Only `iops` and `size` are mutable on a disk.** Every other field in `DiskSpecRequest` is
   create-only and, per the spec, "may only be resent with its current value" on update. The agent
   therefore touches `spec.iops` and nothing else.
@@ -763,7 +761,7 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
   name and label set is recorded in `docs/platform-reference.md` ("Prometheus export — measured"). No read queue
   metric exists — only `compute_vm_disk_write_queue_length`; read-heavy saturation in `fleet` rests
   on latency alone (design.md §10, item 4).
-- **OQ-3 — resolved.** Dependent disks are supported via the VM write path (ADR-003, US-011a). They
+- **OQ-3 — resolved.** Dependent disks are supported via the VM write path (design.md §4.7, US-011a). They
   are not excluded, and boot disks are therefore in scope. A dependent disk can also be converted to
   independent (`spec-to-ref`), but that is one-way and changes deletion semantics, so the agent only
   ever *recommends* it.

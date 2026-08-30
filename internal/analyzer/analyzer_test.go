@@ -122,7 +122,7 @@ func TestAnalyze_gatePassesButNoSignal_notSaturated(t *testing.T) {
 		t.Fatalf("test setup: IOPSUtilization = %v, want >= threshold", got.IOPSUtilization)
 	}
 	if got.Saturated {
-		t.Error("Saturated = true, want false — a disk at 100% utilization with an empty queue and flat latency is efficient (ADR-002)")
+		t.Error("Saturated = true, want false — a disk at 100% utilization with an empty queue and flat latency is efficient (docs/design.md §4.4)")
 	}
 }
 
@@ -220,7 +220,7 @@ func TestAnalyze_momentarySpikeNotSustained(t *testing.T) {
 }
 
 func TestAnalyze_baselineEstablishesEvenWhenSaturatedFromStart(t *testing.T) {
-	// ADR-012 regression: a disk saturated on every sample from the first
+	// docs/design.md §4.4 regression: a disk saturated on every sample from the first
 	// window onward must still establish a baseline, not deadlock forever.
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
@@ -232,7 +232,7 @@ func TestAnalyze_baselineEstablishesEvenWhenSaturatedFromStart(t *testing.T) {
 		t.Fatal("test setup: expected this window to be saturated (queue-driven)")
 	}
 	if !got.BaselineEstablished {
-		t.Error("BaselineEstablished = false, want true — establishment must not be blocked by saturation (ADR-012)")
+		t.Error("BaselineEstablished = false, want true — establishment must not be blocked by saturation (docs/design.md §4.4)")
 	}
 }
 
@@ -305,7 +305,7 @@ func TestAnalyze_underutilizedOnSustainedQuiet(t *testing.T) {
 }
 
 // TestAnalyze_notUnderutilizedWhenBandwidthElevated is the mirror of
-// ADR-008's own bandwidth-bound saturation fix, applied to the quiet
+// the bandwidth-bound saturation invariant in docs/design.md §4.4, applied to the quiet
 // direction: a large-block, low-ops/s workload can still be saturating
 // its bandwidth ceiling even though queue depth, latency, and throttle
 // detection — all IOPS-denominated signals — read as idle. Must not
@@ -361,7 +361,7 @@ func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
 		t.Errorf("QueueGrowthRate = %v, want %v", got.QueueGrowthRate, wantRate)
 	}
 	if !got.QueueGrowthRateValid {
-		t.Error("QueueGrowthRateValid = false, want true — guest samples are always ops-denominated (ADR-001)")
+		t.Error("QueueGrowthRateValid = false, want true — guest samples are always ops-denominated (docs/design.md §4.2)")
 	}
 }
 
@@ -769,8 +769,8 @@ func TestTrailingWindow_doesNotReachAcrossAGapItDoesNotNeedTo(t *testing.T) {
 func TestAnalyze_baselineNotEstablishedFromIdleWindow(t *testing.T) {
 	// A full up-window where nothing was ever active in either direction —
 	// currentBaseline must decline to establish (issue #9), not freeze a
-	// bogus 0 in place forever the way ADR-012's "seeds from the disk's
-	// first full window" would otherwise do here.
+	// bogus 0 in place forever. The baseline rule in docs/design.md §4.4
+	// would otherwise seed from the disk's first full window here.
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
@@ -794,7 +794,7 @@ func blockSample(minute int, opsPerSec float64, blockSize int64) metrics.Sample 
 
 func TestDemandP95Down_64KiBWorkloadIsBandwidthLimited(t *testing.T) {
 	// issue #17's own worked example: 900 ops/s at 64 KiB/op ≈ 59 MB/s,
-	// whose IOPS-equivalent (÷32768, ADR-008's own ratio) is 1800 — well
+	// whose IOPS-equivalent (÷32768 using the ratio in docs/design.md §4.4) is 1800 — well
 	// above the 900 ops/s figure alone. Sizing from ops/s alone (900)
 	// would derive a target whose bandwidth ceiling sits below what this
 	// workload already sustains.

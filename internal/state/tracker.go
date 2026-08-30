@@ -145,7 +145,7 @@ func (t *Tracker) Compact(now time.Time) error {
 }
 
 // RecordChange records diskID's cooldown clock for the given direction —
-// in-memory only (ADR-013), and called only once a write has been
+// in-memory only (docs/design.md §9.4), and called only once a write has been
 // verified successful. Issue #10 split this from budget bookkeeping,
 // which now happens via ReserveChange/ConfirmChange/ReleaseChange around
 // the write itself rather than only after it succeeds.

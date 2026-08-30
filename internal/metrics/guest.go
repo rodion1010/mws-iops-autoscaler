@@ -11,7 +11,7 @@ import (
 
 const defaultProcDiskstatsPath = "/proc/diskstats"
 
-// GuestSource is the `local`-mode MetricSource: primary by default (ADR-001),
+// GuestSource is the `local`-mode MetricSource: primary by default (docs/design.md §4.2),
 // needs no metrics credential, reads /proc/diskstats directly.
 //
 // It is stateful — Sample computes a delta against the previous call, so the
