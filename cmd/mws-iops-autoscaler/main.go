@@ -109,7 +109,7 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	}
 
 	source := metrics.NewGuestSource()
-	sampler, err := metrics.NewSampler(source, samplerCapacity(resolved))
+	sampler, err := metrics.NewSampler(source, resolved.SamplerCapacity())
 	if err != nil {
 		return fmt.Errorf("build sampler: %w", err)
 	}
@@ -137,20 +137,44 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	readiness := &health.Readiness{}
 	readiness.SetConfigValid(true) // LoadAndValidate above already proved this
 
+	// Phase 1 (PRD §6) is local mode, scale-up only. This is the one place
+	// that capability gets decided (issue #14) — Phase 3 flips it here and
+	// nowhere else; both the Decider and the Agent's own defense-in-depth
+	// check read the same value, not two independently maintained copies.
+	const allowScaleDown = false
+
+	// Freshness bounds (issue #15), derived from the same collection/
+	// discovery cadence the pipeline already runs on rather than hardcoded
+	// or independently configured: a threshold that isn't a multiple of
+	// the interval it's bounding would either trip on ordinary jitter (too
+	// tight) or defeat its own purpose (too loose). 3x tolerates two fully
+	// missed cycles before failing closed; 2x on the gap bound means one
+	// missed cycle inside a window is still tolerated, two is not.
+	// Calibration-pending, same as every other constant of this shape in
+	// this codebase (design.md §8.5).
+	maxSampleAge := 3 * resolved.Runtime.CollectionInterval
+	maxSampleGap := 2 * resolved.Runtime.CollectionInterval
+	maxDiscoveryAge := 3 * resolved.Runtime.DiscoveryInterval
+
 	agent := &Agent{
-		cfg:       cfg,
-		resolved:  resolved,
-		vmName:    vmName,
-		dryRun:    dryRun,
-		client:    client,
-		sampler:   sampler,
-		analyzer:  analyzer.NewWindowAnalyzer(),
-		decider:   decider.NewPolicyDecider(),
-		actuator:  actuator.NewComputeActuator(client),
-		tracker:   tracker,
-		telemetry: reg,
-		journal:   journal.NewWriter(journalOut),
-		readiness: readiness,
+		cfg:               cfg,
+		resolved:          resolved,
+		vmName:            vmName,
+		dryRun:            dryRun,
+		allowScaleDown:    allowScaleDown,
+		maxDiscoveryAge:   maxDiscoveryAge,
+		maxSampleAge:      maxSampleAge,
+		maxSampleGap:      maxSampleGap,
+		guestPathVerifier: source.VerifyPath,
+		client:            client,
+		sampler:           sampler,
+		analyzer:          analyzer.NewWindowAnalyzer(),
+		decider:           decider.NewPolicyDecider(allowScaleDown),
+		actuator:          actuator.NewComputeActuator(client),
+		tracker:           tracker,
+		telemetry:         reg,
+		journal:           journal.NewWriter(journalOut),
+		readiness:         readiness,
 	}
 
 	mux := http.NewServeMux()
@@ -175,24 +199,6 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 		log.Printf("mws-iops-autoscaler: starting for VM %q", vmName)
 	}
 	return agent.Run(ctx)
-}
-
-// samplerCapacity sizes the ring buffer by the longest configured window
-// across the VM policy and every per-disk override — Sampler.NewSampler
-// (design.md §3.2 "Bounded memory") takes one capacity for every disk, so
-// it must fit whichever disk needs the most history.
-func samplerCapacity(resolved *config.ResolvedConfig) int {
-	longest := resolved.VMPolicy.Advanced.ScaleDownWindow
-	for _, p := range resolved.DiskPolicies {
-		if p.Advanced.ScaleDownWindow > longest {
-			longest = p.Advanced.ScaleDownWindow
-		}
-	}
-	n := int(longest / resolved.Runtime.CollectionInterval)
-	if n < 1 {
-		n = 1
-	}
-	return n
 }
 
 func validateConfig(path string) int {

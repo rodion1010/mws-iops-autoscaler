@@ -120,7 +120,7 @@ nothing. Only *saturation* — demand that cannot be served — justifies spendi
 | **Decider** | Demand estimate → raw target | Pure; no clamping here |
 | **Guardrails** | Clamp, round, rate-limit, cooldown, budget, VM headroom | Last line before any write |
 | **Actuator** | Apply the change via the correct write path | Only component that mutates anything |
-| **State/Journal** | Last action per disk, cooldowns, 24h budget, decision history | Cooldowns/history in-memory v1; 24h budget persisted (ADR-013) — see §9.4 |
+| **State/Journal** | Last action per disk, cooldowns, 24h budget, decision history | Cooldowns/history in-memory v1; 24h budget persisted as a crash-safe intent/result log (ADR-013, issue #10) — see §9.4 |
 
 ### 3.3 Why this shape
 
@@ -142,16 +142,27 @@ product risk lives.
    ├─ read spec.storage.disks[]
    │    disk.spec present → DEPENDENT   (write via VM path)
    │    disk.ref  present → INDEPENDENT (write via disk path)
+   │    neither/both resolved → ambiguous class, excluded (issue #4)
    ├─ read status.storage.disks[].deviceName → "mws-<name>"
    │    strip the "mws-" prefix → the config identifier (ADR-004)
-   │    local mode: resolve /dev/disk/by-id/mws-<name>, verify it exists
+   ├─ reject a duplicate disk resource identity or device_name shared by two attachments —
+   │    both excluded, neither guessed at as "the real one" (issue #4)
+   ├─ reject an empty or duplicate alias — the dependent write path's own join key
+   │    (write.go's validateDependentWriteTarget); both excluded on a collision (issue #20)
    └─ GET /compute/v1/vmTypes/{vmType}
         vm_iops_limit = 3000 × spec.cpu.vcpuCount
         (spec.disks.totalIops is null on every type — do not use)
 
- for each disk:
+ for each disk not already excluded above:
    GET /compute/v1/projects/{p}/disks/{d}
-   └─ spec.iops (current provisioned), status.iops {base, extra, total}
+   ├─ spec.iops (current provisioned), status.iops {base, extra, total}
+   │    spec.iops <= 0 → invalid current IOPS, excluded (issue #4)
+   └─ metadata.id → IncarnationID (CLAUDE.md "Disk resource identity") — degrades to
+        DiskName-only identity if absent, never excludes the disk (pre-merge review)
+
+ local mode only, for each disk that reached this point:
+   resolve /dev/disk/by-id/mws-<name>, verify its kernel device has a /proc/diskstats entry
+   (cmd/mws-iops-autoscaler/agent.go's guestPathVerifier — issue #4) — otherwise excluded
 
  apply selection strategy → managed set
    match config selectors against DeviceName (unprefixed) — never a kernel device path,
@@ -162,6 +173,21 @@ product risk lives.
 
 Discovery is idempotent and rebuilds the registry wholesale. A disk that changed class, was detached,
 or was resized externally is picked up here.
+
+Every exclusion above returns a `compute.SkippedDisk{Alias, DiskName, Category, Reason}` rather than
+silently dropping the disk (US-002) — `Category` is one of a small set of stable codes
+(`ambiguous_class`, `empty_identity`, `duplicate_disk_name`, `duplicate_device_name`, `empty_alias`,
+`duplicate_alias`, `get_disk_failed`, `invalid_iops`, plus `guest_path_unresolvable` from the
+local-mode step) suitable as a Prometheus label; `Reason` carries the free-text detail (disk names, the
+underlying API error) for
+the log line only — `Category` exists separately from `Reason` specifically because `Reason`'s text is
+unbounded and would blow up label cardinality if used directly. `telemetry.RecordDiscoverySkipped`
+increments `iops_autoscaler_disk_discovery_skipped_total{alias,reason}` for each one (§7.1).
+
+`health.Readiness`'s `source_reachable` (§7.3) additionally requires at least one disk to have survived
+every check above: a successful `sampler.Tick()` alone no longer reports the metrics path as usable if
+the managed set is empty, since there is nothing left that Tick could possibly have produced a sample
+for.
 
 ### 4.2 Sampling (fast path, default 10 s)
 
@@ -221,7 +247,7 @@ actually be honored (ADR-010).
        if in_cooldown(disk, down):
            no_action("cooldown_scale_down")
        else:
-           target = guardrails(m.IOPSP95Down / policy.target.scale_down_utilization, disk, vm, down)
+           target = guardrails(m.EffectiveDemandP95Down / policy.target.scale_down_utilization, disk, vm, down)
            if target < current: actuate(disk, target); start_cooldown(down)
            else: no_action("target_not_below_current")
    else:
@@ -229,11 +255,22 @@ actually be honored (ADR-010).
 ```
 
 `demand()` is the Decider's job (§3.2 — "Demand estimate → raw target"), not the Analyzer's: it takes
-`Analysis` plus policy and produces a number to clamp, same as `m.IOPSP95Down` already is for
-scale-down. `Analysis` carries the *evidence* (queue depth, latency, throttle detection, window/
+`Analysis` plus policy and produces a number to clamp, same as `m.EffectiveDemandP95Down` already is
+for scale-down. `Analysis` carries the *evidence* (queue depth, latency, throttle detection, window/
 baseline state, and the two verdict booleans); it does not carry a precomputed demand figure —
 keeping that split is what makes `demand()`'s two regimes (§4.5) unit-testable against a fixed
 `Analysis` without needing a real window of samples for every case.
+
+`m.EffectiveDemandP95Down`, not `m.IOPSP95Down` alone, sizes the scale-down target (issue #17). NBS-PL2
+ties provisioned IOPS and bandwidth at one fixed ratio (`bytesPerIOPS`, ADR-008) — a large-block,
+low-ops/s workload can be well below its IOPS ceiling while still saturating the bandwidth that same
+IOPS number buys. Sizing the target from served ops/s alone would undersize that bandwidth need on the
+next cycle. `EffectiveDemandP95Down` is the p95, over `scale_down_window`, of each *sample's own*
+`max(ops, bandwidth ÷ bytesPerIOPS)` — not `max(p95(ops), p95(bandwidth))`, which can miss an outlier
+that shows up in only one of the two series at any given sample (§4.5 below has the worked example).
+`m.IOPSP95Down` and `m.BandwidthP95DownIOPSEquiv` still exist on `Analysis` and are journaled
+alongside `m.LimitingResourceDown` (`"iops"`/`"bandwidth"`) so a scale-down decision's journal entry
+shows which resource actually drove the target, not just the final number.
 
 `guardrails()` is the last line before any write (§3.2): clamp to `[policy.limits.min_iops,
 min(10000, policy.limits.max_iops, vm_headroom)]` (NFR-5, §4.6), round to a 100-IOPS multiple,
@@ -296,6 +333,33 @@ not near either of its provisioned limits it cannot be limit-starved, so the exp
 skipped. A large-block, throughput-heavy workload saturates bandwidth long before it saturates IOPS
 count; gating on IOPS alone would silently miss it — the whole reason ADR-008 exists.
 
+**Underutilization detection is `saturated`'s mirror, not a separate mechanism** (issue: bandwidth must
+gate `Underutilized` too, not only scale-down target sizing — §4.5's `EffectiveDemandP95Down`):
+
+```
+resource_quiet :=
+      iops_utilization      < policy.saturation.utilization_threshold
+  AND bandwidth_utilization < policy.saturation.utilization_threshold
+
+underutilized :=
+      window_full_down
+  AND resource_quiet
+  AND queue_depth < policy.saturation.queue_depth_threshold
+  AND (!baseline_established OR latency.P95 <= baseline.P95 × policy.saturation.latency.baseline_multiplier)
+  AND !throttling_detected
+  AND sustained over policy.evaluation.scale_down_window
+```
+
+`resource_quiet` requires **both** resources below threshold, every sample — not merely "not
+`resource_gate`" (De Morgan's makes that the much weaker claim that *some* sample had both quiet, not
+that *every* sample did; `sustained` here means the latter, same as everywhere else in this section).
+Without it, a large-block, low-ops/s workload saturating its bandwidth ceiling could still read as
+`underutilized`: `queue_depth`, `latency.P95`, and `throttling_detected` are all IOPS-denominated
+signals, blind on their own to a bottleneck that never shows up as an elevated op count. Reusing
+`policy.saturation.utilization_threshold` (rather than a new config field) keeps one invariant true in
+both directions: a disk can never simultaneously be a `saturated` candidate on one resource (sustained
+at-or-above threshold) and an `underutilized` one (sustained below threshold, both resources) at once.
+
 **Latency is baseline-relative, never absolute.** `p95 > 10 ms` is wrong for everyone; acceptable
 latency is workload-specific. The baseline is a long rolling low-percentile of the disk's own
 observed latency, **frozen against updates** while the disk is saturated so a throttled period cannot
@@ -353,6 +417,16 @@ The closed-workload form is the workhorse: if latency is 3× baseline, the workl
 roughly a third of the service it wants. Both forms are clamped to
 `max_scale_up_ratio` so a pathological reading cannot request a 10× jump.
 
+`dL/dt` (`Analysis.QueueGrowthRate`) is only summed with `served` (ops/s) when
+`Analysis.QueueGrowthRateValid` is true — the Analyzer sets it false whenever the up-window's
+`QueueDepth` is not entirely `local`'s own ops unit (issue #18), since `fleet`'s queue metric is
+byte-denominated (CLAUDE.md) and `served + dL/dt` is only dimensionally valid for ops/s. An invalid
+growth rate falls through to the closed-workload form exactly as a growth rate that's simply not above
+`queueGrowthThreshold` does — never a raw bytes/s number added onto an ops/s figure, however large
+that number is. Today `local` (guest) is the only implemented source and always produces the ops unit,
+so `QueueGrowthRateValid` is unconditionally true through the real pipeline; the guard exists so a
+future `fleet` (platform) window can never silently reach this formula.
+
 The closed-workload form needs `baseline_established` (ADR-012); the open-workload form does not — a
 growing queue is visible without any latency baseline at all. In the one corner where saturation was
 already confirmed via `queue_depth` or `throttling_detected`, the workload is closed, and the
@@ -367,6 +441,22 @@ of the two `LatencyStatKind`s (ADR-011), when a fresh histogram is present. The 
 without a queue signal is what makes this coarser than guest's throttling detection, and one more
 reason `local` prefers the guest (ADR-001) — it is not a statement about the latency figure's own
 accuracy.
+
+**Scale-down sizing is bandwidth-aware too (issue #17).** The scale-up estimators above size a target
+from *served* activity when the disk is pinned at its own limit; scale-down sizing (§4.3) is simpler —
+`EffectiveDemandP95Down` is already an unthrottled p95 read straight off the down-window, no
+regime-detection needed — but it shares the same NBS-PL2 fact: provisioned IOPS and bandwidth move
+together at a fixed ratio (`bytesPerIOPS`, ADR-008), so a target sized from ops/s alone can undersize
+the bandwidth a large-block workload needs. The Analyzer computes, per sample in the down-window, both
+`ops = read_ops + write_ops` and `bandwidth_iops_equiv = (read_bytes + write_bytes) / bytesPerIOPS`,
+takes `max(ops, bandwidth_iops_equiv)` **per sample**, then takes the p95 of *that* series —
+`EffectiveDemandP95Down`. This is deliberately not `max(p95(ops), p95(bandwidth_iops_equiv))`: two
+percentiles computed independently can each land on a different sample, so their max can miss an
+outlier that only ever appears in one series at a time (e.g. one sample with an ops spike and a
+different sample with a bandwidth spike, neither reaching p95 on its own but each mattering when it
+occurs). Aligning the max per sample before taking the percentile is what makes the outlier visible.
+`IOPSP95Down` and `BandwidthP95DownIOPSEquiv` are still computed and carried on `Analysis` — and
+journaled, with `LimitingResourceDown` — purely for observability into which resource actually bound.
 
 **Honesty note.** These estimators are unvalidated. They are why `--dry-run` (US-013) is run against
 the live test environment as a validation step inside M6 before actuation is flipped on — not a
@@ -393,13 +483,58 @@ either. The guardrail is the only thing preventing billed-but-unusable IOPS.
 
 ### 4.7 Actuation
 
-**Independent disk** — single-field partial update, no read-modify-write:
+**Both write paths are conditional, not unconditional (issue #16).** A Decision's `Target` is only
+meaningful relative to the `Current` it was computed from — every guardrail in §4.5/§4.6 clamps
+around that specific value. If the live value has moved since the Decision's snapshot was taken (an
+operator or another controller changed it, or the agent's own previous write already did), applying
+`Target` as an absolute value can silently undo an external increase or, in the other direction,
+silently re-widen a value someone had deliberately narrowed. So immediately before every write, both
+paths re-read the live resource, and abort — never force — if what they find doesn't match what the
+Decision expected:
 
 ```
+if live.current != decision.current:                 abort (ErrConcurrentModification)
+if target crosses live.current in the wrong direction: abort (ErrConcurrentModification)  ← defensive,
+                                                         redundant with the check above in the
+                                                         ordinary case, kept independent so it still
+                                                         holds if that check is ever loosened
+```
+
+The re-read's own etag is what actually travels on the write — never one carried from an earlier
+Discover — so the optimistic-concurrency precondition compares against state no older than the write
+itself. On `ErrConcurrentModification` the orchestrator (`Agent.actuate`) forces an immediate
+rediscovery rather than waiting for the next scheduled `DiscoveryInterval` tick, so the next reconcile
+cycle decides again from a snapshot no older than the conflict — never a forced retry of the stale
+target. A successful write's verified applied value is adopted into the Agent's own current-value
+snapshot immediately, for the same reason: waiting for the next discovery would leave it stale for up
+to `DiscoveryInterval`, the exact class of gap this issue exists to close. See ADR-015.
+
+**The forced rediscovery also ends the current reconcile cycle, not just the current disk's write
+(pre-merge review).** `Agent.reconcile` snapshots `managed`/`iopsPool` once at the top of the cycle —
+every sibling p95, VM headroom, and Decision for every disk not yet processed is computed from that one
+snapshot. A rediscovery mid-cycle replaces it, which means every one of those not-yet-processed
+decisions was computed from data the platform has already moved on from. `Agent.generation` (bumped
+only alongside a successful discovery, in the same critical section as `managed`/`iopsPool`) is
+snapshotted the same way at the top of `reconcile`; the per-disk loop compares it again after every
+`actuate()` call and returns immediately if it has changed, leaving every remaining disk for the next
+reconcile tick to decide fresh. `vm_cap_reached` is not published for an aborted cycle either — an
+`anyVMCapReached` computed from only part of the managed set would be a possible false negative, no
+better than not publishing it at all.
+
+**Independent disk** — a pre-write `GetDisk` for the fresh etag/live-current check above, then a
+single-field partial update, still no read-modify-write of the write body itself:
+
+```
+GET  compute.mwsapis.ru/compute/v1/projects/{p}/disks/{d}     capture etag, live spec.iops
 POST compute.mwsapis.ru/compute/v1/projects/{p}/disks/{d}?updateOnly=true
 Idempotency-Key: <uuid>
-{"spec": {"iops": N}}
+{"metadata": {"etag": "..."}, "spec": {"iops": N}}
 ```
+
+`validateOnly` (US-013's dry run) still exercises every check above — including the live-current
+comparison — and only skips the final mutating call; a dry run therefore reports a would-be conflict
+exactly like a real run would (issue #16's "dry-run exercises the same precondition checks without
+mutation").
 
 **Dependent disk** — read-modify-write through the VM, which is the riskier path:
 
@@ -409,6 +544,18 @@ GET  .../virtualMachines/{vm}                   capture etag, every disk's alias
   except the target alias, which additionally carries spec.iops
 POST .../virtualMachines/{vm}                   send etag, Idempotency-Key
 ```
+
+Before any of the above, `validateDependentWriteTarget` (issue #20) proves the fresh read is safe to
+act on at all: every alias non-empty and unique across the whole VM, and exactly one attachment
+matching the requested `device_name` — a descriptive error aborts before `UpdateDependentDisk` is ever
+called if either fails. The platform should already guarantee both, but this write path does not trust
+that blindly: `Upsert`'s delete-on-omission semantics (next paragraph) make an empty or duplicated
+alias a malformed collection, not a harmless duplicate, and more than one attachment sharing
+`device_name` previously let the target-selection loop silently pick whichever it saw last — an
+arbitrary attachment, not necessarily the intended one. Discovery applies the same alias checks
+(§4.1) so a colliding disk is excluded from the managed set before it is ever offered as a target, but
+the write path's own check is what actually protects the write — Discovery's snapshot can be stale by
+up to `discovery_interval`; this check runs against the same fresh read the write itself uses.
 
 Every alias must still be present, because Upsert treats an existing `storage.disks[]` element
 missing from the request as a delete — dropping an entry to "only touch the target" would detach
@@ -465,12 +612,26 @@ type DiskRef struct {
     DiskID     string // cloud resource name — used for API writes, never written in config
     VMName     string // (VMName, DeviceName) is the fleet-mode key
     DeviceName string // unprefixed: "datadisk"
+
+    // IncarnationID is compute.StorageDisk.IncarnationID (the platform's
+    // own metadata.id, CLAUDE.md "Disk resource identity"), carried here
+    // so the Sampler's ring buffer can be keyed by IdentityKey() instead
+    // of DiskID alone (pre-merge review — see that method's own comment).
+    IncarnationID string
 }
 
 // GuestPath returns /dev/disk/by-id/mws-<DeviceName>.
 func (d DiskRef) GuestPath() string
 // MetricLabel returns the device_name label value: "mws-<DeviceName>".
 func (d DiskRef) MetricLabel() string
+// IdentityKey returns DiskID + IncarnationID, combined — the Sampler's
+// own ring-buffer key, and (via compute.StorageDisk's identical method)
+// the key Tracker/Budget use for cooldown and the 24h change budget.
+// DiskID alone is not safe for any of these: it is the disk's name, which
+// is user-settable for an independent disk and reusable after deletion —
+// a disk deleted and recreated under the identical name must start every
+// one of these systems fresh, not inherit the previous incarnation's.
+func (d DiskRef) IdentityKey() string
 
 type MetricSource interface {
     // Sample returns one observation per managed disk. Units are explicit
@@ -542,6 +703,19 @@ type LatencyStat struct {
 type Analysis struct {
     DiskID string
 
+    // Fresh is false when the newest buffered sample is older than
+    // EvaluationPolicy.MaxSampleAge — sampling has stopped or fallen badly
+    // behind (issue #15). Saturated and Underutilized are both
+    // unconditionally false whenever Fresh is false: a window whose
+    // *span* has been full for hours reads as "full" forever even after
+    // sampling silently stops, since nothing inside a fixed buffer alone
+    // can reveal that time has kept passing outside it — only a
+    // comparison against wall clock (Analyze's own `now` parameter,
+    // below) can. SampleAge is exposed alongside Fresh for the journal and
+    // for telemetry.RecordStaleness, not just as an internal gate.
+    Fresh     bool
+    SampleAge time.Duration
+
     // Latest-sample snapshot, for the journal — not what Saturated/
     // Underutilized are computed from (each re-evaluates its own signal
     // against every sample in its own window, not just this one).
@@ -559,19 +733,34 @@ type Analysis struct {
     WindowFullDown bool // span ≥ scale_down_window
 
     Saturated     bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
-    Underutilized bool // every signal quiet AND sustained over scale_down_window (US-010); false if !WindowFullDown
+    Underutilized bool // resource_quiet AND every other signal quiet AND sustained (§4.4); false if !WindowFullDown
 
-    IOPSP95Down float64 // p95 served ops/s over scale_down_window — the Decider's p95_iops(m) input (§4.3)
+    // IOPSP95Down/BandwidthP95DownIOPSEquiv/LimitingResourceDown are the
+    // down-window demand breakdown, for the journal (issue #17).
+    // EffectiveDemandP95Down — not IOPSP95Down alone — is the Decider's
+    // §4.3 scale-down sizing input: the p95, over scale_down_window, of
+    // each sample's own max(ops, bandwidth ÷ bytesPerIOPS), not
+    // max(p95(ops), p95(bandwidth)) (§4.5 explains why that distinction
+    // matters). LimitingResourceDown is "iops" or "bandwidth", whichever
+    // of the first two is larger.
+    IOPSP95Down                float64
+    BandwidthP95DownIOPSEquiv  float64
+    EffectiveDemandP95Down     float64
+    LimitingResourceDown       string
 
     // demand()'s (§4.5) two remaining inputs beyond what's above — both
     // measured over ScaleUpWindow, since demand() is only ever called from
     // the Saturated branch. ServedIOPS is exposed directly (not just
     // IOPSUtilization, a ratio) so the Decider never needs specIOPS a
     // second time. QueueGrowthRate is (newest−oldest queue depth) / elapsed
-    // seconds within the up-window — units match QueueDepth.Unit per
-    // second, so it sums directly with ServedIOPS in the open-workload form.
-    ServedIOPS      float64
-    QueueGrowthRate float64
+    // seconds within the up-window. It must NOT be assumed to sum directly
+    // with ServedIOPS (issue #18) — QueueGrowthRateValid is true only when
+    // every up-window sample carried QueueDepthOps; the Decider checks it
+    // before using the open-workload formula, falling back to the
+    // closed-workload one otherwise.
+    ServedIOPS           float64
+    QueueGrowthRate      float64
+    QueueGrowthRateValid bool
 }
 
 type Analyzer interface {
@@ -584,8 +773,25 @@ type Analyzer interface {
     // throttling_detected's "served ≈ provisioned_limit" comparison (§4.5).
     // It is live disk state, not a policy value, so it is not part of
     // EvaluationPolicy.
-    Analyze(diskID string, samples []Sample, p EvaluationPolicy, specIOPS int64) Analysis
+    // now is wall clock, explicit for the same testability reason
+    // Decider.Decide takes it — Analysis.Fresh/SampleAge (issue #15) are a
+    // comparison against real time passing, not against anything
+    // derivable from the samples themselves.
+    Analyze(diskID string, samples []Sample, p EvaluationPolicy, specIOPS int64, now time.Time) Analysis
 }
+
+// EvaluationPolicy gained two freshness/gap bounds for issue #15 (and
+// issue #7's "gap-aware window coverage"), both derived by the
+// orchestrator from runtime.collection_interval rather than being
+// per-disk policy knobs (main.go: 3x for MaxSampleAge, 2x for
+// MaxSampleGap — calibration-pending, §8.5):
+//   MaxSampleAge time.Duration // newest sample must be no older than this for Fresh
+//   MaxSampleGap time.Duration // no two consecutive samples inside a window may be farther apart than this
+// windowFull (§4.3/ADR-010) now checks MaxSampleGap between every
+// consecutive pair of samples in the window, not just overall span —
+// a window whose span covers the target duration but contains one large
+// silent gap (a missed collection cycle, a temporary source outage) no
+// longer reads as "full."
 
 // VMState is the sibling-disk headroom picture (§4.6) — pre-aggregated by
 // the caller (analyze_vm in §4.3's pseudocode, not this package): IOPSPool
@@ -630,6 +836,14 @@ type GuardrailState struct {
     ChangesInLast24h int
 }
 
+// state.Tracker.State reports ChangesInLast24h as a large sentinel
+// (effectively unbounded) once the durable budget has become unhealthy —
+// any persistence operation (Reserve/Confirm/Release) failing mid-run
+// (issue #10) — rather than adding a second "refuse to act" signal
+// GuardrailState/Decide would need to know about. The existing
+// `ChangesInLast24h >= p.MaxChangesPer24h` → budget_exhausted branch
+// (§4.6 below) already does the right thing unmodified.
+
 type Decider interface {
     // diskID/current mirror Analyzer.Analyze's explicit-diskID rationale —
     // Decision.DiskID/Current must be set even on an Analysis with no
@@ -637,6 +851,46 @@ type Decider interface {
     // clock (the same reason GuestSource takes an injectable now func).
     Decide(diskID string, current int64, a Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision
 }
+
+// PolicyDecider (the concrete implementation) also takes allowScaleDown, a
+// constructor-only capability, not a per-call argument: Phase 1 (PRD §6) is
+// scale-up only, and that must not depend on any user-tunable threshold
+// happening to never trigger scale-down (issue #14). With allowScaleDown
+// false, Underutilized still computes and surfaces a candidate Demand for
+// observability, but Action is always no_action/scale_down_disabled,
+// checked before cooldown or guardrails — never merely clamped by them.
+// The orchestrator applies the same capability a second time, independently,
+// before ever calling the Actuator (defense in depth: a Decider is an
+// interface, and the caller must not simply trust an implementation to have
+// gotten this right). Phase 3 flips this one constructor argument and
+// nothing else.
+
+// Decide's default (neither Saturated nor Underutilized) branch reports
+// four distinct NoAction reasons, not one generic "no_signal" (issue #15,
+// deepened by the pre-merge review) — an operator reading the
+// journal/metrics needs to tell "this disk has never produced a single
+// sample" apart from "this disk's data can't be trusted right now" apart
+// from "this disk hasn't accumulated enough history yet" apart from "this
+// disk is genuinely, trustworthily idle". Order matters: !a.HasData is
+// checked first, because a.Fresh is also false (zero value) for a disk
+// that has never been sampled — without that ordering, true cold-start
+// would misreport as metrics_stale, implying data once flowed and has
+// since gone stale, a different operational fact (and a different fix)
+// than never having received any data at all.
+//   no_data          — !a.HasData (never sampled — true cold start)
+//   metrics_stale    — a.HasData but !a.Fresh (sampled before, now too old)
+//   window_not_full  — a.Fresh but neither WindowFullUp nor WindowFullDown
+//   no_signal        — a.Fresh and at least one window full, nothing triggered
+//
+// A fifth reason, discovery_stale, is not one of Decide's own outcomes —
+// it is reported by the orchestrator (agent.go's reconcile) when a cycle
+// never reaches Decide at all, because the discovery snapshot itself is
+// untrusted (invalidated by a fatal discover() error, or older than
+// max_discovery_age; ADR-014/ADR-015). Every disk still sitting in that
+// untrusted managed set gets one NoAction/discovery_stale journal record
+// per skipped cycle (design.md §7.2/§4.3's own rule: "why didn't it
+// scale? must always be answerable from the log alone" — a cycle skipped
+// for stale discovery must not read as if nothing happened at all).
 
 type Actuator interface {
     Apply(ctx context.Context, d Decision) (Applied, error)
@@ -722,12 +976,15 @@ exposing them.
 
 | Failure | Behaviour |
 |---|---|
-| Metrics unavailable | Mark disks "no data", take no action, alert after `n` cycles |
-| Compute API unavailable | Retry with backoff; decisions queue but never stack up (latest wins) |
+| Metrics unavailable | Mark disks "no data" — reason `no_data` if never sampled at all (`Analysis.HasData = false`), `metrics_stale` if sampled before but now too old (`Analysis.Fresh = false`, issue #15, pre-merge review) — take no action, alert after `n` cycles |
+| Compute API unavailable | Retry with backoff; decisions queue but never stack up (latest wins). Once the last successful discovery exceeds `max_discovery_age` (3× `discovery_interval`), reconcile skips every disk for that cycle rather than keep acting on a snapshot that may no longer reflect reality (issue #15) |
+| Discovery fails outright (Compute API error, or an unmatched `disks.selected` device_name, issue #5 reopened) | The managed snapshot is invalidated the instant the failure happens (`Agent.managedValid`), not merely once `max_discovery_age` eventually elapses — a fatal error and staleness-by-age are two independent, both-checked gates (pre-merge review) |
 | Write returns non-2xx | Log with full request context, back off, do not update state |
 | Write succeeds but value differs | Treat as failure, re-read, reconcile on next cycle |
+| Write call itself errors (network) | Reservation resolved from a fresh live read, never released on the error alone — the platform may have applied it before the response arrived (pre-merge review; see §9.4's budget crash-safety note) |
 | Concurrent external resize | Discovery picks it up; agent adopts observed value as current |
 | VM etag conflict (dependent path) | Abort write, re-read, retry next cycle — never force |
+| Concurrent-modification conflict mid-cycle | The forced rediscovery it triggers (below) supersedes every decision this reconcile cycle already made from the old snapshot — the rest of the cycle aborts rather than acting on them (pre-merge review) |
 | Agent dies after scale-up | **Disk stays at the raised limit.** No dead-man's switch is possible from outside the platform — documented limitation, must be in the README |
 
 ---
@@ -738,6 +995,7 @@ exposing them.
 
 ```
 iops_autoscaler_disk_provisioned_iops{disk,vm,class}          gauge
+iops_autoscaler_disk_proposed_target_iops{disk,vm,class}      gauge
 iops_autoscaler_disk_observed_iops{disk,vm,op}                gauge
 iops_autoscaler_disk_utilization_ratio{disk,vm}               gauge
 iops_autoscaler_disk_estimated_demand_iops{disk,vm}           gauge
@@ -746,14 +1004,45 @@ iops_autoscaler_disk_saturated{disk,vm}                       gauge 0|1
 iops_autoscaler_decisions_total{action,reason}                counter
 iops_autoscaler_writes_total{path,outcome}                    counter   path=disk|vm
 iops_autoscaler_write_duration_seconds{path}                  histogram
-iops_autoscaler_vm_headroom_iops{vm}                          gauge
+iops_autoscaler_vm_headroom_iops{disk,vm}                     gauge
 iops_autoscaler_vm_cap_reached{vm}                            gauge 0|1
 iops_autoscaler_metric_source{disk,source}                    gauge  guest|platform
 iops_autoscaler_metric_staleness_seconds{disk}                gauge
 iops_autoscaler_window_fill_ratio{disk,direction}             gauge
 iops_autoscaler_change_budget_remaining{disk}                 gauge
 iops_autoscaler_cost_delta_iops_hours{disk}                   counter
+iops_autoscaler_disk_discovery_skipped_total{alias,reason}    counter
+iops_autoscaler_budget_healthy                                gauge 0|1
 ```
+
+`disk_provisioned_iops` and `disk_proposed_target_iops` are deliberately separate series (issue #19):
+`RecordDecision` sets `disk_provisioned_iops` from `Decision.Current` — the value actually in effect —
+and `disk_proposed_target_iops` from `Decision.Target`, unconditionally, on every cycle including
+`NoAction` (where the two are equal). `disk_provisioned_iops` only ever moves again once a write is
+*verified* to have landed: `RecordAppliedIOPS`, called from `actuate()` after Actuator confirms the
+applied value (never for a dry run or a failed write), is the only other writer of that gauge. Before
+this split, `RecordDecision` set `disk_provisioned_iops` to `Decision.Target` directly — reporting a
+disk as already resized before `actuate()` had even run, and leaving it that way forever on a dry run
+or a failed write.
+
+`vm_headroom_iops` carries a `disk` label — the value (`Decision.VMHeadroomIOPS`, §4.6:
+`vm_iops_limit − p95_aggregate_iops_of_other_disks`) is inherently disk-relative, since "other disks"
+depends on which disk it's computed for; two disks on the same VM generally see different headroom.
+Reporting it under `{vm}` alone (pre-issue-#19) made whichever disk reconcile processed last silently
+overwrite every other disk's own figure.
+
+`vm_cap_reached` stays `{vm}`-only — unlike headroom, this really is one VM-wide fact — but is now set
+exactly once per reconcile cycle, via a separate `RecordVMCapReached(vmName, anyCapped)` call after
+every managed disk on that VM has been decided, where `anyCapped` is the OR across all of them.
+Previously `RecordDecision` set it per disk inside the loop, so whichever disk was decided last would
+silently overwrite an earlier disk's `ActionVMCapReached` — a VM where one disk capped and a
+later-processed disk did not could export `vm_cap_reached=0`.
+
+`metric_source{disk,source}` sets **both** the guest and platform series on every call — the active
+source's to 1, the other to 0 — rather than only ever setting the active one to 1. A `GaugeVec` only
+remembers series someone has `Set()`; setting just the active source left the previously active
+source's series stuck at 1 forever the moment a disk's source changed (relevant once Phase 2
+comparison/source switching, US-005b, exists).
 
 `disk_latency_baseline_seconds` has no `{op}` label, unlike `disk_observed_iops` — the baseline (§4.4) is
 one combined low-percentile over both read and write latencies, not tracked separately per operation
@@ -788,6 +1077,7 @@ Every reconcile emits one structured record per disk, including no-action:
   "p95_read_latency_ms": 1.2, "p95_write_latency_ms": 0.9, "latency_baseline_ms": 1.1,
   "vm_headroom_iops": 4200, "budget_remaining": 47,
   "window_fill_up": 1.0, "window_fill_down": 1.0,
+  "iops_demand_down": 0, "bandwidth_demand_down_iops_equiv": 0, "limiting_resource_down": "",
   "source": "guest"
 }
 ```
@@ -799,12 +1089,48 @@ why the original draft of this example omitted them; a `scale_up`/`scale_down` r
 visible. `window_fill_up`/`window_fill_down` are separate because they're independent windows
 (ADR-010) — a disk can be full on one and not the other.
 
+`iops_demand_down`/`bandwidth_demand_down_iops_equiv`/`limiting_resource_down` (issue #17) are the
+down-window demand breakdown behind `demand_iops` on a `scale_down` record — `demand_iops` there
+equals `EffectiveDemandP95Down`, whichever of the other two is larger; `limiting_resource_down` names
+which one. They read `0`/`""` here, as in this example, whenever the record isn't an underutilized
+verdict at all (the down-window figures are still computed and journaled on every cycle, per §4.5, but
+only a `scale_down` or `Underutilized`-but-suppressed record makes them meaningful).
+
 This is the primary calibration input for the `--dry-run` harness (§8.5) — thresholds are tuned from
 these records, not from reasoning.
 
+**`no_data` / `metrics_stale` / `discovery_stale`** (pre-merge review) are three operationally distinct
+reasons an operator must be able to tell apart from the journal alone — "this disk has never produced a
+sample" is not the same fact as "this disk's data went stale" or "the discovery snapshot itself can no
+longer be trusted," and each implies a different fix. `no_data` and `metrics_stale` are two of Decide's
+own default-branch outcomes (§4.3, and its `Decide` pseudocode's comment above); `discovery_stale` is
+different in kind — it never reaches `Decide` at all, emitted instead by the orchestrator when a whole
+cycle is skipped (`!managedValid` right after a fatal `discover()` error, or the snapshot older than
+`max_discovery_age`, ADR-014/ADR-015). A `discovery_stale` record's `Inputs`/`vm_headroom_iops`/
+`budget_remaining` are honestly zero-valued rather than fabricated: this cycle never called `Decide`, so
+there is no real `Analysis` or guardrail state behind it. Every disk still sitting in the untrusted
+managed set gets its own `discovery_stale` record per skipped cycle — a cycle skipped for stale
+discovery must remain answerable from the journal alone, the same guarantee every other cycle already
+gets.
+
 ### 7.3 Health and alerting
 
-`/healthz` (process alive) and `/readyz` (config valid, discovery succeeded, ≥1 source reachable).
+`/healthz` (process alive) and `/readyz` (config valid, discovery succeeded, ≥1 source reachable, budget
+healthy).
+`source_reachable` is driven by the Sampler's own `Tick()` result, not by Compute API discovery
+succeeding (issue #15) — even in `local` mode these are different dependencies: the guest source reads
+`/proc/diskstats`, which can fail (permissions, a missing disk) independent of whether the Compute API
+is reachable. Conflating the two previously meant a metrics-collection outage never showed up in
+`/readyz` as long as discovery kept succeeding. A successful `Tick()` alone is not sufficient, though
+(issue #4): it also requires the managed set to be non-empty, since a `Tick()` over zero disks trivially
+"succeeds" without having verified anything is actually reachable.
+
+`budget_healthy` (issue #10) is `false` once any durable budget persistence operation
+(reserve/confirm/release) has failed during this process's run — polled once per reconcile cycle from
+`state.Tracker.Healthy()`. Recovery requires a restart (which re-runs `LoadBudget` and the startup
+reconciliation pass below), not a wait, matching how the other three conditions behave. Alert-worthy on
+its own: an operator seeing `/readyz` fail for this reason specifically knows the fix is "restart," not
+"wait for the network to come back."
 
 Alert-worthy: metric staleness beyond 3 publication intervals; write failure rate above threshold;
 change budget exhausted; `VM_IOPS_CAP_REACHED` sustained (actionable — add vCPU); any disk pinned at
@@ -980,11 +1306,48 @@ milestone introduces.
   if restarts prove frequent. **The 24h change budget is not part of this deferral** — see ADR-013:
   the cold-start bound says nothing about total changes across many restarts in a day, so the budget
   counter must be reconstructible from durable storage on startup. M4 (Decider + Guardrails) is not
-  done without it.
+  done without it. Nor is a restart-only guarantee enough on its own (issue #10): a live-actuation
+  process can also crash *between* a write landing and the budget record for it becoming durable, or
+  suffer a mid-run persistence failure with no restart involved at all — see the crash-safety note
+  right below, ADR-013's amendment, and `internal/state`'s `Reserve`/`Confirm`/`Release` intent/result
+  log.
+- **Budget crash-safety (issue #10).** The durable budget is a small intent/result state machine, not
+  a single "record after success" line: `Tracker.ReserveChange` durably reserves a disk's budget slot
+  *before* the write is attempted (`state.StatusPending`), so a crash between the platform confirming a
+  write and this process recording that fact can never silently undercount a real change — the
+  reservation already exists and already counts. `ConfirmChange`/`ReleaseChange` resolve it afterward.
+  A reservation a previous run never resolved survives a restart as `Pending` and is reconciled once,
+  at startup right after the first successful discovery, against a fresh live read of the disk: live
+  current equal to the reservation's target confirms it; equal to its pre-write value releases it;
+  anything else is left pending rather than guessed at. Any persistence failure — at reservation,
+  confirmation, or release — marks `state.Tracker` permanently unhealthy for the rest of the process's
+  life; `Tracker.State` then reports `ChangesInLast24h` as an effectively-unbounded sentinel, so
+  `Decide`'s existing `budget_exhausted` path refuses every further write without the Decider needing a
+  second signal to know about. `Agent.actuate` also checks `Tracker.Healthy()` directly, to avoid even
+  attempting a reservation that would just fail again. `LoadBudget` itself fails closed on corruption: a
+  bad line anywhere but the very last one (which can only be an in-progress append torn by a crash,
+  recoverable by dropping it) refuses to start rather than silently skip the line and understate the
+  count.
+
+  **The same three-way resolution also applies mid-run, immediately after a failed write, not only at
+  startup.** A non-dry-run `actuator.Apply` error does not prove the change never landed — the platform
+  may have applied it before the response reached this process. Releasing on the error alone, as an
+  earlier version of this logic did, violates `Budget.Release`'s own contract (live state verified to
+  still match the reservation's `Before`) and can silently undercount a change that actually happened.
+  `Agent.resolveReservationAfterWriteFailure` re-reads live state the same way startup reconciliation
+  does and resolves from that: live equal to `Target` confirms the reservation *and* adopts the value
+  into `a.managed`/`disk_provisioned_iops` exactly as a verified success would (issue #16/#19 — the next
+  cycle must decide from reality, not a stale `Current`); live equal to `Before` releases it; anything
+  else, including a failed read, leaves it pending until the next restart's reconciliation. A dry run is
+  exempt from this — it never reaches a mutating call that could ambiguously succeed (an independent
+  disk's dry run goes through the platform's own `validateOnly`, contractually non-mutating even on
+  error; a dependent disk's dry run returns before `UpdateDependentDisk` is ever called, ADR-007) — so a
+  dry-run error still releases unconditionally.
 - **Leader election.** Two `fleet` agents on the same project would both act. v1 documents
   "run one"; a lease is the fix if it becomes real.
-- **Absolute latency thresholds.** Relative-to-baseline only in v1; absolute mode is in the config
-  schema but unimplemented.
+- **Absolute latency thresholds.** Relative-to-baseline only in v1; `latency.mode: absolute` is in the
+  config schema's type but rejected by validation (issue #6) — the field decodes, but only "relative"
+  passes `--validate-config`, since no Analyzer code path reads the mode at all yet.
 
 ---
 

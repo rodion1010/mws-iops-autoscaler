@@ -106,5 +106,87 @@ exists on `Sample`) and removes an entire class of "window said full, wasn't rea
        (`internal/config/defaults.go`, `resolve.go`).
 3. [x] Confirm strict decoding rejects `evaluation.collection_interval` as an unknown key
        (`internal/config/load_test.go`).
-4. [ ] When the Analyzer (M3) implements `window_not_full`, compute it from `Sample.Timestamp` span
+4. [x] When the Analyzer (M3) implements `window_not_full`, compute it from `Sample.Timestamp` span
        against `policy.advanced.evaluation.scale_up_window` / `scale_down_window` — not a count.
+
+> **Refined by the M3/M6 implementation (2026-08-29, issue #7 reopened):** two gaps surfaced in the
+> MVP review that this ADR's text didn't anticipate. First, "compute from timestamp span" turned out
+> to need feeding `windowFull` the already-sliced trailing window (`trailingWindow(samples, window)`),
+> not the whole retained buffer — calling it on the full buffer let the minimum-sample-count condition
+> be satisfied by samples outside the window actually being evaluated. Second, span-based readiness
+> alone doesn't reject a large *internal* gap (a missed collection cycle, a temporary outage that later
+> recovered) sitting inside an otherwise span-satisfying window — `windowFull` now also checks that no
+> two consecutive samples inside the window are farther apart than a new `EvaluationPolicy.MaxSampleGap`.
+> Separately, the ring-buffer capacity formula this ADR's own text estimates as "the longest configured
+> window divided by the collection interval" (§context, `NewSampler`'s own doc comment) has an
+> off-by-one: N samples at exact cadence span only `(N-1) × interval` end to end, so a
+> `floor(window/interval)`-sized buffer is always one sample short of ever spanning the configured
+> window — with the default 30-minute scale-down window and a 1-minute cadence, a capacity-30 buffer
+> could span at most 29 minutes, permanently blocking `WindowFullDown`. `config.ResolvedConfig.SamplerCapacity()`
+> now computes `ceil(window/interval) + 1 + slack` instead. See `internal/analyzer/analyzer.go`'s
+> `windowFull`/`trailingWindow`, `internal/config/resolve.go`'s `SamplerCapacity`, and ADR-014 (the
+> related `now`-driven staleness work from the same review pass) for the current state.
+
+> **Refined again (2026-08-29, pre-merge review): the ring-buffer off-by-one had a sibling in
+> `trailingWindow` itself.** `trailingWindow` trimmed every sample strictly before `cutoff =
+> newest.Timestamp - window`, keeping only samples with `Timestamp >= cutoff`. That trim's own returned
+> span (`newest.Timestamp - samples[0].Timestamp`) is mathematically bounded by `window`, never above
+> it — and cutoff, computed from real collection timestamps, essentially never lands exactly on an
+> existing sample (ordinary scheduler jitter, not a fault). So the first sample a strict trim keeps is
+> almost always some small delta *after* cutoff, making the trimmed span some small delta *under*
+> `window`, forever. `windowFull`'s own `span >= window` check — the entire reason `trailingWindow` gets
+> called ahead of it — could then essentially never pass on real, jittered data, the same "buffer that
+> can never fill" deadlock this ADR's first refinement fixed for the ring-buffer capacity formula, one
+> layer downstream of it.
+>
+> `trailingWindow` now reaches one sample further back than the strict trim — but only when the
+> strictly-trimmed span itself already falls short of `window`; if the natural trim already spans a full
+> window on its own, nothing needs bridging, and reaching back anyway would risk pulling in a
+> predecessor from the far side of an arbitrarily large gap (stale pre-outage history, exactly what the
+> refinement directly above this one exists to keep out) for no benefit. When a predecessor genuinely is
+> needed, `windowFull`'s existing `MaxSampleGap` check remains an entirely independent safeguard: a
+> predecessor that turns out to sit across a real discontinuity, not ordinary one-interval jitter, still
+> fails that check exactly as it always did.
+
+## Action Items (continued)
+
+5. [x] `internal/analyzer/analyzer.go`: `trailingWindow` reaches one sample past a strict cutoff trim,
+       conditioned on the natural trim's own span falling short of `window`.
+6. [x] Tests: a jittered-but-continuous 31-sample series proves `trailingWindow`'s returned span always
+       reaches `window` and `windowFull` reads it as full; a clean post-outage recovery segment whose
+       natural span already reaches `window` proves the stale pre-outage predecessor is never pulled in.
+
+> **Refined a third time (2026-08-29, pre-merge review): `validateSamplerCapacity` checks the wrong
+> window, with a formula that structurally cannot check the right one.** It calls `SamplerCapacity()`,
+> which sizes ONE shared ring buffer against only the single *longest* `scale_down_window` across every
+> policy — correct for its own purpose (buffer sizing), but `Validate` then also used its result as a
+> stand-in for "can every configured window ever fill," which it cannot answer. `collection_interval:
+> 20m` against the default `scale_up_window: 5m` (with the default `scale_down_window: 30m` left alone)
+> passed validation: `SamplerCapacity()` computes `ceil(30m/20m)+1+2 = 5`, comfortably above the 3-sample
+> floor — even though at most one real sample can ever fall inside a 5-minute trailing span when samples
+> are 20 minutes apart, so `WindowFullUp` specifically could never become true for that disk, no matter
+> how long the agent ran.
+>
+> The deeper issue is that `ceil(window/interval)` — the term both `SamplerCapacity` and a naive
+> per-window reuse of the same formula would rely on — is mathematically incapable of expressing "this
+> interval is too long relative to this window" at all: `ceil()` of a positive ratio is always ≥ 1
+> regardless of how disproportionate the two are, so that term alone can never drive the formula's
+> output below `1+1+slack`. The correct test uses `floor`, not `ceil`: at exact cadence, a trailing
+> window of span `w` can contain more than one real sample only if at least one full `interval` fits
+> inside it, i.e. `interval <= window`. New `validateCollectionIntervalAgainstWindows` checks exactly
+> that, once per `scale_up_window`/`scale_down_window`, on the VM policy and every per-disk override —
+> independent of, and a genuine complement to, `validateSamplerCapacity`, which still guards the buffer
+> itself against the ring-buffer off-by-one this ADR's first refinement fixed.
+
+## Action Items (continued, second refinement)
+
+7. [x] `internal/config/validate.go`: `validateCollectionIntervalAgainstWindows` — floor-based, checked
+       against every individual window on the VM policy and every per-disk override, wired into
+       `Validate` alongside (not instead of) `validateSamplerCapacity`.
+8. [x] `docs/configuration.md` §8's validation-rules list synced.
+9. [x] Tests: a config whose `SamplerCapacity()`/`validateSamplerCapacity()` both pass while a shorter
+       window is still numerically unreachable; the same failure surfacing through a per-disk override
+       when the VM policy's own windows are fine; `interval == window` (not longer) accepted as the
+       boundary case. The pre-existing "long collection_interval... is still valid" test — written before
+       this refinement, under the same mistaken assumption `SamplerCapacity`'s output being large enough
+       was sufficient — updated to assert the rejection instead.

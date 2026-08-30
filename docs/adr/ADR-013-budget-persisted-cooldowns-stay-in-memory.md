@@ -103,7 +103,82 @@ nothing else bounds its loss; cooldowns don't, once validated symmetrically.
 1. [x] `internal/config/validate.go`: reject `cooldown.scale_down > scale_down_window`, symmetric to
        the existing `cooldown.scale_up` check — this is what makes the in-memory-cooldown argument
        unconditionally true rather than accidentally true for the current default parameter set.
-2. [ ] M4 (Decider + Guardrails): the 24h budget counter must be reconstructible from durable storage
+2. [x] M4 (Decider + Guardrails): the 24h budget counter must be reconstructible from durable storage
        on startup — no new change may be permitted before that reconstruction happens for the disk
        being evaluated.
 3. [x] `docs/design.md` §9.4 corrected: budget persistence is no longer a deferred decision.
+
+> **Refined by the M6 implementation (2026-08-29, issue #10 reopened):** "reconstructible on startup"
+> turned out to be necessary but not sufficient once live actuation existed. Two gaps surfaced in the
+> MVP review that this ADR's original text didn't anticipate. First, the original design recorded a
+> change event only *after* `Actuator.Apply` returned successfully — a crash between the platform
+> confirming the write and that record becoming durable silently undercounted a real, applied change
+> against the hard cap, with nothing left on disk to reconstruct it from on the next restart. Second, a
+> persistence failure mid-run (not at startup at all — e.g. the volume holding the state directory
+> going away) was only logged; every subsequent write stayed enabled with no durable record backing it.
+>
+> `internal/state.Budget` is now a small intent/result state machine, not an append-only list of
+> successes: `Reserve` durably records a change as `Pending` *before* the write is attempted (so the
+> budget slot is consumed the instant the attempt begins, not after it's confirmed to have worked), and
+> `Confirm`/`Release` resolve it afterward — `Pending` counts against the budget exactly like
+> `Confirmed` does, since undercounting is the unsafe direction and only a conclusively-verified
+> non-write (`Released`) should ever stop counting. A `Pending` reservation a previous run never
+> resolved survives a restart and is reconciled once at startup, right after the first successful
+> discovery, against a fresh live read of the disk — never against this process's own possibly-stale
+> `Decision.Current` snapshot. Any persistence failure, at any point, marks `state.Tracker` permanently
+> unhealthy for the rest of the process's life (`Tracker.State` then reports the budget as exhausted via
+> the existing `budget_exhausted` guardrail path, and `Agent.actuate` refuses to even attempt a further
+> reservation), closing the mid-run gap the same way. `LoadBudget` also now fails closed on corruption
+> (previously a corrupt line anywhere was silently skipped, which can only ever understate the true
+> count) while still recovering cleanly from a torn tail write, the one shape of corruption a crash
+> mid-append can actually produce (the fsync in `append()` guarantees every line before the last one is
+> already durable). See `docs/design.md` §9.4's "Budget crash-safety" note and
+> `internal/state/budget.go`'s own doc comments for the current design.
+
+4. [x] `internal/state/budget.go`: `Reserve`/`Confirm`/`Release`/`Pending` intent/result log;
+       `LoadBudget` fails closed on mid-file corruption, recovers a torn tail write; `Compact` never
+       drops a still-pending reservation regardless of age; both writes and the compacted rewrite fsync
+       their containing directory.
+5. [x] `internal/state/tracker.go`: `Tracker.Healthy()`/sticky `budgetHealthy`; `State()` reports the
+       budget exhausted once unhealthy.
+6. [x] `cmd/mws-iops-autoscaler/agent.go`: `actuate()` reserves before the write and
+       confirms/releases after; a new `reconcilePendingBudget` resolves leftover reservations once at
+       startup; `Tracker.Healthy()` checked before ever reaching the Actuator.
+7. [x] `internal/health`/`internal/telemetry`: `budget_healthy` exposed on both `/readyz` and
+       `/metrics`.
+8. [x] Tests: reload with a pending reservation, corruption in the middle (rejected) vs. a torn tail
+       (recovered), compaction never dropping a pending entry, a Reserve/Confirm failure flipping
+       `Healthy()` false and forcing `budget_exhausted`, and Agent-level reconciliation for all four
+       outcomes (confirmed, released, ambiguous-stays-pending, disk-no-longer-managed-stays-pending).
+
+> **Refined again (2026-08-29, pre-merge review): a write's own error is not proof it never landed.**
+> `actuate()`'s error branch released the reservation unconditionally — the comment reasoning at the
+> time claimed this was "safe without a fresh read: an actuator error means Apply's own pre-write
+> checks already refused before calling the platform, or the platform call itself failed outright —
+> neither leaves live state at `d.Target`." That reasoning is false for the one case it matters most:
+> the actual mutating call (`UpdateDisk`/`UpdateVirtualMachine`) can fail on the client side — timeout,
+> connection reset, a lost response — *after* the platform has already applied it server-side. Releasing
+> in that case violates `Budget.Release`'s own documented precondition (live state verified to still
+> match `Before`) and silently undercounts a real, applied change against the hard cap — reopening
+> exactly the gap `Reserve`-before-write exists to close, just moved from "process crash" to "any failed
+> write call."
+>
+> `Agent.resolveReservationAfterWriteFailure` now applies startup reconciliation's own three-way
+> resolution mid-run, immediately after any non-dry-run write error, instead of trusting the error:
+> live current equal to `Target` confirms the reservation and adopts the value into `a.managed`/
+> `disk_provisioned_iops` exactly as a verified success would (the next cycle must decide from reality,
+> not a stale `Current`); equal to `Before` releases it — the one outcome where `Release`'s contract is
+> actually satisfied; anything else, including a failed live read itself, leaves it pending until the
+> next restart's reconciliation, the same fail-closed default `reconcilePendingBudget`'s own `default:`
+> case already uses. A dry run is deliberately exempt and still releases unconditionally on error: an
+> independent disk's dry run goes through the platform's own `validateOnly`, which by contract never
+> mutates regardless of whether the response is lost, and a dependent disk's dry run returns before
+> `UpdateDependentDisk` is ever called at all (ADR-007 — no server-side dry run exists for that path) —
+> neither can produce the ambiguity this refinement exists to close.
+
+9. [x] `cmd/mws-iops-autoscaler/agent.go`: `resolveReservationAfterWriteFailure` resolves a real write's
+       reservation from a fresh live read after any error, reusing `liveCurrentIOPS`; dry-run errors
+       still release unconditionally.
+10. [x] Tests: a failed write whose live state matches `Before` (released), matches `Target` (confirmed
+        and adopted despite the error), matches neither (stays pending), and a failed live-state read
+        itself (stays pending) — plus a dedicated dry-run-error-always-releases test.

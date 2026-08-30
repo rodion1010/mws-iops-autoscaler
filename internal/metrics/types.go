@@ -43,6 +43,13 @@ type DiskRef struct {
 	DiskID     string // cloud resource name — used for API writes, never written in config
 	VMName     string // (VMName, DeviceName) is the fleet-mode key
 	DeviceName string // unprefixed: "datadisk"
+
+	// IncarnationID is compute.StorageDisk.IncarnationID (metadata.id),
+	// threaded through so the Sampler's own ring buffer can be keyed by
+	// IdentityKey() rather than DiskID alone (pre-merge review: DiskName
+	// is not a safe long-term identity — it can be reused by an
+	// unrelated disk created after the original was deleted).
+	IncarnationID string
 }
 
 // GuestPath is where this disk appears on the guest filesystem in `local`
@@ -55,6 +62,14 @@ func (d DiskRef) GuestPath() string {
 // metrics (CLAUDE.md, "Prometheus export").
 func (d DiskRef) MetricLabel() string {
 	return "mws-" + d.DeviceName
+}
+
+// IdentityKey is this DiskRef's long-term state identity — see
+// compute.StorageDisk.IdentityKey's own comment for why DiskID alone is
+// unsafe for this purpose. The Sampler uses this, not DiskID, as its ring
+// buffer's map key.
+func (d DiskRef) IdentityKey() string {
+	return d.DiskID + "\x00" + d.IncarnationID
 }
 
 // Sample is one interval's observation — an average, not a percentile.

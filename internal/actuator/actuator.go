@@ -62,17 +62,23 @@ func (a *ComputeActuator) Apply(ctx context.Context, d decider.Decision, target 
 
 	switch target.Class {
 	case compute.ClassIndependent:
-		applied, err := compute.UpdateIndependentDiskIOPS(ctx, a.Client, target.DiskName, d.Target, dryRun, idempotencyKey)
+		// d.Current is the live value Decide computed d.Target relative to
+		// — the write path re-verifies it against a fresh read immediately
+		// before writing and aborts on any mismatch, in either direction
+		// (issue #16).
+		applied, err := compute.UpdateIndependentDiskIOPS(ctx, a.Client, target.DiskName, d.Current, d.Target, dryRun, idempotencyKey)
 		if err != nil {
 			return Applied{}, err
 		}
 		return Applied{DiskID: d.DiskID, IOPS: applied}, nil
 
 	case compute.ClassDependent:
-		if dryRun {
-			return Applied{DiskID: d.DiskID, IOPS: d.Target}, nil
-		}
-		applied, err := compute.UpdateDependentDiskIOPS(ctx, a.Client, target.VMName, target.DeviceName, d.Target, idempotencyKey)
+		// dryRun is threaded all the way into UpdateDependentDiskIOPS
+		// rather than short-circuited here (issue #16) — a dry run must
+		// still exercise the fresh-read/conflict/direction checks below,
+		// even though (ADR-007) there is no server-side validateOnly for
+		// this path to also confirm against.
+		applied, err := compute.UpdateDependentDiskIOPS(ctx, a.Client, target.VMName, target.DeviceName, d.Current, d.Target, dryRun, idempotencyKey)
 		if err != nil {
 			return Applied{}, err
 		}

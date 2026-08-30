@@ -48,6 +48,9 @@ func (f *fakeClient) UpdateIndependentDisk(_ context.Context, req compute.Indepe
 	if !ok {
 		return nil, errors.New("fake: disk not found")
 	}
+	if req.Etag == "" {
+		return nil, errors.New("fake: empty etag")
+	}
 	if req.ValidateOnly {
 		return d, nil
 	}
@@ -84,11 +87,11 @@ func (f *fakeClient) UpdateDependentDisk(_ context.Context, req compute.Dependen
 
 func TestApply_independentDiskWritesAndVerifies(t *testing.T) {
 	c := &fakeClient{disks: map[string]*compute.Disk{
-		"datadisk-res": {Name: "datadisk-res", SpecIOPS: 1000},
+		"datadisk-res": {Name: "datadisk-res", SpecIOPS: 1000, Etag: "etag-1"},
 	}}
 	a := NewComputeActuator(c)
 
-	d := decider.Decision{DiskID: "datadisk", Action: decider.ActionScaleUp, Target: 3000}
+	d := decider.Decision{DiskID: "datadisk", Action: decider.ActionScaleUp, Current: 1000, Target: 3000}
 	target := Target{DiskName: "datadisk-res", Class: compute.ClassIndependent}
 
 	got, err := a.Apply(context.Background(), d, target, false, "idem-1")
@@ -105,11 +108,11 @@ func TestApply_independentDiskWritesAndVerifies(t *testing.T) {
 
 func TestApply_independentDryRunDoesNotMutate(t *testing.T) {
 	c := &fakeClient{disks: map[string]*compute.Disk{
-		"datadisk-res": {Name: "datadisk-res", SpecIOPS: 1000},
+		"datadisk-res": {Name: "datadisk-res", SpecIOPS: 1000, Etag: "etag-1"},
 	}}
 	a := NewComputeActuator(c)
 
-	d := decider.Decision{DiskID: "datadisk", Action: decider.ActionScaleUp, Target: 3000}
+	d := decider.Decision{DiskID: "datadisk", Action: decider.ActionScaleUp, Current: 1000, Target: 3000}
 	target := Target{DiskName: "datadisk-res", Class: compute.ClassIndependent}
 
 	got, err := a.Apply(context.Background(), d, target, true, "")
@@ -135,7 +138,7 @@ func TestApply_dependentDiskWrites(t *testing.T) {
 	}}
 	a := NewComputeActuator(c)
 
-	d := decider.Decision{DiskID: "bootdisk", Action: decider.ActionScaleUp, Target: 2000}
+	d := decider.Decision{DiskID: "bootdisk", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	target := Target{VMName: "vm-1", DeviceName: "bootdisk", Class: compute.ClassDependent}
 
 	got, err := a.Apply(context.Background(), d, target, false, "idem-1")
@@ -151,14 +154,22 @@ func TestApply_dependentDryRunNeverCallsWriteEndpoint(t *testing.T) {
 	// ADR-007: no server-side dry-run exists for the dependent path.
 	// dependentErr proves the write endpoint was never even called — if
 	// Apply called it, this test would fail with that error instead of
-	// succeeding.
+	// succeeding. The VM still needs a real Disks entry, though (issue
+	// #16): a dry run now exercises the same fresh-read/conflict checks a
+	// real write would, which requires finding the target device on the
+	// re-read VM.
 	c := &fakeClient{
-		vms:          map[string]*compute.VirtualMachine{"vm-1": {Name: "vm-1", Etag: "etag-1"}},
+		vms: map[string]*compute.VirtualMachine{"vm-1": {
+			Name: "vm-1", Etag: "etag-1",
+			Disks: []compute.StorageDisk{
+				{Alias: "bootdisk", DeviceName: "bootdisk", Class: compute.ClassDependent, IOPS: 1000},
+			},
+		}},
 		dependentErr: errors.New("fake: the write endpoint must not be called during a dry run"),
 	}
 	a := NewComputeActuator(c)
 
-	d := decider.Decision{DiskID: "bootdisk", Action: decider.ActionScaleUp, Target: 2000}
+	d := decider.Decision{DiskID: "bootdisk", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	target := Target{VMName: "vm-1", DeviceName: "bootdisk", Class: compute.ClassDependent}
 
 	got, err := a.Apply(context.Background(), d, target, true, "")
@@ -185,12 +196,12 @@ func TestApply_refusesNonScaleActions(t *testing.T) {
 }
 
 func TestApply_appliedMismatchIsFailure(t *testing.T) {
-	c := &fakeClient{disks: map[string]*compute.Disk{"d1-res": {Name: "d1-res", SpecIOPS: 1000}}}
+	c := &fakeClient{disks: map[string]*compute.Disk{"d1-res": {Name: "d1-res", SpecIOPS: 1000, Etag: "etag-1"}}}
 	wrong := int64(2500)
 	c.independentApplied = &wrong
 	a := NewComputeActuator(c)
 
-	d := decider.Decision{DiskID: "d1", Action: decider.ActionScaleUp, Target: 3000}
+	d := decider.Decision{DiskID: "d1", Action: decider.ActionScaleUp, Current: 1000, Target: 3000}
 	target := Target{DiskName: "d1-res", Class: compute.ClassIndependent}
 
 	if _, err := a.Apply(context.Background(), d, target, false, ""); err == nil {

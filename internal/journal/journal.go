@@ -51,6 +51,16 @@ type Record struct {
 	WindowFillUp    float64 `json:"window_fill_up"`
 	WindowFillDown  float64 `json:"window_fill_down"`
 
+	// IOPSDemandDown/BandwidthDemandDownIOPSEquiv/LimitingResourceDown are
+	// the down-window demand breakdown (issue #17) — DemandIOPS above is
+	// whichever one of these two actually drove the target (or a
+	// scale-up demand figure entirely, for a ScaleUp record); these three
+	// exist so a ScaleDown/Underutilized record's journal entry can show
+	// *why* — which resource was binding — not just the final number.
+	IOPSDemandDown               float64 `json:"iops_demand_down"`
+	BandwidthDemandDownIOPSEquiv float64 `json:"bandwidth_demand_down_iops_equiv"`
+	LimitingResourceDown         string  `json:"limiting_resource_down"` // "iops" | "bandwidth"
+
 	Source string `json:"source"` // guest | platform
 }
 
@@ -83,6 +93,10 @@ func NewRecord(now time.Time, vmName, class string, d decider.Decision) Record {
 		BudgetRemaining: d.BudgetRemaining,
 		WindowFillUp:    a.WindowFillUpRatio,
 		WindowFillDown:  a.WindowFillDownRatio,
+
+		IOPSDemandDown:               a.IOPSP95Down,
+		BandwidthDemandDownIOPSEquiv: a.BandwidthP95DownIOPSEquiv,
+		LimitingResourceDown:         a.LimitingResourceDown,
 
 		Source: string(a.Source),
 	}

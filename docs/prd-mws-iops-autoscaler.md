@@ -100,6 +100,19 @@ its VM cannot be modified through the disk API at all.
 - [ ] The class determines only the write path, never whether a disk is in scope
 - [ ] The classification appears in logs, the dry-run report, and the exported metrics
 - [ ] A disk that changes class between discovery cycles is reclassified, not cached forever
+- [ ] A disk whose class resolves to neither independent nor dependent (`disk.ref`/`disk.spec` both
+      absent or both present), whose disk resource identity is empty, or whose live attachment shares
+      a resource identity or `device_name` with another attachment on the same VM, is excluded from
+      the managed set with a reason — never guessed at or defaulted to one class arbitrarily (issue
+      #4). This is a live-discovery-time check, distinct from `--validate-config`'s own
+      duplicate-`device_name` rejection in US-004 below, which only catches a duplicate already present
+      in the config file itself
+- [ ] A disk whose alias is empty, or shares an alias with another attachment on the same VM, is
+      excluded from the managed set the same way (issue #20) — alias is the dependent write path's own
+      join key (FR-15e), so a colliding one is unsafe to offer as a management target even before any
+      write is attempted
+- [ ] A disk whose current provisioned IOPS reads as `<= 0` is excluded from the managed set — an
+      impossible value is never treated as a real current limit (issue #4)
 - [ ] Typecheck/lint passes
 
 ### US-004: Disk selection strategies
@@ -204,6 +217,10 @@ single noisy sample cannot trigger a change.
       depth. Which method produced a given verdict is recorded, not silently uniform (ADR-011)
 - [ ] Refuses to emit a verdict until the window holds a minimum sample count
 - [ ] Window state survives nothing — a restart starts a fresh window and scales nothing until full
+- [ ] The rolling window is keyed on the disk's cloud resource name **plus** its platform-assigned
+      `metadata.id`, not the name alone (pre-merge review) — a disk deleted and recreated under the
+      identical name (an independent disk's name is user-settable) must start with an empty window,
+      never one seeded from an unrelated resource that happens to share a name
 - [ ] Typecheck/lint passes
 
 ### US-008: Scale-up decision
@@ -228,6 +245,12 @@ spikes do not throttle.
       be scaled up
 - [ ] Target is computed from estimated demand: `demand / target.scale_up_utilization`, not by
       stepping a fixed percentage
+- [ ] The open-workload estimate (`served + queue growth rate`) is only used when the queue growth
+      rate is confirmed ops-denominated (issue #18) — `local`'s queue metric is ops, `fleet`'s is
+      bytes (`queue_depth_threshold` field note, §7), and the two must never be summed as if they
+      were the same unit merely because both are numbers; an unconfirmed rate falls back to the
+      closed-workload (latency-ratio) estimate, or to no estimate at all, never to a bytes-inflated
+      demand that guardrails would clamp straight to the ceiling
 - [ ] Rounded to a 100-IOPS multiple and clamped by `max_scale_up_ratio`
 - [ ] Never exceeds `min(10000, 3000 × vcpuCount)` — the platform does not enforce this (FR-15c)
 - [ ] Respects cooldown since the last change
@@ -254,8 +277,19 @@ unused headroom.
 **Acceptance Criteria:**
 - [ ] Triggers on sustained low demand over `scale_down_window`, with every saturation signal quiet:
       queue low, latency at baseline, no throttling
+- [ ] Also requires both IOPS and bandwidth utilization sustained below `saturation.utilization_threshold`
+      (pre-merge review) — queue depth, latency, and throttle detection are all IOPS-denominated and
+      blind on their own to a large-block, low-ops/s workload saturating its bandwidth ceiling; without
+      this, such a disk could trigger scale-down while still genuinely bandwidth-bound. Mirrors the
+      saturation gate's own either-resource check (ADR-008), inverted: quiet requires *both* resources
+      below threshold, not merely "not both at or above"
 - [ ] Target is computed as `p95_demand / target.scale_down_utilization`, deliberately leaving
       headroom so the new limit does not sit flush against current demand
+- [ ] `p95_demand` is bandwidth-aware (issue #17): the p95, over `scale_down_window`, of each
+      sample's own `max(ops, bandwidth ÷ bytesPerIOPS)` — not the max of two independently-computed
+      percentiles — so a large-block, low-ops/s workload's target still retains headroom against its
+      actual bandwidth need, not just its op count (ADR-008's fixed IOPS-to-bandwidth ratio applies to
+      scale-down sizing exactly as it already does to the saturation gate)
 - [ ] Rounded to a 100-IOPS multiple and clamped by `max_scale_down_ratio`
 - [ ] Never goes below 1000 IOPS
 - [ ] Down-step and down-cooldown are independently configurable from up
@@ -268,8 +302,12 @@ unused headroom.
 - [ ] Uses the SDK's `DiskSugared.UpdateDisk` — it already targets
       `POST .../disks/{disk}?updateOnly=true`, so the agent never hand-rolls the HTTP call and can
       never accidentally create a disk
-- [ ] Sends only `spec.iops`; every other field left unset (`optional.Optional` makes this explicit)
+- [ ] Sends only `spec.iops` and `metadata.etag`; every other field left unset (`optional.Optional`
+      makes this explicit)
 - [ ] Sets `IdempotencyKey` on every write so a retry after a mid-flight failure cannot double-apply
+- [ ] Re-reads the disk immediately before writing; refuses to write with an empty etag; aborts —
+      never forces — when live `spec.iops` differs from the value the decision was computed from, in
+      either direction (issue #16)
 - [ ] Verifies the applied value from the response and reconciles against what was requested
 - [ ] Failures are retried with backoff and never leave in-memory state claiming success
 - [ ] Typecheck/lint passes
@@ -285,7 +323,17 @@ unused headroom.
       entirely (ADR-009)
 - [ ] Sends `etag` and an idempotency key; refuses to write with an empty etag; an etag conflict
       aborts and retries next cycle, never forces
+- [ ] Before building the write, checks the target disk's live IOPS (from the same fresh VM read)
+      against the value the decision was computed from; aborts — never forces — on a mismatch or a
+      target that would cross the live value in the wrong direction (issue #16)
 - [ ] Verifies the applied value from the response
+- [ ] A conflict on either disk class forces an immediate rediscovery rather than waiting for the next
+      scheduled cycle, and a successful write's verified value is adopted into the agent's own
+      current-value snapshot immediately (issue #16)
+- [ ] That forced rediscovery ends the entire in-progress reconcile cycle, not just the one disk's
+      write — every other disk's decision this cycle was computed from the same managed/pool snapshot
+      the rediscovery just replaced, so none of them may still be acted on once it has (pre-merge
+      review)
 - [ ] Covered by a concurrent-modification test
 - [ ] Typecheck/lint passes
 
@@ -295,11 +343,30 @@ unused headroom.
 **Acceptance Criteria:**
 - [ ] Per-disk cooldown enforced separately for up and down
 - [ ] Rolling 24 h change budget per disk; exhausting it logs a warning and blocks further changes
+- [ ] Cooldown and the change budget key on the disk's cloud resource name **plus** its platform-
+      assigned `metadata.id` (pre-merge review), not the name alone — an independent disk's name is
+      user-settable, so deleting one and creating a new disk under the identical name is an ordinary
+      infra-as-code "replace" that must not inherit the previous disk's cooldown or budget history.
+      Sample history (US-007) is subject to the identical requirement
 - [ ] The budget is a genuine hard cap: its per-disk change record survives a process restart, so
       restarting cannot be used — deliberately or by routine redeploys/crash loops — to bypass it.
       Cooldowns may reset in memory on restart; this is safe because `--validate-config` requires
       each cooldown ≤ its paired window, so the cold-start wait after a restart is never shorter than
       the cooldown it forgot (ADR-013)
+- [ ] The hard cap holds under a crash mid-write, not just across a clean restart: the budget slot is
+      durably reserved before a write is attempted, not only recorded after one succeeds, so a crash
+      between the platform confirming a change and this process recording that fact can never silently
+      undercount it (ADR-013's M6 amendment, issue #10)
+- [ ] A budget persistence failure at any point — reservation, confirmation, or release, not only at
+      startup — permanently disables further writes for that process's lifetime and is surfaced on
+      `/readyz` and `/metrics`, not merely logged (issue #10)
+- [ ] A write attempt's own error is never sufficient by itself to release its budget reservation — the
+      error does not prove the change never landed (the platform may have applied it before the
+      response reached the agent). The agent must re-read live state and resolve the reservation from
+      that: matches the pre-write value → release; matches the intended target → confirm (and adopt the
+      value the same way a verified success would); anything else, including a failed read, stays
+      pending until the next restart's reconciliation. A dry run is exempt — it never reaches a call
+      that could ambiguously succeed, so its error always releases
 - [ ] Budget and cooldowns are configurable
 - [ ] Typecheck/lint passes
 
@@ -327,6 +394,15 @@ unused headroom.
 - [ ] Structured logs for every decision, including the no-change ones and the reason
 - [ ] Exposes its own Prometheus metrics: current/target IOPS per disk, decisions by outcome,
       API errors, window fill state
+- [ ] Current (provisioned) and target (proposed) IOPS are separate metrics (issue #19) — the
+      provisioned gauge reflects only state a write has verified landed, never a decision alone, so a
+      dry run or a failed write never reports a change that did not happen
+- [ ] A VM-wide gauge (e.g. the VM IOPS-cap-reached signal) is set once per reconcile from an
+      aggregate across every disk on that VM, never per-disk inside the per-disk decision loop — the
+      last disk processed must not silently override an earlier disk's result (issue #19)
+- [ ] A metric distinguishing mutually-exclusive states (e.g. which metric source is active) always
+      updates every state's series together, so switching state cannot leave a stale series behind
+      claiming to still be active (issue #19)
 - [ ] Every applied change is logged at info level with before/after values
 - [ ] Typecheck/lint passes
 
@@ -378,6 +454,11 @@ needs, per mode, so that I do not have to grant it broad rights.
   `explicit <list>`.
 - FR-5: Discovery must run continuously on an interval, so disks attached after startup enter
   management without a restart.
+- FR-5a: The agent must never decide or write against a managed snapshot a fatal discovery error has
+  invalidated (including an unmatched `disks.selected` device_name) — invalidated the instant the error
+  happens, not only once the snapshot's age exceeds `max_discovery_age` (issue #15's time-based bound
+  remains as an independent, complementary guard for discovery having simply stopped running at all;
+  pre-merge review).
 
 **Metrics**
 - FR-6: In `local` mode the agent must prefer `/proc/diskstats` over the monitoring API.
@@ -414,6 +495,10 @@ needs, per mode, so that I do not have to grant it broad rights.
   minimal partial body — every current alias present (an omitted collection element is deleted by
   Upsert), carrying nothing but `name` except the target alias's new `iops` — with `etag` and an
   idempotency key (ADR-009). Independent disks use the single-field disk path (FR-15).
+- FR-15e: Before that write, the agent must validate the fresh attachment list itself (issue #20) —
+  every alias non-empty and unique, and exactly one attachment matching the requested `device_name` —
+  and return a descriptive error without calling the write at all if either fails, rather than
+  resending an ambiguous or malformed collection.
 - FR-15b: A disk **owned** by its VM (created inside the VM spec; `metadata.usages` contains `own`)
   cannot be modified through the disk API — the platform returns `403` naming the VM resource. This
   is an ownership constraint, not a permissions one: an independent disk attached by `ref` to the

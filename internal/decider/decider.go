@@ -26,14 +26,26 @@ const billingStepIOPS = 100
 // internal/analyzer's constants.
 const queueGrowthThreshold = 0.01
 
-// PolicyDecider implements Decider. It holds no state of its own — every
+// PolicyDecider implements Decider. It holds no per-decision state — every
 // input Decide needs (current value, cooldown/budget state, wall clock) is
-// an explicit parameter, so it is safe to share and trivial to test.
-type PolicyDecider struct{}
+// an explicit parameter, so it is safe to share and trivial to test. The
+// one thing it does hold is allowScaleDown: a build-time capability, not a
+// per-call policy value, deliberately (issue #14) — Phase 1 is scale-up
+// only (PRD §6), and that must not depend on any user-tunable threshold
+// happening to never trigger scale-down. Phase 3 flips exactly this one
+// constructor argument; nothing else about Decide changes.
+type PolicyDecider struct {
+	allowScaleDown bool
+}
 
-func NewPolicyDecider() *PolicyDecider { return &PolicyDecider{} }
+// NewPolicyDecider is the single, reviewable point where bidirectional
+// actuation gets enabled (issue #14's "one explicit, reviewable enablement
+// point"). Phase 1 callers must pass false.
+func NewPolicyDecider(allowScaleDown bool) *PolicyDecider {
+	return &PolicyDecider{allowScaleDown: allowScaleDown}
+}
 
-func (PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision {
+func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision {
 	base := Decision{
 		DiskID:  diskID,
 		Current: current,
@@ -79,11 +91,28 @@ func (PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, v
 		return withReason(base, ActionScaleUp, "saturated")
 
 	case a.Underutilized:
+		// Checked first, before cooldown/guardrails: with the shipped Phase
+		// 1 configuration, a quiet full down-window must never reach any
+		// write path, full stop — not "reach it but then get clamped by
+		// something else." The candidate demand is still computed and
+		// surfaced (issue #14: "optionally retaining the candidate
+		// recommendation for observability") so the journal/metrics show
+		// what *would* have happened, without it ever becoming a target.
+		// Demand is the effective (IOPS-or-bandwidth, whichever binds)
+		// figure, not IOPSP95Down alone (issue #17) — NBS-PL2 ties
+		// provisioned IOPS and bandwidth at a fixed ratio, so a target
+		// sized from served ops/s alone can undersize the bandwidth
+		// ceiling a large-block, low-ops/s workload still needs.
+		// a.EffectiveDemandP95Down is already the properly-aligned
+		// per-sample max, not a max of two separately-computed percentiles.
+		base.Demand = a.EffectiveDemandP95Down
+		if !pd.allowScaleDown {
+			return withReason(base, ActionNoAction, "scale_down_disabled")
+		}
 		if now.Sub(state.LastChangeDown) < p.CooldownScaleDown {
 			return withReason(base, ActionNoAction, "cooldown_scale_down")
 		}
-		base.Demand = a.IOPSP95Down
-		raw := a.IOPSP95Down / p.ScaleDownUtilization
+		raw := a.EffectiveDemandP95Down / p.ScaleDownUtilization
 		target, changed := guardrails(raw, current, ceiling, p.MinIOPS, p.MaxScaleDownRatio, p.MinChangeIOPS)
 		if !changed || target >= current {
 			return withReason(base, ActionNoAction, "target_not_below_current")
@@ -95,7 +124,30 @@ func (PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, v
 		return withReason(base, ActionScaleDown, "underutilized")
 
 	default:
-		return withReason(base, ActionNoAction, "no_signal")
+		// Distinguish *why* neither verdict fired (issue #15, extended
+		// pre-merge review) — "no_signal" alone conflated four very
+		// different situations in the journal: no sample has ever arrived
+		// for this disk at all, data arrived before but is now too old to
+		// trust, a window that hasn't accumulated enough history yet, and
+		// a genuinely quiet-but-fresh-and-full disk with nothing to do.
+		// The first three are transient/operational; only the fourth is
+		// the disk actually behaving. no_data is checked first — a.Fresh
+		// is false (zero value) in that case too, so ordering matters:
+		// without this case ahead of it, a disk that has simply never
+		// been sampled would misreport as metrics_stale, implying data
+		// once flowed and has since gone stale, which is a different
+		// operational fact (and a different fix) than never having
+		// received any data at all.
+		switch {
+		case !a.HasData:
+			return withReason(base, ActionNoAction, "no_data")
+		case !a.Fresh:
+			return withReason(base, ActionNoAction, "metrics_stale")
+		case !a.WindowFullUp && !a.WindowFullDown:
+			return withReason(base, ActionNoAction, "window_not_full")
+		default:
+			return withReason(base, ActionNoAction, "no_signal")
+		}
 	}
 }
 
@@ -128,7 +180,15 @@ func headroomCeiling(vm VMState, p EffectivePolicy) int64 {
 // amendment note). It stays here so Decide never divides by zero if ever
 // handed an Analysis built by hand in a test that violates the invariant.
 func demand(a analyzer.Analysis) (float64, bool) {
-	if a.QueueGrowthRate > queueGrowthThreshold {
+	// a.QueueGrowthRateValid gates this sum (issue #18): ServedIOPS is
+	// ops/s, and the open-workload formula is only dimensionally valid
+	// when QueueGrowthRate is too. Analyzer sets Valid=false whenever the
+	// up-window's QueueDepth isn't ops-denominated (today, only reachable
+	// once a future platform source can deliver QueueDepthBytes) — never
+	// reach here treating a bytes/s reading as if it were ops/s. An
+	// invalid growth rate falls through to the closed-workload regime
+	// below, the same as a growth rate that simply isn't above threshold.
+	if a.QueueGrowthRateValid && a.QueueGrowthRate > queueGrowthThreshold {
 		return a.ServedIOPS + a.QueueGrowthRate, true
 	}
 	if !a.BaselineEstablished || a.Baseline.P95 <= 0 {

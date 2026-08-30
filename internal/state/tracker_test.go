@@ -37,9 +37,7 @@ func TestTracker_beginEndResize(t *testing.T) {
 
 func TestTracker_recordChangeSetsCooldownDirectionSpecifically(t *testing.T) {
 	tr := newTestTracker(t)
-	if err := tr.RecordChange("disk1", true, epoch); err != nil {
-		t.Fatalf("RecordChange(up): %v", err)
-	}
+	tr.RecordChange("disk1", true, epoch)
 
 	s := tr.State("disk1", epoch)
 	if s.LastChangeUp != epoch {
@@ -50,15 +48,46 @@ func TestTracker_recordChangeSetsCooldownDirectionSpecifically(t *testing.T) {
 	}
 }
 
-func TestTracker_recordChangeUpdatesBudget(t *testing.T) {
+func TestTracker_reserveConfirmUpdatesBudget(t *testing.T) {
 	tr := newTestTracker(t)
 	for i := 0; i < 3; i++ {
-		if err := tr.RecordChange("disk1", true, epoch.Add(time.Duration(i)*time.Minute)); err != nil {
-			t.Fatalf("RecordChange: %v", err)
+		key := keyN(i)
+		ts := epoch.Add(time.Duration(i) * time.Minute)
+		if err := tr.ReserveChange("disk1", key, 1000, 2000, ts); err != nil {
+			t.Fatalf("ReserveChange: %v", err)
+		}
+		if err := tr.ConfirmChange(key); err != nil {
+			t.Fatalf("ConfirmChange: %v", err)
 		}
 	}
 	if got := tr.State("disk1", epoch.Add(time.Hour)).ChangesInLast24h; got != 3 {
 		t.Errorf("ChangesInLast24h = %d, want 3", got)
+	}
+}
+
+func TestTracker_reserveWithoutResolutionStillCounts(t *testing.T) {
+	// issue #10: a change this process reserved but crashed before
+	// confirming must still consume budget — undercounting is the unsafe
+	// direction.
+	tr := newTestTracker(t)
+	if err := tr.ReserveChange("disk1", "key-1", 1000, 2000, epoch); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+	if got := tr.State("disk1", epoch.Add(time.Minute)).ChangesInLast24h; got != 1 {
+		t.Errorf("ChangesInLast24h with an unresolved reservation = %d, want 1", got)
+	}
+}
+
+func TestTracker_releaseChangeFreesTheSlot(t *testing.T) {
+	tr := newTestTracker(t)
+	if err := tr.ReserveChange("disk1", "key-1", 1000, 2000, epoch); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+	if err := tr.ReleaseChange("key-1"); err != nil {
+		t.Fatalf("ReleaseChange: %v", err)
+	}
+	if got := tr.State("disk1", epoch.Add(time.Minute)).ChangesInLast24h; got != 0 {
+		t.Errorf("ChangesInLast24h after Release = %d, want 0", got)
 	}
 }
 
@@ -74,9 +103,15 @@ func TestTracker_budgetSurvivesRestartCooldownDoesNot(t *testing.T) {
 	}
 	tr1 := NewTracker(b1)
 	for i := 0; i < 4; i++ {
-		if err := tr1.RecordChange("disk1", true, epoch.Add(time.Duration(i)*time.Minute)); err != nil {
-			t.Fatalf("RecordChange: %v", err)
+		key := keyN(i)
+		ts := epoch.Add(time.Duration(i) * time.Minute)
+		if err := tr1.ReserveChange("disk1", key, 1000, 2000, ts); err != nil {
+			t.Fatalf("ReserveChange: %v", err)
 		}
+		if err := tr1.ConfirmChange(key); err != nil {
+			t.Fatalf("ConfirmChange: %v", err)
+		}
+		tr1.RecordChange("disk1", true, ts)
 	}
 
 	b2, err := LoadBudget(path) // "restart"
@@ -91,5 +126,108 @@ func TestTracker_budgetSurvivesRestartCooldownDoesNot(t *testing.T) {
 	}
 	if !s.LastChangeUp.IsZero() {
 		t.Errorf("LastChangeUp after restart = %v, want zero — cooldowns are deliberately not persisted", s.LastChangeUp)
+	}
+}
+
+func TestTracker_healthyByDefault(t *testing.T) {
+	tr := newTestTracker(t)
+	if !tr.Healthy() {
+		t.Error("Healthy() = false on a freshly constructed Tracker, want true")
+	}
+}
+
+// failingBudgetPath returns a path a Budget cannot write to — used to
+// force ReserveChange/ConfirmChange/ReleaseChange into failure without
+// depending on OS-specific permission semantics for read-only files
+// (which root, common in CI/sandboxed test runners, ignores).
+func failingBudgetPath(t *testing.T) string {
+	t.Helper()
+	// A path whose parent directory does not exist: every append/create
+	// call fails deterministically regardless of the running user's
+	// privileges.
+	return filepath.Join(t.TempDir(), "does-not-exist", "budget.jsonl")
+}
+
+func TestTracker_reserveFailureMarksUnhealthyAndFailsClosed(t *testing.T) {
+	b := &Budget{path: failingBudgetPath(t)}
+	tr := NewTracker(b)
+
+	if err := tr.ReserveChange("disk1", "key-1", 1000, 2000, epoch); err == nil {
+		t.Fatal("ReserveChange succeeded against an unwritable path")
+	}
+	if tr.Healthy() {
+		t.Error("Healthy() = true after a Reserve failure, want false")
+	}
+
+	s := tr.State("disk1", epoch.Add(time.Minute))
+	if s.ChangesInLast24h < 1_000_000 {
+		t.Errorf("ChangesInLast24h once unhealthy = %d, want a sentinel large enough that budget_exhausted always fires (fail closed, issue #10)", s.ChangesInLast24h)
+	}
+}
+
+func TestTracker_confirmFailureMarksUnhealthy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "budget.jsonl")
+	b, err := LoadBudget(path)
+	if err != nil {
+		t.Fatalf("LoadBudget: %v", err)
+	}
+	tr := NewTracker(b)
+	if err := tr.ReserveChange("disk1", "key-1", 1000, 2000, epoch); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	// Point the same in-memory Budget at a path whose parent directory
+	// doesn't exist, so the *next* append deterministically fails —
+	// simulating e.g. the volume the state directory lives on going
+	// away mid-run, without depending on OS-specific permission
+	// semantics for file modes (which root, common in test runners,
+	// ignores).
+	b.path = failingBudgetPath(t)
+
+	if err := tr.ConfirmChange("key-1"); err == nil {
+		t.Fatal("ConfirmChange succeeded despite an unwritable budget path")
+	}
+	if tr.Healthy() {
+		t.Error("Healthy() = true after a Confirm failure, want false")
+	}
+}
+
+func TestTracker_pendingChangesExposesUnresolvedReservations(t *testing.T) {
+	tr := newTestTracker(t)
+	if err := tr.ReserveChange("disk1", "key-1", 1000, 2000, epoch); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+	if err := tr.ReserveChange("disk2", "key-2", 3000, 4000, epoch); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+	if err := tr.ConfirmChange("key-2"); err != nil {
+		t.Fatalf("ConfirmChange: %v", err)
+	}
+
+	pending := tr.PendingChanges()
+	if len(pending) != 1 || pending[0].IdempotencyKey != "key-1" {
+		t.Errorf("PendingChanges() = %+v, want only key-1 (key-2 was confirmed)", pending)
+	}
+}
+
+func TestTracker_compactDelegatesToBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "budget.jsonl")
+	b, err := LoadBudget(path)
+	if err != nil {
+		t.Fatalf("LoadBudget: %v", err)
+	}
+	tr := NewTracker(b)
+	if err := tr.ReserveChange("disk1", "key-1", 1000, 2000, epoch.Add(-30*time.Hour)); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+	if err := tr.ConfirmChange("key-1"); err != nil {
+		t.Fatalf("ConfirmChange: %v", err)
+	}
+
+	if err := tr.Compact(epoch); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if got := tr.State("disk1", epoch).ChangesInLast24h; got != 0 {
+		t.Errorf("ChangesInLast24h after Compact = %d, want 0 — the 30h-old confirmed event should have been pruned", got)
 	}
 }

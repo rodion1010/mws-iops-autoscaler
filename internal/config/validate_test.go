@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -350,6 +351,133 @@ func TestValidate_rules(t *testing.T) {
 			},
 			wantSub: "runtime.metrics.collection_interval",
 		},
+		// --- issue #6, reopened ---
+		{
+			name: "latency.mode absolute is rejected (not implemented)",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{Latency: &LatencySpec{Mode: strPtr("absolute")}},
+				}
+			},
+			wantSub: "latency.mode",
+		},
+		{
+			name: "NaN utilization_threshold rejected as non-finite, not silently passed",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(math.NaN())},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "+Inf scale_up_utilization rejected as non-finite",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Target:  &TargetSpec{ScaleUpUtilization: floatPtr(math.Inf(1))},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "NaN queue_depth_threshold rejected as non-finite",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(math.NaN())},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "queue_depth_threshold of exactly zero rejected — gate must not degenerate to always-true",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(0)},
+				}
+			},
+			wantSub: "saturation.queue_depth_threshold",
+		},
+		{
+			name: "queue_depth_threshold just above zero is valid",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(0.1)},
+				}
+			},
+			wantSub: "",
+		},
+		{
+			name: "latency.baseline_multiplier of exactly 1 rejected — threshold would equal the baseline itself",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{Latency: &LatencySpec{BaselineMultiplier: floatPtr(1)}},
+				}
+			},
+			wantSub: "latency.baseline_multiplier",
+		},
+		{
+			name: "latency.baseline_multiplier just above 1 is valid",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{Latency: &LatencySpec{BaselineMultiplier: floatPtr(1.01)}},
+				}
+			},
+			wantSub: "",
+		},
+		{
+			name: "NaN max_scale_up_ratio rejected as non-finite",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Step:    &StepSpec{MaxScaleUpRatio: floatPtr(math.NaN())},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "Inf max_scale_down_ratio rejected as non-finite",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Step:    &StepSpec{MaxScaleDownRatio: floatPtr(math.Inf(-1))},
+				}
+			},
+			wantSub: "not a finite number",
+		},
+		{
+			name: "collection_interval longer than scale_up_window is rejected even though it fits scale_down_window",
+			mutate: func(c *Config) {
+				// Default scale_up_window is 5m, scale_down_window 30m
+				// (defaults.go's PresetBalanced). validateSamplerCapacity
+				// alone would not catch this: its ceil(window/interval)+
+				// 1+slack formula, checked only against the longer
+				// scale_down_window, always yields at least 4 for any
+				// positive window/interval pair — it cannot express "this
+				// interval is too long relative to a *specific* window" at
+				// all (ceil() of a positive ratio never drops below 1,
+				// however disproportionate the inputs). At most one real
+				// sample can ever fall inside a 5-minute trailing span
+				// when samples are 20 minutes apart, so scale_up_window
+				// could never become evaluable — pre-merge review finding.
+				c.Runtime.Metrics.CollectionInterval = durationPtr("20m")
+			},
+			wantSub: "scale_up_window",
+		},
+		{
+			name: "collection_interval within every configured window is valid",
+			mutate: func(c *Config) {
+				c.Runtime.Metrics.CollectionInterval = durationPtr("1m") // <= both 5m and 30m defaults
+			},
+			wantSub: "",
+		},
 	}
 
 	for _, tc := range cases {
@@ -421,6 +549,100 @@ func negativeDurationPtr(t *testing.T, s string) *Duration {
 	}
 	dd := Duration(-d)
 	return &dd
+}
+
+func TestValidateSamplerCapacity_directDefenseInDepth(t *testing.T) {
+	// SamplerCapacity's own corrected formula (issue #7) can no longer
+	// actually produce a value below minSamplesForWindowMirror through any
+	// real config — this exercises validateSamplerCapacity directly
+	// against a hand-built ResolvedConfig to prove the backstop itself
+	// still works, independent of whether today's formula can reach it.
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{ScaleDownWindow: 5 * time.Minute}},
+		Runtime:  ResolvedRuntime{CollectionInterval: time.Minute},
+	}
+	if got := rc.SamplerCapacity(); got < minSamplesForWindowMirror {
+		t.Fatalf("test setup: SamplerCapacity() = %d, want >= %d so this test isn't accidentally exercising the real bug", got, minSamplesForWindowMirror)
+	}
+	if errs := validateSamplerCapacity(rc); len(errs) != 0 {
+		t.Fatalf("validateSamplerCapacity() = %v, want none for a sufficient capacity", errs)
+	}
+
+	// Force the defensive branch a real config can no longer reach: a
+	// zero window collapses SamplerCapacity to its floor of 1.
+	rc.VMPolicy.Advanced.ScaleDownWindow = 0
+	if got := rc.SamplerCapacity(); got != 1 {
+		t.Fatalf("test setup: SamplerCapacity() = %d, want 1 with a zero window", got)
+	}
+	errs := validateSamplerCapacity(rc)
+	if len(errs) != 1 {
+		t.Fatalf("validateSamplerCapacity() = %v, want exactly one error", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "collection_interval") {
+		t.Errorf("error = %v, want it to name collection_interval", errs[0])
+	}
+}
+
+// --- pre-merge review: validate collection_interval against EVERY
+// configured window, not just SamplerCapacity's single longest one ---
+
+func TestValidateCollectionIntervalAgainstWindows_rejectsTooLongForShortestWindow(t *testing.T) {
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
+			ScaleUpWindow: 5 * time.Minute, ScaleDownWindow: 30 * time.Minute,
+		}},
+		Runtime: ResolvedRuntime{CollectionInterval: 20 * time.Minute},
+	}
+	// SamplerCapacity itself stays comfortably large — it's sized against
+	// the 30m scale_down_window, not the 5m scale_up_window this interval
+	// actually breaks.
+	if got := rc.SamplerCapacity(); got < minSamplesForWindowMirror {
+		t.Fatalf("test setup: SamplerCapacity() = %d, want >= %d — this test is specifically about SamplerCapacity NOT catching the bug", got, minSamplesForWindowMirror)
+	}
+	if errs := validateSamplerCapacity(rc); len(errs) != 0 {
+		t.Fatalf("test setup: validateSamplerCapacity() = %v, want none — confirms it alone would have passed this config", errs)
+	}
+
+	errs := validateCollectionIntervalAgainstWindows(rc)
+	if len(errs) != 1 {
+		t.Fatalf("validateCollectionIntervalAgainstWindows() = %v, want exactly one error", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "scale_up_window") {
+		t.Errorf("error = %v, want it to name scale_up_window", errs[0])
+	}
+}
+
+func TestValidateCollectionIntervalAgainstWindows_catchesPerDiskOverride(t *testing.T) {
+	// The VM policy's own windows are fine; only a per-disk override is
+	// too short for the configured cadence — must still be caught.
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
+			ScaleUpWindow: 30 * time.Minute, ScaleDownWindow: 60 * time.Minute,
+		}},
+		DiskPolicies: map[string]ResolvedPolicy{
+			"fastdisk": {Advanced: ResolvedAdvanced{ScaleUpWindow: 2 * time.Minute, ScaleDownWindow: 60 * time.Minute}},
+		},
+		Runtime: ResolvedRuntime{CollectionInterval: 5 * time.Minute},
+	}
+	errs := validateCollectionIntervalAgainstWindows(rc)
+	if len(errs) != 1 {
+		t.Fatalf("validateCollectionIntervalAgainstWindows() = %v, want exactly one error", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "fastdisk") || !strings.Contains(errs[0].Error(), "scale_up_window") {
+		t.Errorf("error = %v, want it to name disk %q and scale_up_window", errs[0], "fastdisk")
+	}
+}
+
+func TestValidateCollectionIntervalAgainstWindows_equalToWindowIsValid(t *testing.T) {
+	rc := &ResolvedConfig{
+		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
+			ScaleUpWindow: 5 * time.Minute, ScaleDownWindow: 30 * time.Minute,
+		}},
+		Runtime: ResolvedRuntime{CollectionInterval: 5 * time.Minute}, // exactly equal, not longer
+	}
+	if errs := validateCollectionIntervalAgainstWindows(rc); len(errs) != 0 {
+		t.Errorf("validateCollectionIntervalAgainstWindows() = %v, want none — interval equal to (not longer than) a window is valid", errs)
+	}
 }
 
 func TestValidate_platformSourceWithKeyConfigured(t *testing.T) {

@@ -55,7 +55,7 @@ policy:
       utilization_threshold: 0.98        # GATE, not a trigger — IOPS or bandwidth, whichever is higher (ADR-008)
       queue_depth_threshold: 1
       latency:
-        mode: relative                   # relative | absolute (absolute unimplemented in v1)
+        mode: relative                   # only "relative" is accepted — "absolute" is rejected by validation (§8, issue #6)
         baseline_multiplier: 1.5
 
     target:
@@ -83,7 +83,7 @@ policy:
 | `limits.min_iops` | Floor. 1000 is included in the disk's base price, so going lower is impossible and would save nothing. |
 | `limits.max_iops` | User ceiling. Clamped to 10000 and further to `3000 × vCPU` at runtime — **the platform does not enforce the VM cap**, the agent does. |
 | `saturation.utilization_threshold` | Precondition only, checked against **whichever of IOPS or bandwidth utilization is higher** (ADR-008) — a disk below it on both cannot be limit-starved, so signal checks are skipped. Never triggers a change on its own. |
-| `saturation.queue_depth_threshold` | Units differ by source: operations in `local`, bytes in `fleet`. The agent will not compare across units. |
+| `saturation.queue_depth_threshold` | Units differ by source: operations in `local`, bytes in `fleet`. The agent will not compare across units — the Analyzer rejects a window whose samples are not all `local`'s own ops unit before evaluating this threshold or summing queue growth into an IOPS demand figure (issue #18), rather than silently comparing a bytes reading against an ops-calibrated number. |
 | `saturation.latency.baseline_multiplier` | Relative to the disk's own baseline. An absolute threshold is wrong for everyone; acceptable latency is workload-specific. |
 | `target.scale_up_utilization` | Applied to estimated demand *after* saturation is confirmed: `target = demand / 0.85`. |
 | `target.scale_down_utilization` | Deliberately lower, so scale-down leaves headroom instead of landing flush against current demand. |
@@ -176,7 +176,18 @@ disks:
 `exclude` is a plain list of device names. `selected` entries are mappings, because each one may
 carry a policy.
 
-Rediscovery runs on an interval, so disks attached after startup are picked up without a restart.
+**`mode: selected` is exhaustive, not best-effort (issue #5).** Every `device_name` listed must
+resolve against the VM's live disks on every discovery cycle — a name that doesn't match anything is a
+startup/discovery error, not a logged omission. This is deliberately asymmetric with
+`mode: auto-discovery`'s `exclude`, where naming a disk that doesn't exist is harmless (there's nothing
+to exclude): under `selected`, the list *is* the operator's entire stated intent, so silently managing
+fewer disks than named would make the agent's actual behavior diverge from what was configured, with no
+signal beyond a log line. On this error the agent keeps whatever managed set the previous successful
+discovery produced (never a partial one built from only the matched names) and `/readyz` reports not
+ready until the mismatch is resolved — either the missing disk is attached, or the config is corrected.
+
+Rediscovery runs on an interval, so disks attached after startup are picked up without a restart —
+including recovering from this error once the VM's inventory becomes consistent with `selected` again.
 
 **Classification is automatic and not user-configurable.** Each disk is dependent (VM-owned, written
 through the VM spec) or independent (written through the disk API) — see ADR-003. Both are managed;
@@ -352,13 +363,35 @@ value, and maintenance windows.
 - `advanced.evaluation.collection_interval` — removed from the schema (ADR-010); rejected as an
   unknown key like any other superseded field
 - `saturation.utilization_threshold`, `target.scale_up_utilization`, or `target.scale_down_utilization`
-  outside `(0, 1]`
-- `saturation.queue_depth_threshold` < 0
-- `saturation.latency.mode` anything other than `relative` or `absolute`
-- `saturation.latency.baseline_multiplier` ≤ 0
+  outside `(0, 1]`, or non-finite (`NaN`/`Inf` — see below)
+- `saturation.queue_depth_threshold` ≤ 0 (strictly positive, not merely non-negative: at exactly 0 the
+  queue-depth gate degenerates to always-true given a non-negative queue depth, and
+  `utilization_threshold` alone would decide saturation — issue #6), or non-finite
+- `saturation.latency.mode` anything other than `relative` — `absolute` is rejected too, not merely
+  "not yet accepted": design.md §2/§9.4 places absolute latency thresholds out of scope for v1, and no
+  Analyzer code path reads this field at all, so accepting it would silently do nothing (issue #6)
+- `saturation.latency.baseline_multiplier` ≤ 1, not merely ≤ 0 — at exactly 1 the elevated-latency
+  threshold (`baseline.P95 × multiplier`) equals the baseline itself, so ordinary noise around baseline
+  latency would read as "elevated" continuously (issue #6), or non-finite
 - `step.min_change_iops` ≤ 0 or not a multiple of 100
-- `step.max_scale_up_ratio` ≤ 1 (it would never actually scale up)
-- `step.max_scale_down_ratio` outside `(0, 1)`
+- `step.max_scale_up_ratio` ≤ 1 (it would never actually scale up), or non-finite
+- `step.max_scale_down_ratio` outside `(0, 1)`, or non-finite
 - `budget.max_changes_per_24h` ≤ 0
 - any `runtime.metrics.collection_interval`, `runtime.controller.reconcile_interval`, or
   `runtime.controller.discovery_interval` ≤ 0
+- `runtime.metrics.collection_interval` too long relative to the configured evaluation windows for the
+  Sampler's ring buffer to ever hold enough samples to fill one — `config.ResolvedConfig.SamplerCapacity()`
+  (the same formula the orchestrator uses to actually size the buffer) must be ≥ 3, the Analyzer's own
+  `minSamplesForWindow` floor (ADR-010); below that, `WindowFullUp`/`WindowFullDown` could never become
+  true no matter how long the agent ran (issue #6)
+- `runtime.metrics.collection_interval` longer than any *individual* configured window — the VM
+  policy's own `scale_up_window`/`scale_down_window`, or a per-disk override's — even when
+  `SamplerCapacity()` above is comfortably large (pre-merge review). `SamplerCapacity()` sizes the
+  buffer against only the single *longest* window across every policy; a much shorter window elsewhere
+  can still be mathematically incapable of ever holding more than one real sample, since consecutive
+  samples land farther apart than the window itself. `collection_interval: 20m` against the default
+  `scale_up_window: 5m` is the concrete example: the buffer is plenty large (sized against the 30m
+  `scale_down_window`), but `WindowFullUp` specifically could still never become true
+- any of the float fields above that decode as `NaN` or `±Inf` — a bare range comparison like
+  `v <= 0 || v > 1` silently lets `NaN` through (every comparison against `NaN` is `false`), so this is
+  checked explicitly, separately from the range itself (issue #6)

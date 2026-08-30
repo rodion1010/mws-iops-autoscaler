@@ -54,19 +54,33 @@ func NewWindowAnalyzer() *WindowAnalyzer {
 }
 
 // Analyze implements Analyzer. samples must be chronological ascending
-// (Sampler's own documented contract) and belong to one disk.
-func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p EvaluationPolicy, specIOPS int64) Analysis {
+// (Sampler's own documented contract) and belong to one disk. now is wall
+// clock, explicit for the same reason decider.Decide takes it — freshness
+// (out.Fresh, below) is a comparison against real time passing, not
+// against anything derivable from the samples themselves (issue #15): a
+// disk whose sampling has silently stopped keeps a fixed, internally
+// consistent buffer forever, so nothing inside that buffer alone can ever
+// reveal that it has gone stale.
+func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p EvaluationPolicy, specIOPS int64, now time.Time) Analysis {
 	out := Analysis{DiskID: diskID}
 	if len(samples) == 0 {
+		// HasData stays false (zero value) — true cold start, distinct
+		// from Fresh going false after having had real data (issue: "no
+		// data yet" and "data went stale" are different situations, must
+		// not share metrics_stale as their one reason).
 		return out
 	}
+	out.HasData = true
 
 	newest := samples[len(samples)-1]
 	upWindow := trailingWindow(samples, p.ScaleUpWindow)
 	downWindow := trailingWindow(samples, p.ScaleDownWindow)
 
-	out.WindowFullUp = windowFull(samples, p.ScaleUpWindow)
-	out.WindowFullDown = windowFull(samples, p.ScaleDownWindow)
+	out.SampleAge = now.Sub(newest.Timestamp)
+	out.Fresh = out.SampleAge <= p.MaxSampleAge
+
+	out.WindowFullUp = windowFull(upWindow, p.ScaleUpWindow, p.MaxSampleGap)
+	out.WindowFullDown = windowFull(downWindow, p.ScaleDownWindow, p.MaxSampleGap)
 	out.WindowFillUpRatio = fillRatio(samples, p.ScaleUpWindow)
 	out.WindowFillDownRatio = fillRatio(samples, p.ScaleDownWindow)
 
@@ -89,7 +103,7 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 	latencyElevated := established && (out.ReadLatency.P95 > scaledDuration(baseline.P95, p.LatencyBaselineMultiplier) ||
 		out.WriteLatency.P95 > scaledDuration(baseline.P95, p.LatencyBaselineMultiplier))
 
-	out.Saturated = out.WindowFullUp &&
+	out.Saturated = out.Fresh && out.WindowFullUp &&
 		sustainedResourceGate(upWindow, specIOPS, p.UtilizationThreshold) &&
 		(sustainedQueueAtOrAbove(upWindow, p.QueueDepthThreshold) ||
 			latencyElevated ||
@@ -101,15 +115,17 @@ func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p Eval
 		(downReadP95 <= scaledDuration(baseline.P95, p.LatencyBaselineMultiplier) &&
 			downWriteP95 <= scaledDuration(baseline.P95, p.LatencyBaselineMultiplier))
 
-	out.Underutilized = out.WindowFullDown &&
+	out.Underutilized = out.Fresh && out.WindowFullDown &&
+		sustainedResourceBelow(downWindow, specIOPS, p.UtilizationThreshold) &&
 		sustainedQueueBelow(downWindow, p.QueueDepthThreshold) &&
 		latencyAtBaseline &&
 		!sustainedThrottle(downWindow, specIOPS)
 
-	out.IOPSP95Down = percentile95TotalOps(downWindow)
+	out.IOPSP95Down, out.BandwidthP95DownIOPSEquiv, out.EffectiveDemandP95Down, out.LimitingResourceDown =
+		demandP95Down(downWindow)
 
 	out.ServedIOPS = newest.ReadOps + newest.WriteOps
-	out.QueueGrowthRate = queueGrowthRate(upWindow)
+	out.QueueGrowthRate, out.QueueGrowthRateValid = queueGrowthRate(upWindow)
 
 	// Freeze against updates while saturated (§4.4) — use this cycle's own
 	// verdict, computed above from the baseline as of *before* this
@@ -138,52 +154,127 @@ func (a *WindowAnalyzer) currentBaseline(diskID string, samples []metrics.Sample
 	if !windowFullUp {
 		return LatencyStat{}, false
 	}
-	stat := computeBaseline(samples)
+	stat, ok := computeBaseline(samples)
+	if !ok {
+		// Full window, but every sample in it was idle in both directions
+		// (issue #9) — there is still nothing honest to establish from.
+		// Leave established false and retry next cycle, rather than
+		// freezing a bogus 0 baseline in place forever (ADR-012's "seeds
+		// from the disk's first full window" assumes that window has real
+		// latency data to seed from).
+		return LatencyStat{}, false
+	}
 	a.baselines[diskID] = stat
 	a.established[diskID] = true
 	return stat, true
 }
 
 // updateBaseline recomputes and stores diskID's baseline from the current
-// samples. Only called when the disk is not currently saturated.
+// samples. Only called when the disk is not currently saturated. Skips the
+// write entirely when computeBaseline finds no qualifying sample (issue
+// #9) — an idle window must not overwrite a real, previously-established
+// baseline with a bogus 0.
 func (a *WindowAnalyzer) updateBaseline(diskID string, samples []metrics.Sample) {
+	stat, ok := computeBaseline(samples)
+	if !ok {
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.baselines[diskID] = computeBaseline(samples)
+	a.baselines[diskID] = stat
 }
 
-func computeBaseline(samples []metrics.Sample) LatencyStat {
+// computeBaseline excludes an idle direction's phantom zero the same way
+// readLatencies/writeLatencies do (issue #9). Its second return is false
+// when neither direction had any qualifying sample in the window (a
+// totally idle window) — establishing or overwriting the baseline with a
+// bogus 0 in that case would make every future latency reading look
+// "elevated" by comparison, the opposite of what a baseline is for.
+func computeBaseline(samples []metrics.Sample) (LatencyStat, bool) {
 	all := make([]time.Duration, 0, len(samples)*2)
 	for _, s := range samples {
-		all = append(all, s.ReadLatAvg, s.WriteLatAvg)
+		if s.ReadOps > 0 {
+			all = append(all, s.ReadLatAvg)
+		}
+		if s.WriteOps > 0 {
+			all = append(all, s.WriteLatAvg)
+		}
 	}
-	return LatencyStat{P95: percentile(all, baselinePercentile), Kind: LatencyWindowedAvg}
+	if len(all) == 0 {
+		return LatencyStat{}, false
+	}
+	return LatencyStat{P95: percentile(all, baselinePercentile), Kind: LatencyWindowedAvg}, true
 }
 
 // trailingWindow returns the suffix of samples (chronological ascending)
-// whose Timestamp falls within window of the newest sample.
+// whose Timestamp falls within window of the newest sample — plus, only
+// when the natural trim's own span falls short of window, the single real
+// predecessor sample immediately before cutoff.
+//
+// That fallback exists because windowFull's own span check is
+// `newest.Timestamp - samples[0].Timestamp >= window`, and a strict cutoff
+// trim on its own makes that check almost impossible to ever pass in
+// practice: cutoff is computed from real collection timestamps, which land
+// near, but almost never exactly on, an integer multiple of the collection
+// interval — ordinary scheduler jitter, not a fault condition. The first
+// sample kept by a strict trim is then some small delta *after* cutoff,
+// making the returned span some small delta *under* window essentially
+// forever — a window that can never become full is exactly the deadlock
+// this function exists to avoid (NFR-9). Reaching one sample further back
+// closes that gap with a real, already-collected value (one collection
+// interval earlier than the nominal boundary — a negligible skew against a
+// multi-minute window), never a fabricated one.
+//
+// The "only when needed" qualifier is deliberate, not an optimization: if
+// the natural trim already spans a full window on its own — the common
+// case for evenly-spaced data, and exactly what a clean recovery
+// immediately after a long outage looks like — reaching back for a
+// predecessor would have nothing to gain and a real cost, since that
+// predecessor could sit on the far side of an arbitrarily large gap (stale
+// pre-outage history). windowFull's own maxGap check still independently
+// rejects a predecessor that turns out to be a genuine discontinuity
+// rather than an ordinary one-interval jitter — this qualifier just stops
+// a window that didn't need bridging from risking that check for no
+// reason.
 func trailingWindow(samples []metrics.Sample, window time.Duration) []metrics.Sample {
 	if len(samples) == 0 {
 		return nil
 	}
-	cutoff := samples[len(samples)-1].Timestamp.Add(-window)
+	newest := samples[len(samples)-1].Timestamp
+	cutoff := newest.Add(-window)
 	i := 0
 	for ; i < len(samples); i++ {
 		if !samples[i].Timestamp.Before(cutoff) {
 			break
 		}
 	}
+	if i > 0 && newest.Sub(samples[i].Timestamp) < window {
+		i--
+	}
 	return samples[i:]
 }
 
 // windowFull is timestamp-span based, not a sample count, beyond the
-// minSamplesForWindow floor (ADR-010; design.md §4.3).
-func windowFull(samples []metrics.Sample, window time.Duration) bool {
+// minSamplesForWindow floor (ADR-010; design.md §4.3) — and, per issue #15
+// / issue #7, also requires that no gap between consecutive samples inside
+// the window exceeds maxGap. A window whose overall span covers `window`
+// but contains one large silent gap (a missed collection cycle, a source
+// outage that later recovered) is not the sustained, gap-free evidence
+// design.md §4.4 means by "full".
+func windowFull(samples []metrics.Sample, window time.Duration, maxGap time.Duration) bool {
 	if len(samples) < minSamplesForWindow {
 		return false
 	}
 	span := samples[len(samples)-1].Timestamp.Sub(samples[0].Timestamp)
-	return span >= window
+	if span < window {
+		return false
+	}
+	for i := 1; i < len(samples); i++ {
+		if samples[i].Timestamp.Sub(samples[i-1].Timestamp) > maxGap {
+			return false
+		}
+	}
+	return true
 }
 
 // fillRatio is windowFull's fraction form, for observability
@@ -235,8 +326,57 @@ func sustainedResourceGate(window []metrics.Sample, specIOPS int64, threshold fl
 	return true
 }
 
-func sustainedQueueAtOrAbove(window []metrics.Sample, threshold float64) bool {
+// sustainedResourceBelow is sustainedResourceGate's mirror image for the
+// quiet direction (issue: bandwidth must gate Underutilized too, not only
+// scale-down target sizing). Every sample must have BOTH IOPS and
+// bandwidth utilization below threshold — not merely "not sustained-gate",
+// which by De Morgan's is the much weaker claim that at least one sample
+// had both below threshold, not that every sample did. Without this, a
+// large-block workload saturating its bandwidth ceiling at a low ops/s
+// count could still read as Underutilized: queue depth, latency, and
+// throttle detection are all IOPS-denominated signals (design.md §4.4/
+// §4.5) and blind to a bandwidth-only bottleneck on their own — the same
+// asymmetry ADR-008 already fixed for the Saturated gate, now closed for
+// its mirror. Reuses policy.saturation.utilization_threshold rather than a
+// new config field: this keeps the same invariant ADR-008 already
+// established (whichever resource is closer to its ceiling decides) and
+// means a disk can never simultaneously be a candidate for Saturated (via
+// this same threshold, sustained the other direction) and Underutilized.
+func sustainedResourceBelow(window []metrics.Sample, specIOPS int64, threshold float64) bool {
 	if len(window) == 0 {
+		return false
+	}
+	for _, s := range window {
+		if iopsUtilization(s, specIOPS) >= threshold || bandwidthUtilization(s, specIOPS) >= threshold {
+			return false
+		}
+	}
+	return true
+}
+
+// queueUnitConsistent reports whether every sample in window carries its
+// QueueDepth in want's unit — the guard every ops-denominated queue formula
+// below needs before comparing raw QueueDepth.Value against an
+// ops-calibrated threshold or summing it into an IOPS quantity (issue #18).
+// Guest is the only MetricSource implemented today and always produces
+// QueueDepthOps (ADR-001), so a false return is unreachable through the
+// real pipeline right now — it exists so a future platform-sourced window
+// (QueueDepthBytes, CLAUDE.md: "write_queue_length ... byte-denominated")
+// is rejected outright the moment M7 lands, rather than silently compared
+// against a threshold calibrated for a different unit. "Reject unknown
+// units instead of silently evaluating them" is the issue's own proposed
+// direction.
+func queueUnitConsistent(window []metrics.Sample, want metrics.QueueDepthUnit) bool {
+	for _, s := range window {
+		if s.QueueDepth.Unit != want {
+			return false
+		}
+	}
+	return true
+}
+
+func sustainedQueueAtOrAbove(window []metrics.Sample, threshold float64) bool {
+	if len(window) == 0 || !queueUnitConsistent(window, metrics.QueueDepthOps) {
 		return false
 	}
 	for _, s := range window {
@@ -247,8 +387,14 @@ func sustainedQueueAtOrAbove(window []metrics.Sample, threshold float64) bool {
 	return true
 }
 
+// sustainedQueueBelow gates on queueUnitConsistent the same as
+// sustainedQueueAtOrAbove, which means a non-ops window can never satisfy
+// it — Underutilized (an AND of this predicate with the others) fails
+// closed rather than treating unrecognized-unit backlog as "quiet" (issue
+// #18: no scale-down decision may be based on queue data this formula
+// cannot interpret).
 func sustainedQueueBelow(window []metrics.Sample, threshold float64) bool {
-	if len(window) == 0 {
+	if len(window) == 0 || !queueUnitConsistent(window, metrics.QueueDepthOps) {
 		return false
 	}
 	for _, s := range window {
@@ -277,18 +423,29 @@ func sustainedThrottle(window []metrics.Sample, specIOPS int64) bool {
 	return true
 }
 
+// readLatencies/writeLatencies only include samples where that direction
+// actually served ops that interval (issue #9). metrics.computeSample only
+// sets ReadLatAvg/WriteLatAvg when the corresponding op-delta was >0 —
+// otherwise the field is the Go zero value, not a real "0ns latency"
+// observation. Treating an idle direction's zero as real data pollutes
+// both the p95 for that direction and, through computeBaseline below, the
+// shared latency baseline every direction is compared against.
 func readLatencies(window []metrics.Sample) []time.Duration {
-	out := make([]time.Duration, len(window))
-	for i, s := range window {
-		out[i] = s.ReadLatAvg
+	out := make([]time.Duration, 0, len(window))
+	for _, s := range window {
+		if s.ReadOps > 0 {
+			out = append(out, s.ReadLatAvg)
+		}
 	}
 	return out
 }
 
 func writeLatencies(window []metrics.Sample) []time.Duration {
-	out := make([]time.Duration, len(window))
-	for i, s := range window {
-		out[i] = s.WriteLatAvg
+	out := make([]time.Duration, 0, len(window))
+	for _, s := range window {
+		if s.WriteOps > 0 {
+			out = append(out, s.WriteLatAvg)
+		}
 	}
 	return out
 }
@@ -297,31 +454,71 @@ func writeLatencies(window []metrics.Sample) []time.Duration {
 // window — a simple endpoint slope, not a least-squares regression. With
 // as few as minSamplesForWindow points, a regression wouldn't be
 // meaningfully more accurate than the direct endpoint difference, and the
-// endpoint form is far easier to reason about and test. Zero (or negative,
-// for two samples with a non-monotonic timestamp — shouldn't happen given
-// Sampler's chronological contract, but division still needs a guard) for
-// a window that can't produce a rate.
-func queueGrowthRate(window []metrics.Sample) float64 {
-	if len(window) < 2 {
-		return 0
+// endpoint form is far easier to reason about and test. Zero/invalid (or
+// negative, for two samples with a non-monotonic timestamp — shouldn't
+// happen given Sampler's chronological contract, but division still needs
+// a guard) for a window that can't produce a rate.
+//
+// valid is false whenever window isn't ops-denominated throughout
+// (queueUnitConsistent, issue #18) — the Decider's open-workload demand
+// formula sums this rate directly with ServedIOPS (an ops/s quantity), so
+// a bytes/s reading must never reach it labeled as if it were ops/s. The
+// caller (decider.demand) is required to check valid before trusting rate;
+// see decider.go's own comment at that call site.
+func queueGrowthRate(window []metrics.Sample) (rate float64, valid bool) {
+	if len(window) < 2 || !queueUnitConsistent(window, metrics.QueueDepthOps) {
+		return 0, false
 	}
 	first, last := window[0], window[len(window)-1]
 	elapsed := last.Timestamp.Sub(first.Timestamp).Seconds()
 	if elapsed <= 0 {
-		return 0
+		return 0, false
 	}
-	return (last.QueueDepth.Value - first.QueueDepth.Value) / elapsed
+	return (last.QueueDepth.Value - first.QueueDepth.Value) / elapsed, true
 }
 
-func percentile95TotalOps(window []metrics.Sample) float64 {
+// demandP95Down computes the three down-window demand figures issue #17
+// requires: IOPS p95, bandwidth-equivalent p95, and the properly-aligned
+// effective-demand p95 those two must not be confused with.
+//
+// effectiveDemand is deliberately p95(per-sample max(ops, bandwidth-
+// equivalent)), not max(p95(ops), p95(bandwidth-equivalent)) — the latter
+// would combine two independently-computed percentiles that can come from
+// entirely different samples, which is not a value any single moment of
+// the workload ever actually produced. Computing the max first, per
+// sample, then taking one percentile of that combined series is what
+// keeps the demand figure aligned to something the disk was actually
+// asked to do at one point in time.
+//
+// iopsP95/bwP95 are still computed (and returned) independently, purely
+// for the journal's own "IOPS demand, bandwidth-equivalent demand"
+// figures (issue #17) — decider.Decide's actual scale-down target is
+// sized from effectiveDemand alone, never from these two directly.
+func demandP95Down(window []metrics.Sample) (iopsP95, bwP95, effectiveDemand float64, limitingResource string) {
 	if len(window) == 0 {
-		return 0
+		return 0, 0, 0, ""
 	}
 	ops := make([]float64, len(window))
+	bw := make([]float64, len(window))
+	eff := make([]float64, len(window))
 	for i, s := range window {
 		ops[i] = s.ReadOps + s.WriteOps
+		bw[i] = (s.ReadBytes + s.WriteBytes) / bytesPerIOPS
+		if bw[i] > ops[i] {
+			eff[i] = bw[i]
+		} else {
+			eff[i] = ops[i]
+		}
 	}
-	return percentileFloat(ops, 0.95)
+
+	iopsP95 = percentileFloat(ops, 0.95)
+	bwP95 = percentileFloat(bw, 0.95)
+	effectiveDemand = percentileFloat(eff, 0.95)
+	limitingResource = "iops"
+	if bwP95 > iopsP95 {
+		limitingResource = "bandwidth"
+	}
+	return iopsP95, bwP95, effectiveDemand, limitingResource
 }
 
 func scaledDuration(d time.Duration, mult float64) time.Duration {

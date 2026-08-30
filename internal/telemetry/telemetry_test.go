@@ -45,7 +45,10 @@ func TestRecordDecision_exposesExpectedSeries(t *testing.T) {
 	body := scrape(t, r)
 
 	wantSubstrings := []string{
-		`iops_autoscaler_disk_provisioned_iops{class="independent",disk="datadisk",vm="vm-1"} 1200`,
+		// issue #19: provisioned_iops reports Current (observed/applied
+		// state), never Target — a decision alone must never move it.
+		`iops_autoscaler_disk_provisioned_iops{class="independent",disk="datadisk",vm="vm-1"} 1000`,
+		`iops_autoscaler_disk_proposed_target_iops{class="independent",disk="datadisk",vm="vm-1"} 1200`,
 		`iops_autoscaler_disk_observed_iops{disk="datadisk",op="read",vm="vm-1"} 700`,
 		`iops_autoscaler_disk_observed_iops{disk="datadisk",op="write",vm="vm-1"} 300`,
 		`iops_autoscaler_disk_utilization_ratio{disk="datadisk",vm="vm-1"} 0.98`,
@@ -53,9 +56,9 @@ func TestRecordDecision_exposesExpectedSeries(t *testing.T) {
 		`iops_autoscaler_disk_latency_baseline_seconds{disk="datadisk",vm="vm-1"} 0.002`,
 		`iops_autoscaler_disk_saturated{disk="datadisk",vm="vm-1"} 1`,
 		`iops_autoscaler_decisions_total{action="scale_up",reason="saturated"} 1`,
-		`iops_autoscaler_vm_headroom_iops{vm="vm-1"} 4500`,
-		`iops_autoscaler_vm_cap_reached{vm="vm-1"} 0`,
+		`iops_autoscaler_vm_headroom_iops{disk="datadisk",vm="vm-1"} 4500`,
 		`iops_autoscaler_metric_source{disk="datadisk",source="guest"} 1`,
+		`iops_autoscaler_metric_source{disk="datadisk",source="platform"} 0`,
 		`iops_autoscaler_window_fill_ratio{direction="up",disk="datadisk"} 1`,
 		`iops_autoscaler_window_fill_ratio{direction="down",disk="datadisk"} 0.3`,
 		`iops_autoscaler_change_budget_remaining{disk="datadisk"} 47`,
@@ -65,15 +68,119 @@ func TestRecordDecision_exposesExpectedSeries(t *testing.T) {
 			t.Errorf("scraped output missing %q\n--- full output ---\n%s", want, body)
 		}
 	}
+	// RecordDecision itself never touches vm_cap_reached (issue #19) —
+	// only RecordVMCapReached does, so the series shouldn't even exist yet.
+	if strings.Contains(body, "iops_autoscaler_vm_cap_reached") {
+		t.Error("vm_cap_reached must not be set by RecordDecision — only RecordVMCapReached sets it")
+	}
 }
 
-func TestRecordDecision_vmCapReachedSetsGauge(t *testing.T) {
+// TestRecordDecision_neverMovesProvisionedOnDryRunOrFailedWrite is issue
+// #19's core scenario: RecordDecision alone — the only call a dry-run or a
+// failed write ever produces — must never move disk_provisioned_iops off
+// the disk's actual current value, however far Target diverges from it.
+func TestRecordDecision_neverMovesProvisionedOnDryRunOrFailedWrite(t *testing.T) {
 	r := NewRegistry()
-	d := decider.Decision{DiskID: "d1", Action: decider.ActionVMCapReached, Reason: "vm_headroom_insufficient"}
-	r.RecordDecision("vm-1", "dependent", d)
+	d := decider.Decision{DiskID: "d1", Action: decider.ActionScaleUp, Current: 1000, Target: 5000}
+	r.RecordDecision("vm-1", "independent", d)
 	body := scrape(t, r)
-	if !strings.Contains(body, `iops_autoscaler_vm_cap_reached{vm="vm-1"} 1`) {
-		t.Errorf("vm_cap_reached not set to 1 on ActionVMCapReached:\n%s", body)
+
+	if !strings.Contains(body, `iops_autoscaler_disk_provisioned_iops{class="independent",disk="d1",vm="vm-1"} 1000`) {
+		t.Errorf("provisioned_iops moved off Current despite no verified write:\n%s", body)
+	}
+	if !strings.Contains(body, `iops_autoscaler_disk_proposed_target_iops{class="independent",disk="d1",vm="vm-1"} 5000`) {
+		t.Errorf("proposed_target_iops missing the decided target:\n%s", body)
+	}
+}
+
+// TestRecordAppliedIOPS_movesProvisionedOnlyOnVerifiedWrite covers the
+// other half: only a call to RecordAppliedIOPS — the caller's own
+// verified-write confirmation point — may move disk_provisioned_iops.
+func TestRecordAppliedIOPS_movesProvisionedOnlyOnVerifiedWrite(t *testing.T) {
+	r := NewRegistry()
+	d := decider.Decision{DiskID: "d1", Action: decider.ActionScaleUp, Current: 1000, Target: 1200}
+	r.RecordDecision("vm-1", "independent", d)
+	r.RecordAppliedIOPS("d1", "vm-1", "independent", 1200)
+	body := scrape(t, r)
+
+	if !strings.Contains(body, `iops_autoscaler_disk_provisioned_iops{class="independent",disk="d1",vm="vm-1"} 1200`) {
+		t.Errorf("provisioned_iops did not move to the verified applied value:\n%s", body)
+	}
+}
+
+func TestRecordVMCapReached_aggregatesAcrossDisksRegardlessOfOrder(t *testing.T) {
+	cases := []struct {
+		name  string
+		order []bool // per-disk: true = ActionVMCapReached
+	}{
+		{"capped disk processed first", []bool{true, false}},
+		{"capped disk processed last", []bool{false, true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry()
+			any := false
+			for i, capped := range tc.order {
+				action := decider.ActionNoAction
+				if capped {
+					action = decider.ActionVMCapReached
+					any = true
+				}
+				r.RecordDecision("vm-1", "independent", decider.Decision{DiskID: diskName(i), Action: action})
+			}
+			r.RecordVMCapReached("vm-1", any)
+			body := scrape(t, r)
+			if !strings.Contains(body, `iops_autoscaler_vm_cap_reached{vm="vm-1"} 1`) {
+				t.Errorf("vm_cap_reached not aggregated to 1 regardless of which disk in the cycle capped (order: %v):\n%s", tc.order, body)
+			}
+		})
+	}
+}
+
+func TestRecordVMCapReached_falseWhenNoDiskCapped(t *testing.T) {
+	r := NewRegistry()
+	r.RecordDecision("vm-1", "independent", decider.Decision{DiskID: "d1", Action: decider.ActionNoAction})
+	r.RecordDecision("vm-1", "independent", decider.Decision{DiskID: "d2", Action: decider.ActionScaleUp})
+	r.RecordVMCapReached("vm-1", false)
+	body := scrape(t, r)
+	if !strings.Contains(body, `iops_autoscaler_vm_cap_reached{vm="vm-1"} 0`) {
+		t.Errorf("vm_cap_reached not 0 when no disk capped:\n%s", body)
+	}
+}
+
+func diskName(i int) string {
+	if i == 0 {
+		return "d1"
+	}
+	return "d2"
+}
+
+// TestRecordDecision_metricSourceClearsStaleActiveSeries is issue #19's
+// source-switch scenario: once a disk's active source changes, the
+// previously active source's series must read back 0, not stay at 1
+// forever.
+func TestRecordDecision_metricSourceClearsStaleActiveSeries(t *testing.T) {
+	r := NewRegistry()
+	r.RecordDecision("vm-1", "independent", decider.Decision{
+		DiskID: "d1", Inputs: analyzer.Analysis{Source: metrics.SourceGuest},
+	})
+	body := scrape(t, r)
+	if !strings.Contains(body, `iops_autoscaler_metric_source{disk="d1",source="guest"} 1`) {
+		t.Fatalf("test setup: guest not active after first call:\n%s", body)
+	}
+	if !strings.Contains(body, `iops_autoscaler_metric_source{disk="d1",source="platform"} 0`) {
+		t.Fatalf("test setup: platform not 0 after first call:\n%s", body)
+	}
+
+	r.RecordDecision("vm-1", "independent", decider.Decision{
+		DiskID: "d1", Inputs: analyzer.Analysis{Source: metrics.SourcePlatform},
+	})
+	body = scrape(t, r)
+	if !strings.Contains(body, `iops_autoscaler_metric_source{disk="d1",source="guest"} 0`) {
+		t.Errorf("guest series must read back 0 after the active source switched to platform:\n%s", body)
+	}
+	if !strings.Contains(body, `iops_autoscaler_metric_source{disk="d1",source="platform"} 1`) {
+		t.Errorf("platform series must read 1 as the newly active source:\n%s", body)
 	}
 }
 

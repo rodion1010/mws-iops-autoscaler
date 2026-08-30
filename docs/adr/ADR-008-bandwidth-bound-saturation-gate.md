@@ -93,3 +93,21 @@ testing for it. This is a real gap in what the product does, not test-authoring 
 **Revisit when**
 - Calibration telemetry (design.md §8.5) shows the shared threshold behaves poorly for one dimension
   specifically — split into Option A's two knobs then, with evidence instead of speculation.
+
+> **Refined (2026-08-29, pre-merge review): the same asymmetry existed on the quiet side too.** This
+> ADR fixed the saturation gate to open on either resource, but `Underutilized` had no bandwidth check
+> at all — only queue depth, latency, and throttle detection, all IOPS-denominated signals. A
+> large-block, low-ops/s workload saturating its bandwidth ceiling could read as `Underutilized` purely
+> because those other, blind-to-bandwidth signals looked quiet, even while genuinely bandwidth-bound.
+> Scale-down is disabled in the shipped Phase 1 configuration (issue #14), so this had no live-write
+> consequence yet — but it needed fixing before scale-down flips on, not after.
+>
+> `resource_quiet` — every sample's IOPS **and** bandwidth utilization both below
+> `saturation.utilization_threshold` — is now `Underutilized`'s own precondition, exactly mirroring
+> `resource_gate`'s role for `Saturated`. It is deliberately not `!resource_gate`: by De Morgan's, that
+> would only require *some* sample to have both resources quiet, not *every* sample sustained quiet,
+> which is a materially weaker (and wrong) claim for a "sustained over the window" verdict. Reusing the
+> same `utilization_threshold` rather than adding a new field keeps one invariant true in both
+> directions: a disk can never simultaneously be a `Saturated` candidate on one resource and an
+> `Underutilized` one on both, at the same time. See `internal/analyzer/analyzer.go`'s
+> `sustainedResourceBelow` and design.md §4.4's now-symmetric `underutilized :=` formula.

@@ -88,6 +88,35 @@ func (g *GuestSource) Sample(_ context.Context, disks []DiskRef) ([]Sample, erro
 	return out, nil
 }
 
+// VerifyPath confirms d's guest device is resolvable and currently present
+// in /proc/diskstats — the same two checks Sample applies silently, per
+// cycle, to decide whether to skip a disk (issue #4). Exposed here so
+// discovery can reject an unmanageable disk once, up front, with a
+// specific reason — instead of admitting it to the managed set and
+// leaving the failure to manifest later as an indistinguishable stream of
+// "no data" cycles with no actionable diagnosis.
+func (g *GuestSource) VerifyPath(d DiskRef) error {
+	kernelDevice, err := g.resolveSymlink(d.GuestPath())
+	if err != nil {
+		return fmt.Errorf("resolve guest path %s: %w", d.GuestPath(), err)
+	}
+
+	f, err := os.Open(g.procDiskstatsPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", g.procDiskstatsPath, err)
+	}
+	defer f.Close()
+
+	raw, err := parseDiskstats(f)
+	if err != nil {
+		return err
+	}
+	if _, ok := raw[kernelDevice]; !ok {
+		return fmt.Errorf("kernel device %q (resolved from %s) has no entry in %s", kernelDevice, d.GuestPath(), g.procDiskstatsPath)
+	}
+	return nil
+}
+
 // resolveGuestSymlink follows /dev/disk/by-id/mws-<name> to its kernel
 // device name (e.g. "sdb") — confirmed live in CLAUDE.md's test environment
 // ("/dev/disk/by-id/mws-datadisk → sdb").

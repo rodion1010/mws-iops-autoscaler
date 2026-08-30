@@ -99,7 +99,36 @@ Spec text: "Уникальное имя устройства, которое о�
 
 `StorageDiskStatusResponse.deviceName` is a **required** response field, so the value is read from the
 API rather than reconstructed. That schema also carries `name` (alias unique within the VM), `boot`,
-`ref`, `ready`, `iops`, `size`.
+`ref`, `ready`, `iops`, `size`. **It does not carry `metadata.id` or `createTime`** — see next.
+
+### Disk resource identity — `metadata.id`, not `name`, is the stable one [V]
+
+Verified against the generated SDK (`go.mws.cloud/go-sdk v0.19.0`), not yet against a live response in
+this project.
+
+A disk resource's own `GetDisk` response (`DiskOptionalResponse.Metadata`,
+`CommonTypedResourceMetadataOptionalResponse`) carries both:
+
+```go
+Id         *resmodels.AnyResourceID  `json:"id,omitempty"`
+Name       optional.Optional[string] `json:"name,omitempty"`  // Deprecated: отказываемся в пользу metadata.id
+CreateTime *time.Time                `json:"createTime,omitempty"`
+```
+
+The SDK's own generated comment on `Name` reads **"Deprecated: отказываемся в пользу metadata.id"**
+("moving away from this in favor of metadata.id") — `name` (the field `DiskName`/`disk_name` in this
+project is built from) is explicitly a legacy identifier from the platform's own perspective.
+`name` is also **user-settable** for an independent disk (Terraform's `mws_compute_disk.disk` field is
+required, chosen by the caller) — deleting a disk and creating a new one under the identical name is an
+ordinary infra-as-code "replace," not an edge case. `metadata.id` is assigned by the platform at
+creation and does not get reused.
+
+`StorageDiskStatusResponse` (the VM's own per-attachment view, `spec.storage.disks[]` /
+`status.storage.disks[]`) carries **no `metadata.id` of its own** — only `name` (alias), `boot`,
+`deviceName`, `ref`, `ready`, `iops`, `size` (previous section). So a dependent disk's `metadata.id` is
+only obtainable the same way an independent disk's is: a separate `GetDisk(ref.GetDisk())` call — which
+`Discover` already makes for every managed disk regardless of class (§4.1), so reading `metadata.id`
+from that same response costs no extra API call for either class.
 
 ### Change IOPS [V]
 
@@ -508,7 +537,7 @@ or zero — see the PRD's metric-source stories.
 Closed: `DiskRequest`/`DiskSpecRequest` schema and mutability; guest device mapping; Prometheus
 metric names, labels and semantics; `<service>` value; read-queue question (none exists);
 monitoring auth model; Go SDK disk client; server-side validation bounds; VM ceiling not enforced;
-dependent vs independent disk editability.
+dependent vs independent disk editability; disk resource identity (`metadata.id` vs `name`).
 
 ---
 

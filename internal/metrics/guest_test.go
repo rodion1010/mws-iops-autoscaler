@@ -118,6 +118,43 @@ func TestGuestSource_kind(t *testing.T) {
 	}
 }
 
+func TestVerifyPath_success(t *testing.T) {
+	dir := t.TempDir()
+	path := writeDiskstats(t, dir, "   8      16 sdb 1000 12 8000 500 2000 34 16000 1000 0 1500 3000\n")
+	clock := time.Unix(0, 0)
+	g := newTestGuestSource(t, path, &clock)
+
+	if err := g.VerifyPath(DiskRef{DiskID: "disk-1", DeviceName: "datadisk"}); err != nil {
+		t.Errorf("VerifyPath: %v", err)
+	}
+}
+
+func TestVerifyPath_unresolvableSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := writeDiskstats(t, dir, "   8      16 sdb 1000 12 8000 500 2000 34 16000 1000 0 1500 3000\n")
+	clock := time.Unix(0, 0)
+	g := newTestGuestSource(t, path, &clock)
+
+	err := g.VerifyPath(DiskRef{DiskID: "disk-2", DeviceName: "ghost-disk"})
+	if err == nil {
+		t.Fatal("VerifyPath succeeded for a device with no resolvable symlink (issue #4)")
+	}
+}
+
+func TestVerifyPath_deviceMissingFromDiskstats(t *testing.T) {
+	dir := t.TempDir()
+	// No sdb line at all — the symlink itself would resolve, but the
+	// kernel device it points at never shows up in /proc/diskstats.
+	path := writeDiskstats(t, dir, "   8       0 sda 1 1 1 1 1 1 1 1 1 1 1\n")
+	clock := time.Unix(0, 0)
+	g := newTestGuestSource(t, path, &clock)
+
+	err := g.VerifyPath(DiskRef{DiskID: "disk-1", DeviceName: "datadisk"})
+	if err == nil {
+		t.Fatal("VerifyPath succeeded for a kernel device missing from /proc/diskstats (issue #4)")
+	}
+}
+
 func TestResolveGuestSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "sdb")

@@ -71,7 +71,11 @@ type SaturationSpec struct {
 }
 
 type LatencySpec struct {
-	Mode               *string  `yaml:"mode"` // relative | absolute (absolute unimplemented)
+	// Mode: only "relative" is accepted (Validate rejects anything else,
+	// including "absolute") — design.md §2/§9.4 places absolute latency
+	// thresholds out of scope for v1, and no Analyzer code path reads this
+	// field at all (issue #6, reopened).
+	Mode               *string  `yaml:"mode"`
 	BaselineMultiplier *float64 `yaml:"baseline_multiplier"`
 }
 
