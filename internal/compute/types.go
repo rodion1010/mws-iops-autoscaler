@@ -30,7 +30,7 @@ type StorageDisk struct {
 	DiskName   string // status.storage.disks[].ref — cloud resource name; GetDisk/UpdateDisk target
 
 	// Populated for ClassDependent only — the fields DiskSpecRequest marks
-	// immutable-but-must-be-resent (CLAUDE.md, "DiskSpecRequest mutability"),
+	// immutable-but-must-be-resent (docs/platform-reference.md, "DiskSpecRequest mutability"),
 	// carried so a write can resend every other disk's entry byte-identical.
 	DiskType string // e.g. "nbs-pl2"
 	SizeRaw  string // bytesize.ByteSize.RawValue(), reparsed unchanged on write
@@ -63,7 +63,7 @@ func (d StorageDisk) GuestPath() string {
 }
 
 // MetricLabel is the device_name label value on this disk's exported
-// metrics (CLAUDE.md, "Prometheus export").
+// metrics (docs/platform-reference.md, "Prometheus export").
 func (d StorageDisk) MetricLabel() string {
 	return "mws-" + d.DeviceName
 }
@@ -90,13 +90,13 @@ type VirtualMachine struct {
 
 	// VCPUCount is populated by Discover (discovery.go) from a separate
 	// GetVmType call — the VM ceiling is 3000 × VCPUCount and is not
-	// enforced by the platform (CLAUDE.md "IOPS limits"). Zero until
+	// enforced by the platform (docs/platform-reference.md "IOPS limits"). Zero until
 	// Discover fills it in; GetVirtualMachine alone does not know it.
 	VCPUCount int32
 }
 
 // VmType is a VM type as read from the Compute API — currently used only
-// for its vCPU count (the VM aggregate IOPS pool is 3000 × vCPU, CLAUDE.md
+// for its vCPU count (the VM aggregate IOPS pool is 3000 × vCPU, docs/platform-reference.md
 // "IOPS limits"; spec.disks.totalIops exists in the schema but is null on
 // every type observed, so it is not read here).
 type VmType struct {

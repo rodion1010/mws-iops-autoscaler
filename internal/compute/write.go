@@ -23,7 +23,7 @@ var ErrConcurrentModification = errors.New("live current differs from the decisi
 // different metadata.id (IncarnationID) than the Decision being applied was
 // computed from. IOPS equality alone cannot catch this: a disk deleted and
 // recreated under the same name (an ordinary infra-as-code "replace",
-// CLAUDE.md "Disk resource identity") is a genuinely different resource that
+// docs/platform-reference.md "Disk resource identity") is a genuinely different resource that
 // may happen to sit at the same provisioned IOPS as the stale Decision's
 // Current, so the pre-write concurrency check would pass and this write
 // would silently mutate the wrong disk. Like ErrConcurrentModification this
@@ -196,7 +196,7 @@ func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string
 		}
 		// target.DiskName, not target.IncarnationID: a VM read
 		// (translateVMResponse, sdk_client.go) never populates
-		// StorageDisk.IncarnationID at all (CLAUDE.md:
+		// StorageDisk.IncarnationID at all (docs/platform-reference.md:
 		// "StorageDiskStatusResponse... does not carry metadata.id") — only
 		// Discover's own separate GetDisk call does, for either disk class.
 		// The caller performs that same fresh read itself, immediately
@@ -244,7 +244,7 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 	// above cannot answer this on its own: translateVMResponse
 	// (sdk_client.go) never populates a live StorageDisk's IncarnationID at
 	// all — the VM's own per-attachment view carries no metadata.id
-	// (CLAUDE.md: "StorageDiskStatusResponse... does not carry
+	// (docs/platform-reference.md: "StorageDiskStatusResponse... does not carry
 	// metadata.id"); only a separate GetDisk call does, uniformly for
 	// either disk class (Discover already makes this exact call per
 	// managed disk, discovery.go). So proving incarnation here needs its

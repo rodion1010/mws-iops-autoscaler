@@ -147,7 +147,7 @@ func (g *GuestSource) VerifyPath(d DiskRef) error {
 }
 
 // resolveGuestSymlink follows /dev/disk/by-id/mws-<name> to its kernel
-// device name (e.g. "sdb") — confirmed live in CLAUDE.md's test environment
+// device name (e.g. "sdb") — confirmed live in docs/development.md's reference test environment
 // ("/dev/disk/by-id/mws-datadisk → sdb").
 func resolveGuestSymlink(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)

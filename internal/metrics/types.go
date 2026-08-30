@@ -59,7 +59,7 @@ func (d DiskRef) GuestPath() string {
 }
 
 // MetricLabel is the device_name label value on this disk's exported
-// metrics (CLAUDE.md, "Prometheus export").
+// metrics (docs/platform-reference.md, "Prometheus export").
 func (d DiskRef) MetricLabel() string {
 	return "mws-" + d.DeviceName
 }

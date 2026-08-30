@@ -99,7 +99,7 @@ func translateVMResponse(name string, resp *model.VirtualMachineOptionalResponse
 
 		// The status entry is the authoritative source for DeviceName
 		// (required there, defaulted server-side if unset at attach time —
-		// CLAUDE.md "Guest device mapping") and for the disk's own resource
+		// docs/platform-reference.md "Guest device mapping") and for the disk's own resource
 		// name (Ref), needed to call GetDisk/UpdateDisk on either class.
 		if status, ok := statusByAlias[specEntry.Name]; ok {
 			disk.DeviceName = strings.TrimPrefix(status.DeviceName, "mws-")

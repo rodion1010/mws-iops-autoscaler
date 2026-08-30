@@ -6,7 +6,7 @@ import "time"
 // field notes). It has no corresponding decodable field in AdvancedSpec.
 const BillingStepIOPS = 100
 
-// Platform bounds — CLAUDE.md "IOPS limits". The VM aggregate cap (3000 × vCPU)
+// Platform bounds — docs/platform-reference.md "IOPS limits". The VM aggregate cap (3000 × vCPU)
 // is not a config constant: it depends on the VM type and is resolved at
 // discovery time (design.md §4.1), not here.
 const (

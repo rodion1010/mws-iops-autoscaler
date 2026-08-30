@@ -16,7 +16,7 @@ import (
 // (mws/credentials/vm_service_account.go, nameKey = "instance/name") to
 // detect whether the process is running on a Compute VM at all, so the SDK
 // itself already depends on this key resolving correctly. Confirm against
-// docs/CLAUDE.md's test environment before trusting this in local mode.
+// docs/development.md's reference test environment before trusting this in local mode.
 const instanceNameKey = "instance/name"
 
 // SelfVMName resolves the running VM's own name from the instance metadata

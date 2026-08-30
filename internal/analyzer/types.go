@@ -147,7 +147,7 @@ type Analysis struct {
 	// bandwidth converted to IOPS-equivalent units (bytes/s ÷ bytesPerIOPS)
 	// — the other input to EffectiveDemandP95Down (issue #17). NBS-PL2
 	// ties provisioned IOPS and bandwidth at the same fixed ratio
-	// (CLAUDE.md, already used for BandwidthUtilization/ADR-008's
+	// (docs/platform-reference.md, already used for BandwidthUtilization/ADR-008's
 	// saturation gate) — a scale-down target sized from ops alone can
 	// undersize the bandwidth ceiling a large-block, low-ops/s workload
 	// still needs.
@@ -180,7 +180,7 @@ type Analysis struct {
 	//
 	// QueueGrowthRate is NOT unconditionally safe to sum with ServedIOPS
 	// (issue #18): QueueDepth.Unit distinguishes ops (guest) from bytes
-	// (platform, CLAUDE.md), and the open-workload demand formula is
+	// (platform, docs/platform-reference.md), and the open-workload demand formula is
 	// dimensionally valid only for ops/s. QueueGrowthRateValid is true
 	// only when every sample in the up-window carried QueueDepthOps; the
 	// Decider must check it before adding QueueGrowthRate to ServedIOPS,

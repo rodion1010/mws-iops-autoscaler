@@ -153,7 +153,7 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 }
 
 // VMIOPSPool is the VM's aggregate IOPS ceiling — 3000 × vCPU, not enforced
-// by the platform (CLAUDE.md "IOPS limits"; the check is entirely the
+// by the platform (docs/platform-reference.md "IOPS limits"; the check is entirely the
 // agent's responsibility).
 const iopsPerVCPU = 3000
 
