@@ -40,6 +40,20 @@ type StorageDisk struct {
 	// for both classes, rather than trusting the VM spec's inline iops.
 	IOPS                           int64 // spec.iops, current provisioned limit
 	BaseIOPS, ExtraIOPS, TotalIOPS int64 // status.iops breakdown
+
+	// IncarnationID is the disk resource's own metadata.id — the
+	// platform's stable, creation-time-assigned identifier, distinct from
+	// DiskName (pre-merge review: "don't use DiskName alone as a
+	// long-term identity"). DiskName is not safe on its own for state
+	// that must survive across reconcile cycles: an independent disk's
+	// name is user-chosen (Terraform's `disk` field), so deleting one and
+	// creating a new disk under the identical name — an ordinary
+	// infra-as-code "replace" — is unremarkable, and DiskName alone
+	// cannot distinguish the two resources. Populated by Discover from
+	// the same GetDisk call that already reads SpecIOPS; left empty if
+	// the response carried no metadata.id (see Discover's own comment on
+	// why that degrades rather than excludes the disk).
+	IncarnationID string
 }
 
 // GuestPath is where this disk appears on the guest filesystem in `local`
@@ -52,6 +66,19 @@ func (d StorageDisk) GuestPath() string {
 // metrics (CLAUDE.md, "Prometheus export").
 func (d StorageDisk) MetricLabel() string {
 	return "mws-" + d.DeviceName
+}
+
+// IdentityKey is this disk's long-term state identity — the key samples,
+// cooldown, and the 24h change budget must use instead of DiskName alone
+// (pre-merge review), so a disk deleted and recreated under the same name
+// starts every one of those systems fresh rather than inheriting the
+// previous incarnation's history. Combining DiskName with IncarnationID
+// rather than using IncarnationID alone keeps the key human-diagnosable
+// (grep-able by name) and degrades gracefully — never collides with a
+// different disk — when IncarnationID is unavailable, at the cost of only
+// matching this pre-fix behavior's exposure in that one degenerate case.
+func (d StorageDisk) IdentityKey() string {
+	return d.DiskName + "\x00" + d.IncarnationID
 }
 
 // VirtualMachine is a VM as read from the Compute API.
@@ -85,4 +112,9 @@ type Disk struct {
 
 	// status.iops breakdown — observability only, not load-bearing yet.
 	BaseIOPS, ExtraIOPS, TotalIOPS int64
+
+	// IncarnationID is metadata.id — see StorageDisk.IncarnationID's own
+	// comment; carried here too since GetDisk's response is where both
+	// StorageDisk.IncarnationID (via Discover) and this field originate.
+	IncarnationID string
 }

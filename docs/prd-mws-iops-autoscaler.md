@@ -217,6 +217,10 @@ single noisy sample cannot trigger a change.
       depth. Which method produced a given verdict is recorded, not silently uniform (ADR-011)
 - [ ] Refuses to emit a verdict until the window holds a minimum sample count
 - [ ] Window state survives nothing — a restart starts a fresh window and scales nothing until full
+- [ ] The rolling window is keyed on the disk's cloud resource name **plus** its platform-assigned
+      `metadata.id`, not the name alone (pre-merge review) — a disk deleted and recreated under the
+      identical name (an independent disk's name is user-settable) must start with an empty window,
+      never one seeded from an unrelated resource that happens to share a name
 - [ ] Typecheck/lint passes
 
 ### US-008: Scale-up decision
@@ -339,6 +343,11 @@ unused headroom.
 **Acceptance Criteria:**
 - [ ] Per-disk cooldown enforced separately for up and down
 - [ ] Rolling 24 h change budget per disk; exhausting it logs a warning and blocks further changes
+- [ ] Cooldown and the change budget key on the disk's cloud resource name **plus** its platform-
+      assigned `metadata.id` (pre-merge review), not the name alone — an independent disk's name is
+      user-settable, so deleting one and creating a new disk under the identical name is an ordinary
+      infra-as-code "replace" that must not inherit the previous disk's cooldown or budget history.
+      Sample history (US-007) is subject to the identical requirement
 - [ ] The budget is a genuine hard cap: its per-disk change record survives a process restart, so
       restarting cannot be used — deliberately or by routine redeploys/crash loops — to bypass it.
       Cooldowns may reset in memory on restart; this is safe because `--validate-config` requires

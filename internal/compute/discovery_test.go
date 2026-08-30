@@ -17,8 +17,8 @@ func TestDiscover_classifiesAndResolvesGuestPath(t *testing.T) {
 		},
 	}
 	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
-	c.disks["iops-test-vm-boot"] = &Disk{Name: "iops-test-vm-boot", SpecIOPS: 1000, BaseIOPS: 1000, TotalIOPS: 1000}
-	c.disks["iops-test-vm-data"] = &Disk{Name: "iops-test-vm-data", SpecIOPS: 3000, BaseIOPS: 1000, ExtraIOPS: 2000, TotalIOPS: 3000}
+	c.disks["iops-test-vm-boot"] = &Disk{Name: "iops-test-vm-boot", SpecIOPS: 1000, BaseIOPS: 1000, TotalIOPS: 1000, IncarnationID: "boot-incarnation-1"}
+	c.disks["iops-test-vm-data"] = &Disk{Name: "iops-test-vm-data", SpecIOPS: 3000, BaseIOPS: 1000, ExtraIOPS: 2000, TotalIOPS: 3000, IncarnationID: "data-incarnation-1"}
 
 	vm, skipped, err := Discover(context.Background(), c, "iops-test-vm")
 	if err != nil {
@@ -56,6 +56,18 @@ func TestDiscover_classifiesAndResolvesGuestPath(t *testing.T) {
 	}
 	if data.TotalIOPS != 3000 || data.ExtraIOPS != 2000 {
 		t.Errorf("datadisk status breakdown = %+v, want total=3000 extra=2000", data)
+	}
+	// IncarnationID (metadata.id) propagates from the same GetDisk call as
+	// IOPS, for both classes uniformly (pre-merge review: samples/
+	// cooldown/budget must not key on DiskName alone).
+	if boot.IncarnationID != "boot-incarnation-1" {
+		t.Errorf("bootdisk IncarnationID = %q, want %q", boot.IncarnationID, "boot-incarnation-1")
+	}
+	if data.IncarnationID != "data-incarnation-1" {
+		t.Errorf("datadisk IncarnationID = %q, want %q", data.IncarnationID, "data-incarnation-1")
+	}
+	if boot.IdentityKey() == data.IdentityKey() {
+		t.Errorf("bootdisk and datadisk produced the same IdentityKey() (%q) despite different DiskName and IncarnationID", boot.IdentityKey())
 	}
 }
 

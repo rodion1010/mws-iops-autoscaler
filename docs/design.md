@@ -155,8 +155,10 @@ product risk lives.
 
  for each disk not already excluded above:
    GET /compute/v1/projects/{p}/disks/{d}
-   └─ spec.iops (current provisioned), status.iops {base, extra, total}
-      spec.iops <= 0 → invalid current IOPS, excluded (issue #4)
+   ├─ spec.iops (current provisioned), status.iops {base, extra, total}
+   │    spec.iops <= 0 → invalid current IOPS, excluded (issue #4)
+   └─ metadata.id → IncarnationID (CLAUDE.md "Disk resource identity") — degrades to
+        DiskName-only identity if absent, never excludes the disk (pre-merge review)
 
  local mode only, for each disk that reached this point:
    resolve /dev/disk/by-id/mws-<name>, verify its kernel device has a /proc/diskstats entry
@@ -610,12 +612,26 @@ type DiskRef struct {
     DiskID     string // cloud resource name — used for API writes, never written in config
     VMName     string // (VMName, DeviceName) is the fleet-mode key
     DeviceName string // unprefixed: "datadisk"
+
+    // IncarnationID is compute.StorageDisk.IncarnationID (the platform's
+    // own metadata.id, CLAUDE.md "Disk resource identity"), carried here
+    // so the Sampler's ring buffer can be keyed by IdentityKey() instead
+    // of DiskID alone (pre-merge review — see that method's own comment).
+    IncarnationID string
 }
 
 // GuestPath returns /dev/disk/by-id/mws-<DeviceName>.
 func (d DiskRef) GuestPath() string
 // MetricLabel returns the device_name label value: "mws-<DeviceName>".
 func (d DiskRef) MetricLabel() string
+// IdentityKey returns DiskID + IncarnationID, combined — the Sampler's
+// own ring-buffer key, and (via compute.StorageDisk's identical method)
+// the key Tracker/Budget use for cooldown and the 24h change budget.
+// DiskID alone is not safe for any of these: it is the disk's name, which
+// is user-settable for an independent disk and reusable after deletion —
+// a disk deleted and recreated under the identical name must start every
+// one of these systems fresh, not inherit the previous incarnation's.
+func (d DiskRef) IdentityKey() string
 
 type MetricSource interface {
     // Sample returns one observation per managed disk. Units are explicit

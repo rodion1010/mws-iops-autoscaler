@@ -139,6 +139,14 @@ func (c *sdkClient) GetDisk(ctx context.Context, name string) (*Disk, error) {
 		if etag := resp.Metadata.Value.GetEtag(); etag != nil {
 			out.Etag = *etag
 		}
+		// metadata.id — the platform's own stable, creation-time-assigned
+		// identifier (pre-merge review: DiskName alone is not a safe
+		// long-term identity for samples/cooldown/budget). Left empty,
+		// not an error, if the response carried none — StorageDisk.
+		// IdentityKey degrades gracefully in that case.
+		if id := resp.Metadata.Value.GetId(); id != nil {
+			out.IncarnationID = id.ID()
+		}
 	}
 	if resp.Status != nil && resp.Status.Iops != nil {
 		out.BaseIOPS = int64(resp.Status.Iops.Base)

@@ -107,7 +107,7 @@ func TestActuate_scaleUpUnaffectedByGate(t *testing.T) {
 	if len(act.calls) != 1 {
 		t.Fatalf("Actuator.Apply called %d times, want 1 for an allowed ScaleUp", len(act.calls))
 	}
-	if got := tracker.State("vm-1-data", time.Now()).LastChangeUp; got.IsZero() {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), time.Now()).LastChangeUp; got.IsZero() {
 		t.Error("RecordChange was not called for a successful scale-up")
 	}
 }
@@ -735,7 +735,7 @@ func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
-	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 1 {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), time.Now()).ChangesInLast24h; got != 1 {
 		t.Errorf("ChangesInLast24h = %d, want 1 — a successful write must be reserved and confirmed", got)
 	}
 	if len(tracker.PendingChanges()) != 0 {
@@ -759,7 +759,7 @@ func TestActuate_writeFailure_liveStillAtBefore_releases(t *testing.T) {
 	if len(act.calls) != 1 {
 		t.Fatalf("Actuator.Apply called %d times, want 1", len(act.calls))
 	}
-	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 0 {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), time.Now()).ChangesInLast24h; got != 0 {
 		t.Errorf("ChangesInLast24h = %d, want 0 — live state confirmed the write never landed, so it must be released", got)
 	}
 	if len(tracker.PendingChanges()) != 0 {
@@ -782,13 +782,13 @@ func TestActuate_writeFailure_liveAtTarget_confirmsNotReleases(t *testing.T) {
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, now)
 
-	if got := tracker.State("vm-1-data", now).ChangesInLast24h; got != 1 {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), now).ChangesInLast24h; got != 1 {
 		t.Errorf("ChangesInLast24h = %d, want 1 — a write confirmed landed via live state must still count", got)
 	}
 	if len(tracker.PendingChanges()) != 0 {
 		t.Errorf("PendingChanges() = %+v, want none — the reservation must be Confirmed, not left Pending", tracker.PendingChanges())
 	}
-	if got := tracker.State("vm-1-data", now).LastChangeUp; got.IsZero() {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), now).LastChangeUp; got.IsZero() {
 		t.Error("cooldown was not started for a write confirmed landed via live state")
 	}
 	if got := a.managed[0].Disk.IOPS; got != 2000 {
@@ -805,7 +805,7 @@ func TestActuate_writeFailure_liveAmbiguous_staysPending(t *testing.T) {
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
-	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 1 {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), time.Now()).ChangesInLast24h; got != 1 {
 		t.Errorf("ChangesInLast24h = %d, want 1 — an unexplained live value must stay pending (fail closed), not be released", got)
 	}
 	if len(tracker.PendingChanges()) != 1 {
@@ -820,7 +820,7 @@ func TestActuate_writeFailure_liveReadFails_staysPending(t *testing.T) {
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
-	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 1 {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), time.Now()).ChangesInLast24h; got != 1 {
 		t.Errorf("ChangesInLast24h = %d, want 1 — a failed live-state read must leave the reservation pending, not release it", got)
 	}
 	if len(tracker.PendingChanges()) != 1 {
@@ -838,7 +838,7 @@ func TestActuate_dryRunErrorAlwaysReleases(t *testing.T) {
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
-	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 0 {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), time.Now()).ChangesInLast24h; got != 0 {
 		t.Errorf("ChangesInLast24h = %d, want 0 — a dry-run error must always release, never stay pending", got)
 	}
 	if len(tracker.PendingChanges()) != 0 {
@@ -853,7 +853,7 @@ func TestActuate_releasesReservationOnDryRun(t *testing.T) {
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
-	if got := tracker.State("vm-1-data", time.Now()).ChangesInLast24h; got != 0 {
+	if got := tracker.State(independentDisk().Disk.IdentityKey(), time.Now()).ChangesInLast24h; got != 0 {
 		t.Errorf("ChangesInLast24h = %d, want 0 — a dry run must never consume real budget", got)
 	}
 }
@@ -930,7 +930,7 @@ func TestReconcilePendingBudget_confirmsWhenLiveMatchesTarget(t *testing.T) {
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	if err := a.tracker.ReserveChange("vm-1-good", "key-1", 1000, 2000, time.Now()); err != nil {
+	if err := a.tracker.ReserveChange(compute.StorageDisk{DiskName: "vm-1-good"}.IdentityKey(), "key-1", 1000, 2000, time.Now()); err != nil {
 		t.Fatalf("ReserveChange: %v", err)
 	}
 
@@ -939,7 +939,7 @@ func TestReconcilePendingBudget_confirmsWhenLiveMatchesTarget(t *testing.T) {
 	if len(a.tracker.PendingChanges()) != 0 {
 		t.Errorf("PendingChanges() = %+v, want none — a reservation whose live current matches Target must be Confirmed", a.tracker.PendingChanges())
 	}
-	if got := a.tracker.State("vm-1-good", time.Now()).ChangesInLast24h; got != 1 {
+	if got := a.tracker.State(compute.StorageDisk{DiskName: "vm-1-good"}.IdentityKey(), time.Now()).ChangesInLast24h; got != 1 {
 		t.Errorf("ChangesInLast24h = %d, want 1 — Confirm must still count", got)
 	}
 }
@@ -956,7 +956,7 @@ func TestReconcilePendingBudget_releasesWhenLiveMatchesBefore(t *testing.T) {
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	if err := a.tracker.ReserveChange("vm-1-good", "key-1", 1000, 2000, time.Now()); err != nil {
+	if err := a.tracker.ReserveChange(compute.StorageDisk{DiskName: "vm-1-good"}.IdentityKey(), "key-1", 1000, 2000, time.Now()); err != nil {
 		t.Fatalf("ReserveChange: %v", err)
 	}
 
@@ -965,7 +965,7 @@ func TestReconcilePendingBudget_releasesWhenLiveMatchesBefore(t *testing.T) {
 	if len(a.tracker.PendingChanges()) != 0 {
 		t.Errorf("PendingChanges() = %+v, want none", a.tracker.PendingChanges())
 	}
-	if got := a.tracker.State("vm-1-good", time.Now()).ChangesInLast24h; got != 0 {
+	if got := a.tracker.State(compute.StorageDisk{DiskName: "vm-1-good"}.IdentityKey(), time.Now()).ChangesInLast24h; got != 0 {
 		t.Errorf("ChangesInLast24h = %d, want 0 — Release must stop it counting", got)
 	}
 }
@@ -982,7 +982,7 @@ func TestReconcilePendingBudget_ambiguousLiveValueStaysPending(t *testing.T) {
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	if err := a.tracker.ReserveChange("vm-1-good", "key-1", 1000, 2000, time.Now()); err != nil {
+	if err := a.tracker.ReserveChange(compute.StorageDisk{DiskName: "vm-1-good"}.IdentityKey(), "key-1", 1000, 2000, time.Now()); err != nil {
 		t.Fatalf("ReserveChange: %v", err)
 	}
 
@@ -991,7 +991,7 @@ func TestReconcilePendingBudget_ambiguousLiveValueStaysPending(t *testing.T) {
 	if len(a.tracker.PendingChanges()) != 1 {
 		t.Errorf("PendingChanges() = %+v, want the reservation left pending — an ambiguous live value must never be guessed at", a.tracker.PendingChanges())
 	}
-	if got := a.tracker.State("vm-1-good", time.Now()).ChangesInLast24h; got != 1 {
+	if got := a.tracker.State(compute.StorageDisk{DiskName: "vm-1-good"}.IdentityKey(), time.Now()).ChangesInLast24h; got != 1 {
 		t.Errorf("ChangesInLast24h = %d, want 1 — still counted while unresolved", got)
 	}
 }
@@ -1016,5 +1016,47 @@ func TestReconcilePendingBudget_detachedDiskLeftPending(t *testing.T) {
 
 	if len(a.tracker.PendingChanges()) != 1 {
 		t.Errorf("PendingChanges() = %+v, want the detached disk's reservation left pending — nothing to verify against, so it must not be silently dropped", a.tracker.PendingChanges())
+	}
+}
+
+// TestReconcilePendingBudget_recreatedDiskUnderSameNameNeverMatchesStaleReservation
+// is the pre-merge review scenario this whole identity fix exists for: a
+// disk is deleted and a new one created under the identical DiskName (an
+// ordinary Terraform "replace") between a crash and this restart. The
+// stale reservation must never be matched against the new disk's live
+// state — DiskName alone would make live IOPS on the *new* disk look like
+// a verdict on the *old* disk's write, which is simply wrong; nothing
+// about the new disk's current value says anything about whether the old
+// disk's write landed.
+func TestReconcilePendingBudget_recreatedDiskUnderSameNameNeverMatchesStaleReservation(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000, IncarnationID: "incarnation-1"},
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	// A reservation from before the crash, against the original incarnation.
+	original := compute.StorageDisk{DiskName: "vm-1-good", IncarnationID: "incarnation-1"}
+	if err := a.tracker.ReserveChange(original.IdentityKey(), "key-1", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	// The disk was deleted and a new one created under the same DiskName —
+	// same live IOPS as the old reservation's Target would coincidentally
+	// suggest a match, but it must not be treated as one.
+	client.disks["vm-1-good"] = &compute.Disk{Name: "vm-1-good", SpecIOPS: 2000, IncarnationID: "incarnation-2"}
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("second discover: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if len(a.tracker.PendingChanges()) != 1 {
+		t.Errorf("PendingChanges() = %+v, want the stale reservation left pending — the new disk's live IOPS must never resolve the old incarnation's reservation", a.tracker.PendingChanges())
 	}
 }

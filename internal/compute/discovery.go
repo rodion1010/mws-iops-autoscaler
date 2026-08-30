@@ -138,6 +138,13 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 		sd.BaseIOPS = disk.BaseIOPS
 		sd.ExtraIOPS = disk.ExtraIOPS
 		sd.TotalIOPS = disk.TotalIOPS
+		// metadata.id, from the same GetDisk call — see StorageDisk.
+		// IncarnationID's own comment. Left empty (degrading
+		// IdentityKey() to DiskName alone) rather than excluding the
+		// disk if the response carried none: unlike SpecIOPS<=0, an
+		// absent incarnation id isn't evidence of a broken disk, just a
+		// weaker identity guarantee for this one cycle.
+		sd.IncarnationID = disk.IncarnationID
 		resolved = append(resolved, sd)
 	}
 	vm.Disks = resolved

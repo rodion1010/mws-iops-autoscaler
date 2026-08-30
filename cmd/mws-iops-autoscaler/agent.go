@@ -209,8 +209,7 @@ func (a *Agent) discover(ctx context.Context) error {
 	if a.guestPathVerifier != nil {
 		verified := managed[:0]
 		for _, m := range managed {
-			ref := metrics.DiskRef{DiskID: m.Disk.DiskName, VMName: a.vmName, DeviceName: m.Disk.DeviceName}
-			if err := a.guestPathVerifier(ref); err != nil {
+			if err := a.guestPathVerifier(a.diskRef(m)); err != nil {
 				log.Printf("discover: disk %s (%s) failed guest-path verification: %v", m.Disk.Alias, m.Disk.DeviceName, err)
 				a.telemetry.RecordDiscoverySkipped(m.Disk.Alias, skipReasonGuestPathUnresolvable)
 				continue
@@ -222,7 +221,7 @@ func (a *Agent) discover(ctx context.Context) error {
 
 	disks := make([]metrics.DiskRef, len(managed))
 	for i, m := range managed {
-		disks[i] = metrics.DiskRef{DiskID: m.Disk.DiskName, VMName: a.vmName, DeviceName: m.Disk.DeviceName}
+		disks[i] = a.diskRef(m)
 	}
 	a.sampler.SetDisks(disks)
 
@@ -255,6 +254,19 @@ func (a *Agent) discover(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// diskRef builds m's metrics.DiskRef, including IncarnationID — the one
+// place this construction happens, so every caller (guest-path
+// verification, Sampler.SetDisks, reconcile's own Samples lookup) derives
+// the Sampler's identity key the same way (pre-merge review).
+func (a *Agent) diskRef(m registry.ManagedDisk) metrics.DiskRef {
+	return metrics.DiskRef{
+		DiskID:        m.Disk.DiskName,
+		VMName:        a.vmName,
+		DeviceName:    m.Disk.DeviceName,
+		IncarnationID: m.Disk.IncarnationID,
+	}
 }
 
 // invalidateManaged marks the currently-cached managed set unusable —
@@ -342,7 +354,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 	analyses := make(map[string]analyzer.Analysis, len(managed))
 	for _, m := range managed {
 		diskID := m.Disk.DiskName
-		samples := a.sampler.Samples(diskID)
+		samples := a.sampler.Samples(a.diskRef(m))
 		ep := toEvaluationPolicy(m.Policy.Advanced, a.maxSampleAge, a.maxSampleGap)
 		an := a.analyzer.Analyze(diskID, samples, ep, m.Disk.IOPS, now)
 		analyses[diskID] = an
@@ -374,7 +386,12 @@ func (a *Agent) reconcile(ctx context.Context) {
 		vm := decider.VMState{IOPSPool: iopsPool, SiblingP95IOPS: siblingP95}
 
 		ep := toEffectivePolicy(m.Policy)
-		gState := a.tracker.State(diskID, now)
+		// m.Disk.IdentityKey(), not diskID — cooldown state must not
+		// survive a delete-and-recreate under the same DiskName
+		// (pre-merge review). diskID itself stays the plain resource
+		// name below, since Decision.DiskID feeds the journal and
+		// telemetry labels, which must stay human-readable.
+		gState := a.tracker.State(m.Disk.IdentityKey(), now)
 
 		d := a.decider.Decide(diskID, m.Disk.IOPS, an, vm, ep, gState, now)
 		if d.Action == decider.ActionVMCapReached {
@@ -414,6 +431,12 @@ func (a *Agent) reconcile(ctx context.Context) {
 
 func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.Decision, now time.Time) {
 	diskID := m.Disk.DiskName
+	// identity, not diskID, is used for every Tracker call below (budget
+	// reservation, resize-in-progress, cooldown) — samples/cooldown/budget
+	// must not survive a delete-and-recreate under the same DiskName
+	// (pre-merge review). diskID itself remains the plain resource name,
+	// used only for logging here.
+	identity := m.Disk.IdentityKey()
 
 	if d.Action == decider.ActionScaleDown && !a.allowScaleDown {
 		// Defense in depth (issue #14) — PolicyDecider should never
@@ -444,7 +467,7 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	// the write itself, so a startup reconciliation can always find the
 	// exact record a given attempt belongs to.
 	idempotencyKey := uuid.NewString()
-	if err := a.tracker.ReserveChange(diskID, idempotencyKey, d.Current, d.Target, now); err != nil {
+	if err := a.tracker.ReserveChange(identity, idempotencyKey, d.Current, d.Target, now); err != nil {
 		log.Printf("actuate %s (%s): failed to durably reserve a budget slot before writing — refusing to write: %v", diskID, m.Disk.DeviceName, err)
 		return
 	}
@@ -456,9 +479,9 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 		Class:      m.Disk.Class,
 	}
 
-	a.tracker.BeginResize(diskID)
+	a.tracker.BeginResize(identity)
 	applied, err := a.actuator.Apply(ctx, d, target, a.dryRun, idempotencyKey)
-	a.tracker.EndResize(diskID)
+	a.tracker.EndResize(identity)
 	if err != nil {
 		if a.dryRun {
 			// A dry run can never ambiguously succeed server-side: an
@@ -544,7 +567,7 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 		// and will resolve itself via the next restart's reconciliation.
 		log.Printf("actuate %s (%s): failed to durably confirm a successful write — the budget reservation stays pending until the next restart's reconciliation: %v", diskID, m.Disk.DeviceName, err)
 	}
-	a.tracker.RecordChange(diskID, d.Action == decider.ActionScaleUp, now)
+	a.tracker.RecordChange(identity, d.Action == decider.ActionScaleUp, now)
 	log.Printf("%s %s: %d -> %d (%s)", d.Action, m.Disk.DeviceName, d.Current, applied.IOPS, d.Reason)
 }
 
@@ -572,6 +595,7 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 //     at the next restart, not guessed at here.
 func (a *Agent) resolveReservationAfterWriteFailure(ctx context.Context, m registry.ManagedDisk, d decider.Decision, idempotencyKey string, now time.Time) {
 	diskID := m.Disk.DiskName
+	identity := m.Disk.IdentityKey()
 
 	live, err := a.liveCurrentIOPS(ctx, m)
 	if err != nil {
@@ -593,7 +617,7 @@ func (a *Agent) resolveReservationAfterWriteFailure(ctx context.Context, m regis
 		if cerr := a.tracker.ConfirmChange(idempotencyKey); cerr != nil {
 			log.Printf("actuate %s (%s): failed to durably confirm a write that landed despite the error: %v", diskID, m.Disk.DeviceName, cerr)
 		}
-		a.tracker.RecordChange(diskID, d.Action == decider.ActionScaleUp, now)
+		a.tracker.RecordChange(identity, d.Action == decider.ActionScaleUp, now)
 		log.Printf("actuate %s (%s): write reported an error but live state confirms it landed (%d -> %d) — confirmed, not released", diskID, m.Disk.DeviceName, d.Current, live)
 	case d.Current:
 		if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
@@ -612,9 +636,15 @@ func (a *Agent) resolveReservationAfterWriteFailure(ctx context.Context, m regis
 // outcome: live current equal to the reservation's Target means the write
 // landed (Confirm); equal to Before means it never did (Release); neither
 // is ambiguous and is left pending — fail closed — rather than guessed
-// at. A disk no longer managed at all (detached/replaced) has nothing to
-// verify against, so its reservation is also left as-is: still counted,
-// never silently dropped.
+// at. A disk no longer managed at all (detached/replaced, or — the case
+// this specific lookup exists to catch, pre-merge review — deleted and
+// recreated under the same DiskName as a genuinely different resource)
+// has nothing to verify against, so its reservation is also left as-is:
+// still counted, never silently dropped or matched against the wrong
+// disk. ev.DiskID is IdentityKey()'s composite form (ReserveChange is
+// always called with it, never bare DiskName), so this lookup keyed the
+// same way is what makes a stale reservation from a deleted disk's prior
+// incarnation correctly fail to match its same-named replacement.
 func (a *Agent) reconcilePendingBudget(ctx context.Context) {
 	pending := a.tracker.PendingChanges()
 	if len(pending) == 0 {
@@ -624,13 +654,13 @@ func (a *Agent) reconcilePendingBudget(ctx context.Context) {
 	a.mu.Lock()
 	managed := append([]registry.ManagedDisk(nil), a.managed...)
 	a.mu.Unlock()
-	byDiskID := make(map[string]registry.ManagedDisk, len(managed))
+	byIdentity := make(map[string]registry.ManagedDisk, len(managed))
 	for _, m := range managed {
-		byDiskID[m.Disk.DiskName] = m
+		byIdentity[m.Disk.IdentityKey()] = m
 	}
 
 	for _, ev := range pending {
-		m, ok := byDiskID[ev.DiskID]
+		m, ok := byIdentity[ev.DiskID]
 		if !ok {
 			log.Printf("reconcile budget: disk %s has a reservation pending from a previous run but is no longer managed — leaving it counted (fail closed, issue #10)", ev.DiskID)
 			continue

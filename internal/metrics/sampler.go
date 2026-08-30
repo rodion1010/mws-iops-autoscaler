@@ -16,7 +16,7 @@ type Sampler struct {
 
 	mu    sync.Mutex
 	disks []DiskRef
-	ring  map[string][]Sample // per DiskID, chronological, len <= capacity
+	ring  map[string][]Sample // per DiskRef.IdentityKey(), chronological, len <= capacity
 }
 
 // NewSampler builds a Sampler over source, keeping up to capacity samples
@@ -42,7 +42,13 @@ func NewSampler(source MetricSource, capacity int) (*Sampler, error) {
 // (design.md §4.1 is the slow path; this is how its result reaches the
 // sampler). Disks no longer present have their buffers dropped, not just
 // stop being sampled: a disk that was detached and a different one
-// reattached under the same alias must not silently inherit stale history.
+// reattached under the same alias must not silently inherit stale
+// history — and neither must a disk deleted and recreated under the
+// identical DiskName, which is exactly what keying by IdentityKey()
+// rather than bare DiskID protects against (pre-merge review): a
+// recreated disk's new IncarnationID makes it a new key, so the old
+// key's buffer simply falls out of `keep` and is dropped here, the same
+// as any other disk that left the managed set.
 func (s *Sampler) SetDisks(disks []DiskRef) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -50,11 +56,11 @@ func (s *Sampler) SetDisks(disks []DiskRef) {
 
 	keep := make(map[string]bool, len(disks))
 	for _, d := range disks {
-		keep[d.DiskID] = true
+		keep[d.IdentityKey()] = true
 	}
-	for id := range s.ring {
-		if !keep[id] {
-			delete(s.ring, id)
+	for key := range s.ring {
+		if !keep[key] {
+			delete(s.ring, key)
 		}
 	}
 }
@@ -73,22 +79,41 @@ func (s *Sampler) Tick(ctx context.Context) error {
 		return fmt.Errorf("sampler tick: %w", err)
 	}
 
+	// A Source (guest or platform) knows nothing about IncarnationID — it
+	// matches samples to disks by DiskID alone (a guest path, a device
+	// name). This lookup is what recovers each returned Sample's full
+	// identity so it lands in the right ring buffer slot.
+	byDiskID := make(map[string]DiskRef, len(disks))
+	for _, d := range disks {
+		byDiskID[d.DiskID] = d
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sample := range samples {
-		buf := append(s.ring[sample.DiskID], sample)
+		ref, ok := byDiskID[sample.DiskID]
+		if !ok {
+			// The Source returned a sample for a disk not in this tick's
+			// own request set — shouldn't happen given MetricSource's
+			// contract, but there's no safe buffer to append it to.
+			continue
+		}
+		key := ref.IdentityKey()
+		buf := append(s.ring[key], sample)
 		if len(buf) > s.capacity {
 			buf = buf[len(buf)-s.capacity:]
 		}
-		s.ring[sample.DiskID] = buf
+		s.ring[key] = buf
 	}
 	return nil
 }
 
-// Samples returns a chronological copy of diskID's current buffer — a copy
-// so the caller (the Analyzer, M3) can't mutate the Sampler's own state.
-func (s *Sampler) Samples(diskID string) []Sample {
+// Samples returns a chronological copy of ref's current buffer — a copy so
+// the caller (the Analyzer, M3) can't mutate the Sampler's own state.
+// Keyed by ref.IdentityKey(), not DiskID alone (pre-merge review) — see
+// DiskRef.IdentityKey's own comment.
+func (s *Sampler) Samples(ref DiskRef) []Sample {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]Sample(nil), s.ring[diskID]...)
+	return append([]Sample(nil), s.ring[ref.IdentityKey()]...)
 }
