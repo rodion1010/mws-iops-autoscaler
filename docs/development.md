@@ -28,7 +28,7 @@ Never commit:
 - service-account key JSON;
 - IAM or monitoring API tokens;
 - SSH private keys;
-- fixed project, VM, disk, network or firewall identifiers;
+- identifiers and access details of the live test environment;
 - public addresses or ready-to-run access commands;
 - generated CLI credential state.
 

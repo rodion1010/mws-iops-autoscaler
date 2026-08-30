@@ -28,12 +28,12 @@ Scope: MWS Cloud Platform documentation, public API, generated Go SDK and measur
 - VM ceiling: **3000 IOPS per vCPU**. 4 vCPU → 12000.
   The spec defines `GET /compute/v1/vmTypes/{vmType}` → `spec.disks.totalIops`, but **the API returns
   `spec.disks: null` on every VM type** (verified on `base-2-8`, `base-2-4`, `base-4-16`, `gen-4-16`,
-  and all 40 in the list response). Only `spec.cpu.vcpuCount` is populated, so the ceiling must be
-  computed as `3000 × vcpuCount` until the field is served.
+  and all 40 in the list response). Only `spec.cpu.vcpuCount` is populated; the documented
+  `3000 × vcpuCount` relation can be derived from that field while `totalIops` remains absent.
 - Effective disk performance = whichever limit binds first («ограничение, которое достигается раньше»).
   Docs example: 2 vCPU (6000 pool), two 6000-IOPS disks → one active disk gets 6000, both active get
-  3000 each. A disk limit above its fair share is useful (borrows the idle pool); above the whole
-  pool it is pure waste.
+  3000 each. A disk configured above its fair share can consume redistributed idle capacity; a
+  value above the whole VM pool cannot increase delivered performance but remains provisioned.
 - Disk limit = base IOPS (in price) + additional (billed).
 - VM pool split evenly across disks; unused remainder redistributed evenly among the rest.
 - Disk IOPS limit is a maximum, not a guarantee.
@@ -115,8 +115,8 @@ CreateTime *time.Time                `json:"createTime,omitempty"`
 ```
 
 The SDK's own generated comment on `Name` reads **"Deprecated: отказываемся в пользу metadata.id"**
-("moving away from this in favor of metadata.id") — `name` (the field `DiskName`/`disk_name` in this
-project is built from) is explicitly a legacy identifier from the platform's own perspective.
+("moving away from this in favor of metadata.id") — `name` is explicitly a legacy identifier from
+the platform's own perspective.
 `name` is also **user-settable** for an independent disk (Terraform's `mws_compute_disk.disk` field is
 required, chosen by the caller) — deleting a disk and creating a new one under the identical name is an
 ordinary infra-as-code "replace," not an edge case. `metadata.id` is assigned by the platform at
@@ -124,10 +124,9 @@ creation and does not get reused.
 
 `StorageDiskStatusResponse` (the VM's own per-attachment view, `spec.storage.disks[]` /
 `status.storage.disks[]`) carries **no `metadata.id` of its own** — only `name` (alias), `boot`,
-`deviceName`, `ref`, `ready`, `iops`, `size` (previous section). So a dependent disk's `metadata.id` is
-only obtainable the same way an independent disk's is: a separate `GetDisk(ref.GetDisk())` call — which
-`Discover` already makes for every managed disk regardless of class (§4.1), so reading `metadata.id`
-from that same response costs no extra API call for either class.
+`deviceName`, `ref`, `ready`, `iops`, `size` (previous section). A dependent disk's
+`metadata.id` is therefore available only through a separate `GetDisk(ref.GetDisk())` call, the
+same endpoint that exposes it for an independent disk.
 
 ### Change IOPS [V]
 
@@ -188,12 +187,13 @@ attached by reference (`disk.ref`) is not.
 
 The 403 reads `Resource 'compute/.../virtualMachines/<vm>' is forbidden`, which looks like a
 permissions problem and is not. Proven by attaching an independent disk to the *same* VM with the
-*same* SA: it edits fine (200), while the VM-owned disk on that VM still returns 403. Dependent disks
-must be changed through `mws compute vm update --storage-disks`, resending the full spec.
+*same* SA: it edits fine (200), while the VM-owned disk on that VM still returns 403. Updating the
+VM-owned disk through `mws compute vm update --storage-disks` succeeds and resends the VM disk list.
 
 There is **no `managed` field** in the API response, the SDK model, or the current CLI
-`--storage-disks` schema — it appears only in a docs example. The reliable discriminator is
-`usages` containing `own`, or `spec.storage.disks[].disk` having `spec` vs `ref`.
+`--storage-disks` schema — it appears only in a docs example. The observed classification signals
+are `usages` containing `own` and `spec.storage.disks[].disk` containing `spec` rather than
+`ref`.
 
 Also note `deviceName` differs by location: `spec.storage.disks[].deviceName` = `datadisk`,
 `status.storage.disks[].deviceName` = `mws-datadisk`. The status form matches the metric label and
@@ -203,9 +203,8 @@ the `/dev/disk/by-id/` path.
 carries no `ValidateOnly` field — grepped the whole generated file, zero hits — unlike
 `UpdateDiskRequest`, which has one. The SDK is generated from MWS's own OpenAPI spec, so this reflects
 an absent query parameter on the operation itself, not an SDK gap. Verified against the generated SDK
-source (`v0.19.0`), not yet against a live response in this project — the dependent-disk write path
-(`vm update --storage-disks`) therefore has no server-confirmed dry run the way the independent path
-does. See ADR-007.
+source (`v0.19.0`), not yet against a live response. Independent-disk `UpdateDiskRequest`, by
+contrast, exposes `ValidateOnly`.
 
 ### The VM ceiling is NOT enforced [V]
 
@@ -221,8 +220,8 @@ iops=6100  → 200
 The platform takes 10000 on a VM that can only deliver 6000, and bills for it. Only the disk-level
 bounds (1000–10000, step 100) are validated.
 
-→ **The `3000 × vCPU` check is entirely the agent's responsibility.** Nothing server-side prevents
-provisioning IOPS the VM can never use, and `validateOnly` will not catch it either.
+The server therefore allows provisioned disk IOPS above the VM's deliverable pool, and
+`validateOnly` accepts the same values.
 
 `status.iops` breaks down as `{base, extra, total}` — `base` is the free tier (1000), `extra` is the
 billed portion. `status.throughput` at 1000 IOPS reads `33554432 Bps` = 32 MiB/s, matching
@@ -288,13 +287,13 @@ Verified 2026-08-28 against a live test project with a `base-2-8` VM and two NBS
   the API key returns a clean `403 ACCESS_DENIED permission='monitoring.metric.export'`.
   Role: `monitoring.metricExporter`. It is **not** grantable from the CLI (`iam role` has only
   `get`/`list`, and `roleBindings`/`accessBindings`/`getIamPolicy` all 404) — console only.
-- **No `# HELP` / `# TYPE` lines** in the output. Metric semantics must be inferred.
+- The output contains no `# HELP` or `# TYPE` lines and therefore carries no metric descriptions.
 
 Labels on every disk metric: `device_name`, `disk_name`, `host_name`, `project_name`, `service`,
 `vm_name`.
 `device_name` carries the **`mws-` prefix** — `device_name="mws-datadisk"` for `deviceName: datadisk`,
 so it joins directly to `/dev/disk/by-id/mws-datadisk`. `disk_name` is the generated cloud resource
-generated resource name, not the deviceName.
+name, not the deviceName.
 
 | Metric | Notes |
 |---|---|
@@ -304,7 +303,7 @@ generated resource name, not the deviceName.
 | `compute_vm_disk_read_latency_hist_bucket` / `_count` / `_sum` | **histogram**, not quantiles; `le` in **nanoseconds** |
 | `compute_vm_disk_write_latency_hist_*` | same |
 | `compute_vm_disk_write_queue_length` / `_max` | write queue only — **no read queue metric exists** |
-| `compute_vm_disk_ops_peak_quota_utilization` | **read 0 even at full saturation — do not use** |
+| `compute_vm_disk_ops_peak_quota_utilization` | read 0 even at full saturation |
 | `compute_vm_disk_bytes_peak_quota_utilization` | same, reads 0 |
 
 Non-disk VM metrics also exported: `compute_vm_network_{received,sent}_{bytes,packets}`,
@@ -335,19 +334,14 @@ previous regime. Measured on the ramp into saturation: `read_ops` went 636 → 1
 three publications while `read_ops_peak` sat at 1001 from the first one. The 1136 overshoot is the
 window straddling idle and full load.
 
-→ **`_peak` reacts within one publication; the average takes up to 60 s longer.** Prefer `_peak` for
-scale-up decisions. The average is not wrong, just slower.
+The measured `_peak` series reacts within one publication; the average takes up to 60 seconds
+longer. The observed worst-case visibility delay is approximately 75 seconds of publication lag plus
+a 60-second trailing window, or about 135 seconds total.
 
-→ **Worst-case detection latency ≈ 75 s lag + 60 s window ≈ 135 s.** This is the hard floor on dwell
-time: no decision can be based on data younger than this, and any dwell shorter than ~3 min is
-measuring noise.
-
-**The quota-utilization metrics look purpose-built for this and are broken.** Both read `0` on a disk
-whose peak equals its limit. Utilization must be computed as `read_ops_peak / spec.iops` instead.
+Both quota-utilization metrics read `0` on a disk whose peak equals its provisioned limit.
 
 **Counter cross-check:** guest `/proc/diskstats` showed 960744 reads on `sdb`;
-`compute_vm_disk_read_latency_hist_count` showed 960770. The platform counts the same operations the
-guest does, so guest-side and platform-side collection are interchangeable for op counts.
+`compute_vm_disk_read_latency_hist_count` showed 960770 during the same run.
 
 ### VM metrics [V]
 
@@ -443,11 +437,11 @@ UpsertDisk(ctx, UpsertDiskRequest, opts...)
 DeleteDisk(ctx, DeleteDiskRequest, opts...)
 ```
 
-**`UpdateDisk` already carries `updateOnly=true`** — no need to hand-roll the HTTP call.
+`UpdateDisk` sends the request with `updateOnly=true`.
 
 Both request structs also expose:
 - `ValidateOnly *bool` — server-side dry run: "выполнить все проверки… но не выполнять саму операцию"
-- `IdempotencyKey *string` — safe retries, which matters given how often requests fail mid-flight here
+- `IdempotencyKey *string` — idempotency key for retryable requests
 
 `model.UpdateDiskSpecRequest` wraps every field in `optional.Optional`, so a partial update is
 expressible in the type system — send `Iops` alone and leave the rest unset. Immutable fields carry
