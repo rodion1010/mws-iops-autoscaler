@@ -2,17 +2,14 @@ package config
 
 import "time"
 
-// ResolvedPolicy is a policy with nothing left to inherit.
+// ResolvedPolicy has no remaining inherited values.
 type ResolvedPolicy struct {
 	MinIOPS  int
 	MaxIOPS  int
 	Advanced ResolvedAdvanced
 }
 
-// ResolvedRuntime is the runtime block with defaults filled in.
-// CollectionInterval here is the single canonical sampling cadence (docs/design.md §4.2)
-// — one Sampler ticks one source for every managed disk in a single call,
-// so there is no per-policy equivalent to keep in sync with this one.
+// ResolvedRuntime has defaults filled and one process-wide collection cadence.
 type ResolvedRuntime struct {
 	MetricsSource      string
 	CollectionInterval time.Duration
@@ -20,9 +17,7 @@ type ResolvedRuntime struct {
 	DiscoveryInterval  time.Duration
 }
 
-// ResolvedConfig is the fully resolved local-mode config. Discovery (M1) maps
-// live disks against DiskPolicies / Disks to build the managed set; this
-// package only resolves policy, since it has no access to the live disk list.
+// ResolvedConfig is the fully inherited local-mode configuration.
 type ResolvedConfig struct {
 	VMPolicy     ResolvedPolicy
 	Disks        DisksSpec
@@ -30,8 +25,7 @@ type ResolvedConfig struct {
 	Runtime      ResolvedRuntime
 }
 
-// defaultResolvedPolicy is the platform-default rung of the inheritance chain
-// (docs/configuration.md §5): default limits and the one built-in advanced set.
+// defaultResolvedPolicy is the root of policy inheritance.
 func defaultResolvedPolicy() ResolvedPolicy {
 	return ResolvedPolicy{
 		MinIOPS:  DefaultMinIOPS,
@@ -40,9 +34,7 @@ func defaultResolvedPolicy() ResolvedPolicy {
 	}
 }
 
-// Resolve merges the config's policy inheritance chain and fills in runtime
-// defaults. It assumes cfg has already passed Validate — in particular, that
-// no advanced field is set without advanced.enabled: true.
+// Resolve applies policy inheritance and runtime defaults to a validated config.
 func Resolve(cfg *Config) *ResolvedConfig {
 	vmPolicy := resolvePolicy(defaultResolvedPolicy(), &cfg.Policy)
 
@@ -59,9 +51,7 @@ func Resolve(cfg *Config) *ResolvedConfig {
 	}
 }
 
-// resolvePolicy merges parent (already resolved) with child (a partial
-// override, possibly nil). "An object inherits the whole policy, then
-// overrides only the fields it sets explicitly" (docs/configuration.md §5).
+// resolvePolicy overlays explicitly set child fields on an already resolved parent.
 func resolvePolicy(parent ResolvedPolicy, child *PolicySpec) ResolvedPolicy {
 	result := parent
 
@@ -138,7 +128,7 @@ func applyAdvancedOverride(dst *ResolvedAdvanced, src *AdvancedSpec) {
 	}
 }
 
-// Defaults for the runtime block (docs/configuration.md §6 examples).
+// Runtime defaults.
 const (
 	defaultMetricsSource      = "guest"
 	defaultCollectionInterval = 10 * time.Second
@@ -146,33 +136,12 @@ const (
 	defaultDiscoveryInterval  = 5 * time.Minute
 )
 
-// samplerCapacitySlackSamples is extra headroom added on top of the exact
-// endpoint-to-endpoint minimum (issue #7's "explicit slack... plus any
-// documented jitter allowance"), so a Sampler.Tick that fires a little
-// late or a source.Sample call that occasionally comes back empty (a
-// missed tick, docs/design.md §4.2) doesn't immediately reopen the same off-by-one gap
-// this formula exists to close. Calibration-pending, same treatment as
-// every other constant of this shape (design.md §8.5).
+// samplerCapacitySlackSamples tolerates jitter and occasional missing samples beyond the exact span.
 const samplerCapacitySlackSamples = 2
 
-// SamplerCapacity sizes the ring buffer by the longest configured window
-// across the VM policy and every per-disk override — Sampler.NewSampler
-// (design.md §3.2 "Bounded memory") takes one capacity for every disk, so
-// it must fit whichever disk needs the most history. Exported so both the
-// orchestrator (which sizes the real Sampler, cmd/mws-iops-autoscaler)
-// and Validate (which rejects a config that would size it too small to
-// ever complete a window, issue #6) share exactly one formula — never two
-// independently-reasoned-about copies that could silently drift apart.
-//
-// N samples taken at exact cadence span only (N-1) × interval, not N ×
-// interval — the span is measured endpoint to endpoint, not sample to
-// sample (issue #7, reopened). A buffer sized as the naive
-// floor(window/interval) is therefore always one sample short of ever
-// spanning the full window: with the default 30-minute scale-down window
-// and a 1-minute cadence, a capacity-30 buffer can span at most 29
-// minutes, so WindowFullDown could never become true. The corrected
-// formula is ceil(window/interval) + 1 to guarantee the span, plus
-// samplerCapacitySlackSamples of headroom for jitter.
+// SamplerCapacity sizes the shared ring for the longest resolved policy window.
+// Endpoint span requires ceil(window/interval)+1 samples; additional slack tolerates jitter.
+// Exporting the formula keeps validation and sampler construction consistent.
 func (rc *ResolvedConfig) SamplerCapacity() int {
 	longest := rc.VMPolicy.Advanced.ScaleDownWindow
 	for _, p := range rc.DiskPolicies {
@@ -181,11 +150,7 @@ func (rc *ResolvedConfig) SamplerCapacity() int {
 		}
 	}
 	if rc.Runtime.CollectionInterval <= 0 || longest <= 0 {
-		// Defensive only — validateResolvedRuntime/validateAdvancedRanges
-		// already reject a non-positive collection_interval or window
-		// outright; this just keeps the method itself panic-free (no
-		// division by zero) if ever called against an unvalidated
-		// ResolvedConfig.
+		// Keep this method safe if called with an unvalidated non-positive duration.
 		return 1
 	}
 	n := int((longest+rc.Runtime.CollectionInterval-1)/rc.Runtime.CollectionInterval) + 1 + samplerCapacitySlackSamples

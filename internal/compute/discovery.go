@@ -6,11 +6,7 @@ import (
 	"fmt"
 )
 
-// Skip reason categories (issue #4) — stable, low-cardinality codes for
-// telemetry labels. Reason (below) carries the free-text detail (disk
-// names, VM names, the underlying GetDisk error) for logs; Category is
-// what's safe to put on a Prometheus label, since Reason's text is
-// unbounded and would blow up label cardinality if used directly.
+// Skip categories are stable, low-cardinality telemetry labels; Reason holds diagnostic text.
 const (
 	SkipReasonAmbiguousClass    = "ambiguous_class"
 	SkipReasonEmptyIdentity     = "empty_identity"
@@ -22,14 +18,8 @@ const (
 	SkipReasonDuplicateAlias    = "duplicate_alias"
 )
 
-// SkippedDisk records a disk entry Discover could not resolve as safely
-// manageable — an ambiguous or missing class, an empty or duplicate
-// identity, a failed GetDisk read, or an invalid current IOPS value. It is
-// excluded from the returned VirtualMachine.Disks entirely (US-002:
-// "skipped with a warning, not a crash" means excluded from the managed
-// set, not kept with a IOPS==0 that would misrepresent it as pinned at the
-// platform minimum). Discover itself does not log; the caller decides how
-// to surface these.
+// SkippedDisk describes an attachment excluded because it cannot be managed safely.
+// Discover leaves logging and telemetry policy to its caller.
 type SkippedDisk struct {
 	Alias    string
 	DiskName string
@@ -37,11 +27,8 @@ type SkippedDisk struct {
 	Reason   error
 }
 
-// Discover is the slow-path read described in design.md §4.1: fetch the VM,
-// classify each disk (docs/design.md §4.7), resolve the VM's vCPU count via its VmType,
-// and read each disk's own spec/status. It is idempotent and rebuilds the
-// whole picture on every call — a disk that changed class, was detached, or
-// was resized externally is picked up here, not cached across calls.
+// Discover rebuilds the VM, disk classifications, capacities, and live disk state.
+// It does not retain a previous snapshot.
 func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []SkippedDisk, error) {
 	vm, err := c.GetVirtualMachine(ctx, vmName)
 	if err != nil {
@@ -54,27 +41,9 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 	}
 	vm.VCPUCount = vmType.VCPUCount
 
-	// Duplicate-identity detection (issue #4): a second attachment sharing
-	// either the cloud resource name (DiskName, the GetDisk/UpdateDisk
-	// target) or the device_name (DeviceName, registry.Select's join key
-	// per docs/design.md §4.1) makes both entries ambiguous — registry.Select's
-	// by-device-name map would otherwise silently let the second one win,
-	// with no diagnostic that the first was ever dropped. Neither should
-	// ever happen on a real VM; treated as an eligibility failure, not
-	// guessed at, if it does. Empty DeviceName is common and expected
-	// (platform hasn't assigned one yet) and is deliberately excluded from
-	// this check — it's not an identity collision, and local mode's guest-
-	// path verification (agent.go) independently excludes an unresolvable
-	// empty-device disk on its own.
-	// Alias uniqueness (issue #20): unlike DeviceName, an empty Alias is
-	// never expected — every attachment is created with one — so it is
-	// checked unconditionally, not only when non-empty. Aliases are the
-	// dependent write path's own join key (write.go's
-	// validateDependentWriteTarget); a disk whose alias collides with
-	// another's is unsafe to offer as a management target even before any
-	// write is attempted, since UpdateDependentDiskIOPS would refuse it
-	// anyway on its own fresh read — better to never select it in the
-	// first place than to discover the write path always aborts.
+	// Duplicate resource names or device names make attachment selection ambiguous.
+	// Empty device names are allowed here but may fail local guest-path eligibility.
+	// Aliases must always be non-empty and unique because dependent writes join on them.
 	diskNameCount := make(map[string]int, len(vm.Disks))
 	deviceNameCount := make(map[string]int, len(vm.Disks))
 	aliasCount := make(map[string]int, len(vm.Disks))
@@ -124,8 +93,7 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 
 		disk, err := c.GetDisk(ctx, sd.DiskName)
 		if err != nil {
-			// Excluded from the managed set, not fatal to discovery as a
-			// whole (US-002) — but excluded, not left in with IOPS==0.
+			// A single unreadable disk is excluded without failing the VM-wide discovery.
 			skipped = append(skipped, SkippedDisk{Alias: sd.Alias, DiskName: sd.DiskName, Category: SkipReasonGetDiskFailed, Reason: err})
 			continue
 		}
@@ -138,12 +106,7 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 		sd.BaseIOPS = disk.BaseIOPS
 		sd.ExtraIOPS = disk.ExtraIOPS
 		sd.TotalIOPS = disk.TotalIOPS
-		// metadata.id, from the same GetDisk call — see StorageDisk.
-		// IncarnationID's own comment. Left empty (degrading
-		// IdentityKey() to DiskName alone) rather than excluding the
-		// disk if the response carried none: unlike SpecIOPS<=0, an
-		// absent incarnation id isn't evidence of a broken disk, just a
-		// weaker identity guarantee for this one cycle.
+		// Missing metadata.id weakens identity to name-only but does not make the disk unusable.
 		sd.IncarnationID = disk.IncarnationID
 		resolved = append(resolved, sd)
 	}
@@ -152,9 +115,7 @@ func Discover(ctx context.Context, c Client, vmName string) (*VirtualMachine, []
 	return vm, skipped, nil
 }
 
-// VMIOPSPool is the VM's aggregate IOPS ceiling — 3000 × vCPU, not enforced
-// by the platform (docs/platform-reference.md "IOPS limits"; the check is entirely the
-// agent's responsibility).
+// VMIOPSPool is the agent-enforced aggregate ceiling of 3000 IOPS per vCPU.
 const iopsPerVCPU = 3000
 
 func VMIOPSPool(vm *VirtualMachine) int64 {
