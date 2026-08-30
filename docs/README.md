@@ -3,7 +3,7 @@
 | Document | Canonical responsibility |
 |---|---|
 | [`prd-mws-iops-autoscaler.md`](prd-mws-iops-autoscaler.md) | Product requirements, MVP scope, priorities and success criteria |
-| [`design.md`](design.md) | Current architecture, flows, contracts, safety invariants, observability and testing strategy |
+| [`design.md`](design.md) | Accepted architecture, flows, contracts, safety invariants, observability and testing strategy |
 | [`configuration.md`](configuration.md) | User-facing policy model, defaults, validation rules and examples |
 | [`platform-reference.md`](platform-reference.md) | Verified behaviour of external MWS APIs, SDKs, metrics and billing |
 | [`development.md`](development.md) | Credential handling, developer setup and the reference test environment |
@@ -14,9 +14,14 @@
 
 ## Source-of-truth model
 
-The PRD is primary for *what* the product must do and *why*. `design.md` is primary for how the
-current system satisfies those requirements. Neither document is the source for measured external
-platform behaviour: those facts live in `platform-reference.md`.
+The PRD is primary for *what* the product must do and *why*. `design.md` is the normative source for
+the currently accepted architecture: how the system is intended to satisfy those requirements.
+Neither document is the source for measured external platform behaviour: those facts live in
+`platform-reference.md`.
+
+The design is living: update it when an architectural decision changes. Implementation may
+temporarily lag behind it; track that deviation in an issue rather than weakening the accepted
+contract or turning the design into a completion-status document.
 
 A requirement exists once it is in the PRD. A design document cannot silently introduce, widen or
 drop a requirement. Conversely, an implementation detail does not belong in the PRD merely because

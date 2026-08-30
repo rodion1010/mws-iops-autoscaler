@@ -5,9 +5,11 @@
 **Author:** generated with Claude Code, reviewed by Product Lead (NBS)
 
 **Derived from `docs/prd-mws-iops-autoscaler.md`, which is the primary document.** The PRD states the
-requirements; this document describes how they are met. It does not introduce, widen or drop a
-requirement on its own — when a design decision changes one, the PRD is amended in the same change
-(see the update rule in `docs/README.md`).
+requirements; this document defines the currently accepted architecture for meeting them. It is
+normative and living: update it when an architectural decision changes. Track implementation gaps in
+issues rather than copying completion status into this document or weakening an accepted invariant.
+This document does not introduce, widen or drop a requirement on its own — when a design decision
+changes one, the PRD is amended in the same change (see the update rule in `docs/README.md`).
 
 Companion documents: requirements in `docs/prd-mws-iops-autoscaler.md`, configuration model in
 `docs/configuration.md`, measured platform behaviour in `docs/platform-reference.md`, and temporary
