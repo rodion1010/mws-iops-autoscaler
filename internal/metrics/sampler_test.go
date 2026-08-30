@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// fakeSource is a hand-written MetricSource for Sampler tests — no mocking
-// framework, matching the rest of this codebase's testing style.
 type fakeSource struct {
 	next []Sample // returned once, then cleared, so each Tick controls its own batch
 	err  error
@@ -52,7 +50,7 @@ func TestSampler_tickAppendsAndCapsAtCapacity(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("len(Samples) = %d, want 3 (capped at capacity)", len(got))
 	}
-	// Oldest dropped: ticks 0 and 1 fell off, 2/3/4 remain, in order.
+	// Capacity three retains ticks 2, 3, and 4 in order.
 	for i, want := range []float64{2, 3, 4} {
 		if got[i].ReadOps != want {
 			t.Errorf("Samples[%d].ReadOps = %v, want %v", i, got[i].ReadOps, want)
@@ -76,7 +74,7 @@ func TestSampler_setDisksPrunesStaleBuffers(t *testing.T) {
 		t.Fatal("expected one buffered sample before pruning")
 	}
 
-	// disk-1 is no longer managed as of the next discovery cycle.
+	// disk-1 leaves the managed set at the next discovery.
 	s.SetDisks([]DiskRef{{DiskID: "disk-2"}})
 	if got := s.Samples(ref1); len(got) != 0 {
 		t.Errorf("Samples(disk-1) after pruning = %d, want 0 — stale history must not survive", len(got))
@@ -114,14 +112,7 @@ func TestSampler_samplesReturnsACopy(t *testing.T) {
 	}
 }
 
-// --- pre-merge review: DiskID alone is not a safe long-term identity ---
 
-// TestSampler_recreatedDiskUnderSameDiskIDStartsEmpty is the core new
-// behavior: a disk deleted and recreated under the identical DiskName (an
-// ordinary Terraform "replace") gets a new IncarnationID from the
-// platform. The Sampler must not hand the new disk's Analyze call any of
-// the old disk's buffered history, even though DiskID — the string
-// GetDisk/UpdateDisk actually write against — is unchanged.
 func TestSampler_recreatedDiskUnderSameDiskIDStartsEmpty(t *testing.T) {
 	src := &fakeSource{}
 	s, err := NewSampler(src, 10)
@@ -139,8 +130,7 @@ func TestSampler_recreatedDiskUnderSameDiskIDStartsEmpty(t *testing.T) {
 		t.Fatal("test setup: expected one buffered sample for the original incarnation")
 	}
 
-	// The next discovery cycle sees a disk with the same DiskID but a
-	// different IncarnationID — deleted and recreated under the same name.
+	// Discovery now returns the same name with a new incarnation.
 	recreated := DiskRef{DiskID: "vm-1-data", IncarnationID: "incarnation-2"}
 	s.SetDisks([]DiskRef{recreated})
 
@@ -152,11 +142,6 @@ func TestSampler_recreatedDiskUnderSameDiskIDStartsEmpty(t *testing.T) {
 	}
 }
 
-// TestSampler_tickRoutesSamplesToTheCurrentIncarnation proves Tick itself
-// — not just SetDisks's own pruning — attributes newly collected samples
-// to the currently-managed incarnation. The Source only ever returns
-// DiskID (it has no concept of IncarnationID), so Tick's own lookup from
-// DiskID back to the full DiskRef is what makes this work.
 func TestSampler_tickRoutesSamplesToTheCurrentIncarnation(t *testing.T) {
 	src := &fakeSource{}
 	s, err := NewSampler(src, 10)

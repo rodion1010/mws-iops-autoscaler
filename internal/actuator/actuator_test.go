@@ -9,10 +9,6 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/decider"
 )
 
-// fakeClient is a minimal hand-written compute.Client for this package's
-// own tests — internal/compute's own fakeClient is unexported and lives in
-// an _test.go file, so it isn't importable here. No mocking framework,
-// matching the rest of this codebase's testing style.
 type fakeClient struct {
 	vms   map[string]*compute.VirtualMachine
 	disks map[string]*compute.Disk
@@ -151,13 +147,7 @@ func TestApply_dependentDiskWrites(t *testing.T) {
 }
 
 func TestApply_dependentDryRunNeverCallsWriteEndpoint(t *testing.T) {
-	// docs/design.md §4.7: no server-side dry-run exists for the dependent path.
-	// dependentErr proves the write endpoint was never even called — if
-	// Apply called it, this test would fail with that error instead of
-	// succeeding. The VM still needs a real Disks entry, though (issue
-	// #16): a dry run now exercises the same fresh-read/conflict checks a
-	// real write would, which requires finding the target device on the
-	// re-read VM.
+	// Dependent dry-run performs local checks and must never call the VM write endpoint.
 	c := &fakeClient{
 		vms: map[string]*compute.VirtualMachine{"vm-1": {
 			Name: "vm-1", Etag: "etag-1",

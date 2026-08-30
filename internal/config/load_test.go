@@ -7,8 +7,7 @@ import (
 )
 
 func TestLoad_examples(t *testing.T) {
-	// Both fixtures are transcribed verbatim from docs/configuration.md §6.1
-	// and §6.2 — if these stop parsing, the schema and the docs have drifted.
+	// These fixtures are copied from the documented configuration examples.
 	for _, name := range []string{"local-auto-discovery.yaml", "local-per-disk-policies.yaml"} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := Load(filepath.Join("testdata", name))
@@ -60,10 +59,6 @@ totally_unknown_field: true
 }
 
 func TestLoad_evaluationCollectionIntervalRejected(t *testing.T) {
-	// docs/design.md §4.2: policy.advanced.evaluation.collection_interval was removed —
-	// sampling cadence is process-wide (runtime.metrics.collection_interval)
-	// and cannot vary per policy, so it is rejected as an unknown key like
-	// any other superseded field, not silently accepted and ignored.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	writeFile(t, path, `
@@ -139,9 +134,6 @@ runtime: {}
 }
 
 func TestLoad_supersededDeviceSelector(t *testing.T) {
-	// docs/design.md §4.1: the `device:` and `disk_id:` selectors from the first
-	// configuration.md draft must stay rejected — as unknown keys, not as a
-	// dedicated check (load.go's doc comment).
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	writeFile(t, path, `

@@ -202,7 +202,7 @@ func TestValidate_rules(t *testing.T) {
 			mutate: func(c *Config) {
 				c.Disks.Mode = "selected"
 				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}}
-				// c.Disks.Exclude is already ["bootdisk"] from validConfig.
+				// validConfig already excludes bootdisk.
 			},
 			wantSub: "exclude only applies to mode: auto-discovery",
 		},
@@ -351,7 +351,6 @@ func TestValidate_rules(t *testing.T) {
 			},
 			wantSub: "runtime.metrics.collection_interval",
 		},
-		// --- issue #6, reopened ---
 		{
 			name: "latency.mode absolute is rejected (not implemented)",
 			mutate: func(c *Config) {
@@ -455,18 +454,7 @@ func TestValidate_rules(t *testing.T) {
 		{
 			name: "collection_interval longer than scale_up_window is rejected even though it fits scale_down_window",
 			mutate: func(c *Config) {
-				// Default scale_up_window is 5m, scale_down_window 30m
-				// (defaults.go's PresetBalanced). validateSamplerCapacity
-				// alone would not catch this: its ceil(window/interval)+
-				// 1+slack formula, checked only against the longer
-				// scale_down_window, always yields at least 4 for any
-				// positive window/interval pair — it cannot express "this
-				// interval is too long relative to a *specific* window" at
-				// all (ceil() of a positive ratio never drops below 1,
-				// however disproportionate the inputs). At most one real
-				// sample can ever fall inside a 5-minute trailing span
-				// when samples are 20 minutes apart, so scale_up_window
-				// could never become evaluable — pre-merge review finding.
+				// A 20-minute cadence cannot populate the default five-minute scale-up window.
 				c.Runtime.Metrics.CollectionInterval = durationPtr("20m")
 			},
 			wantSub: "scale_up_window",
@@ -482,8 +470,7 @@ func TestValidate_rules(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Deterministic regardless of the ambient environment — the
-			// "platform source without a key" case relies on this being unset.
+			// Keep the platform-key case independent of the ambient environment.
 			t.Setenv(monitoringAPIKeyPathEnv, "")
 
 			cfg := validConfig()
@@ -539,8 +526,6 @@ func durationPtr(s string) *Duration {
 	return &dd
 }
 
-// negativeDurationPtr returns -d, since Duration's own YAML-facing type has
-// no negative-literal parse form worth adding just for this test.
 func negativeDurationPtr(t *testing.T, s string) *Duration {
 	t.Helper()
 	d, err := time.ParseDuration(s)
@@ -552,11 +537,7 @@ func negativeDurationPtr(t *testing.T, s string) *Duration {
 }
 
 func TestValidateSamplerCapacity_directDefenseInDepth(t *testing.T) {
-	// SamplerCapacity's own corrected formula (issue #7) can no longer
-	// actually produce a value below minSamplesForWindowMirror through any
-	// real config — this exercises validateSamplerCapacity directly
-	// against a hand-built ResolvedConfig to prove the backstop itself
-	// still works, independent of whether today's formula can reach it.
+	// Exercise the capacity-floor backstop independently of the current sizing formula.
 	rc := &ResolvedConfig{
 		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{ScaleDownWindow: 5 * time.Minute}},
 		Runtime:  ResolvedRuntime{CollectionInterval: time.Minute},
@@ -568,8 +549,7 @@ func TestValidateSamplerCapacity_directDefenseInDepth(t *testing.T) {
 		t.Fatalf("validateSamplerCapacity() = %v, want none for a sufficient capacity", errs)
 	}
 
-	// Force the defensive branch a real config can no longer reach: a
-	// zero window collapses SamplerCapacity to its floor of 1.
+	// A zero window forces the otherwise unreachable defensive branch.
 	rc.VMPolicy.Advanced.ScaleDownWindow = 0
 	if got := rc.SamplerCapacity(); got != 1 {
 		t.Fatalf("test setup: SamplerCapacity() = %d, want 1 with a zero window", got)
@@ -583,8 +563,6 @@ func TestValidateSamplerCapacity_directDefenseInDepth(t *testing.T) {
 	}
 }
 
-// --- pre-merge review: validate collection_interval against EVERY
-// configured window, not just SamplerCapacity's single longest one ---
 
 func TestValidateCollectionIntervalAgainstWindows_rejectsTooLongForShortestWindow(t *testing.T) {
 	rc := &ResolvedConfig{
@@ -593,9 +571,7 @@ func TestValidateCollectionIntervalAgainstWindows_rejectsTooLongForShortestWindo
 		}},
 		Runtime: ResolvedRuntime{CollectionInterval: 20 * time.Minute},
 	}
-	// SamplerCapacity itself stays comfortably large — it's sized against
-	// the 30m scale_down_window, not the 5m scale_up_window this interval
-	// actually breaks.
+	// Buffer capacity follows the 30-minute down window, but cadence still breaks the five-minute up window.
 	if got := rc.SamplerCapacity(); got < minSamplesForWindowMirror {
 		t.Fatalf("test setup: SamplerCapacity() = %d, want >= %d — this test is specifically about SamplerCapacity NOT catching the bug", got, minSamplesForWindowMirror)
 	}
@@ -613,8 +589,7 @@ func TestValidateCollectionIntervalAgainstWindows_rejectsTooLongForShortestWindo
 }
 
 func TestValidateCollectionIntervalAgainstWindows_catchesPerDiskOverride(t *testing.T) {
-	// The VM policy's own windows are fine; only a per-disk override is
-	// too short for the configured cadence — must still be caught.
+	// Only the per-disk override is shorter than the configured cadence.
 	rc := &ResolvedConfig{
 		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
 			ScaleUpWindow: 30 * time.Minute, ScaleDownWindow: 60 * time.Minute,
@@ -634,11 +609,7 @@ func TestValidateCollectionIntervalAgainstWindows_catchesPerDiskOverride(t *test
 }
 
 func TestValidateCollectionIntervalAgainstWindows_equalToWindowIsRejected(t *testing.T) {
-	// A collection_interval exactly equal to a window is NOT evaluable: at
-	// that cadence a trailing span of the same length holds exactly two
-	// real samples, one short of analyzer.windowFull's minimum of three, so
-	// the window can never fill. It must be rejected, not accepted (an
-	// earlier version of this rule wrongly passed the equal case).
+	// Equal cadence yields only two boundary samples, below the three-sample minimum.
 	rc := &ResolvedConfig{
 		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
 			ScaleUpWindow: 5 * time.Minute, ScaleDownWindow: 30 * time.Minute,
@@ -655,9 +626,7 @@ func TestValidateCollectionIntervalAgainstWindows_equalToWindowIsRejected(t *tes
 }
 
 func TestValidateCollectionIntervalAgainstWindows_strictlyShorterThanWindowIsValid(t *testing.T) {
-	// Strictly shorter than the shortest window is fine — a natural or
-	// reached-back predecessor can supply the third sample a full window
-	// needs.
+	// A strictly shorter cadence can supply the third sample.
 	rc := &ResolvedConfig{
 		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{
 			ScaleUpWindow: 5 * time.Minute, ScaleDownWindow: 30 * time.Minute,

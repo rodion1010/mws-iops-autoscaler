@@ -7,11 +7,7 @@ import (
 	"testing"
 )
 
-// TestBuildDependentUpdateBody_wireShape is the regression test for issue #3:
-// the marshaled request must carry every alias with nothing but its name,
-// except TargetAlias which additionally carries spec.iops — never
-// boot/deviceName/diskType/size/ref, and never a value round-tripped through
-// a response→domain→request translation.
+// The dependent update body must contain every alias and only the target IOPS.
 func TestBuildDependentUpdateBody_wireShape(t *testing.T) {
 	req := DependentUpdateRequest{
 		VMName:      "iops-test-vm",
@@ -79,10 +75,7 @@ func TestBuildDependentUpdateBody_wireShape(t *testing.T) {
 		}
 	}
 
-	// Belt-and-suspenders on the raw bytes: none of the immutable fields the
-	// old full-spec-resend path used to send should appear anywhere. Matched
-	// as JSON keys (with the trailing colon) so "bootdisk" — a legitimate
-	// alias value — doesn't false-positive against the "boot" field name.
+	// Check raw JSON keys so legitimate alias text cannot produce a false positive.
 	for _, forbidden := range []string{"\"boot\":", "\"deviceName\":", "\"diskType\":", "\"size\":", "\"ref\":"} {
 		if strings.Contains(string(raw), forbidden) {
 			t.Errorf("wire body contains forbidden field %q — immutable fields must never be resent: %s", forbidden, raw)
@@ -104,11 +97,7 @@ func TestBuildDependentUpdateBody_targetAliasNotFound(t *testing.T) {
 	}
 }
 
-// TestSDKClient_UpdateDependentDisk_refusesEmptyEtag exercises the real
-// sdkClient (not the fake) to confirm the empty-etag guard fires before any
-// SDK/network call — a zero-value sdkClient has a nil vm client, so reaching
-// c.vm.UpdateVirtualMachine would panic, and this test would fail loudly
-// instead of silently passing for the wrong reason.
+// A zero-value SDK client proves the empty-etag guard runs before any network call.
 func TestSDKClient_UpdateDependentDisk_refusesEmptyEtag(t *testing.T) {
 	c := &sdkClient{}
 
