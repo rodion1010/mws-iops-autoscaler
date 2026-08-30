@@ -866,14 +866,31 @@ type Decider interface {
 // nothing else.
 
 // Decide's default (neither Saturated nor Underutilized) branch reports
-// three distinct NoAction reasons, not one generic "no_signal" (issue
-// #15) — an operator reading the journal/metrics needs to tell "this
-// disk's data can't be trusted right now" apart from "this disk hasn't
-// accumulated enough history yet" apart from "this disk is genuinely,
-// trustworthily idle":
-//   metrics_stale    — !a.Fresh
+// four distinct NoAction reasons, not one generic "no_signal" (issue #15,
+// deepened by the pre-merge review) — an operator reading the
+// journal/metrics needs to tell "this disk has never produced a single
+// sample" apart from "this disk's data can't be trusted right now" apart
+// from "this disk hasn't accumulated enough history yet" apart from "this
+// disk is genuinely, trustworthily idle". Order matters: !a.HasData is
+// checked first, because a.Fresh is also false (zero value) for a disk
+// that has never been sampled — without that ordering, true cold-start
+// would misreport as metrics_stale, implying data once flowed and has
+// since gone stale, a different operational fact (and a different fix)
+// than never having received any data at all.
+//   no_data          — !a.HasData (never sampled — true cold start)
+//   metrics_stale    — a.HasData but !a.Fresh (sampled before, now too old)
 //   window_not_full  — a.Fresh but neither WindowFullUp nor WindowFullDown
 //   no_signal        — a.Fresh and at least one window full, nothing triggered
+//
+// A fifth reason, discovery_stale, is not one of Decide's own outcomes —
+// it is reported by the orchestrator (agent.go's reconcile) when a cycle
+// never reaches Decide at all, because the discovery snapshot itself is
+// untrusted (invalidated by a fatal discover() error, or older than
+// max_discovery_age; ADR-014/ADR-015). Every disk still sitting in that
+// untrusted managed set gets one NoAction/discovery_stale journal record
+// per skipped cycle (design.md §7.2/§4.3's own rule: "why didn't it
+// scale? must always be answerable from the log alone" — a cycle skipped
+// for stale discovery must not read as if nothing happened at all).
 
 type Actuator interface {
     Apply(ctx context.Context, d Decision) (Applied, error)
@@ -959,7 +976,7 @@ exposing them.
 
 | Failure | Behaviour |
 |---|---|
-| Metrics unavailable | Mark disks "no data" (`Analysis.Fresh = false`, reason `metrics_stale`, issue #15), take no action, alert after `n` cycles |
+| Metrics unavailable | Mark disks "no data" — reason `no_data` if never sampled at all (`Analysis.HasData = false`), `metrics_stale` if sampled before but now too old (`Analysis.Fresh = false`, issue #15, pre-merge review) — take no action, alert after `n` cycles |
 | Compute API unavailable | Retry with backoff; decisions queue but never stack up (latest wins). Once the last successful discovery exceeds `max_discovery_age` (3× `discovery_interval`), reconcile skips every disk for that cycle rather than keep acting on a snapshot that may no longer reflect reality (issue #15) |
 | Discovery fails outright (Compute API error, or an unmatched `disks.selected` device_name, issue #5 reopened) | The managed snapshot is invalidated the instant the failure happens (`Agent.managedValid`), not merely once `max_discovery_age` eventually elapses — a fatal error and staleness-by-age are two independent, both-checked gates (pre-merge review) |
 | Write returns non-2xx | Log with full request context, back off, do not update state |
@@ -1081,6 +1098,20 @@ only a `scale_down` or `Underutilized`-but-suppressed record makes them meaningf
 
 This is the primary calibration input for the `--dry-run` harness (§8.5) — thresholds are tuned from
 these records, not from reasoning.
+
+**`no_data` / `metrics_stale` / `discovery_stale`** (pre-merge review) are three operationally distinct
+reasons an operator must be able to tell apart from the journal alone — "this disk has never produced a
+sample" is not the same fact as "this disk's data went stale" or "the discovery snapshot itself can no
+longer be trusted," and each implies a different fix. `no_data` and `metrics_stale` are two of Decide's
+own default-branch outcomes (§4.3, and its `Decide` pseudocode's comment above); `discovery_stale` is
+different in kind — it never reaches `Decide` at all, emitted instead by the orchestrator when a whole
+cycle is skipped (`!managedValid` right after a fatal `discover()` error, or the snapshot older than
+`max_discovery_age`, ADR-014/ADR-015). A `discovery_stale` record's `Inputs`/`vm_headroom_iops`/
+`budget_remaining` are honestly zero-valued rather than fabricated: this cycle never called `Decide`, so
+there is no real `Analysis` or guardrail state behind it. Every disk still sitting in the untrusted
+managed set gets its own `discovery_stale` record per skipped cycle — a cycle skipped for stale
+discovery must remain answerable from the journal alone, the same guarantee every other cycle already
+gets.
 
 ### 7.3 Health and alerting
 

@@ -78,15 +78,29 @@ type LatencyStat struct {
 type Analysis struct {
 	DiskID string
 
+	// HasData is false only when this disk has never had a single sample
+	// buffered — the true cold-start case (a fresh disk, a sampler not
+	// yet wired, a guest path that never resolved), distinct from Fresh
+	// below (pre-merge review: "no_data" and "metrics_stale" are
+	// different operational situations and must not share one reason).
+	// SampleAge is meaningless when HasData is false — there is no
+	// sample to measure the age of — so callers (telemetry.RecordStaleness
+	// in particular) must check this before publishing SampleAge, rather
+	// than let a zero-value SampleAge be read as "0 seconds old" (which
+	// reads as maximally fresh, the opposite of the truth).
+	HasData bool
+
 	// Latest-sample snapshot, for the journal — not what Saturated/
 	// Underutilized are computed from (each re-evaluates its own signal
 	// against every sample in its own window, not just this one).
 	// Fresh is false when the newest buffered sample is older than
 	// MaxSampleAge — sampling has stopped or fallen badly behind (issue
-	// #15). Saturated and Underutilized are both unconditionally false
-	// whenever Fresh is false: stale evidence must never drive a decision,
-	// scale-up included. SampleAge is exposed alongside it for the journal
-	// and for telemetry.RecordStaleness, not just as an internal gate.
+	// #15). Only meaningful when HasData is true; both are false together
+	// for the cold-start case. Saturated and Underutilized are both
+	// unconditionally false whenever Fresh is false: stale evidence must
+	// never drive a decision, scale-up included. SampleAge is exposed
+	// alongside it for the journal and for telemetry.RecordStaleness, not
+	// just as an internal gate.
 	Fresh     bool
 	SampleAge time.Duration
 

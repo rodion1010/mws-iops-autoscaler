@@ -160,3 +160,51 @@ subsumes the other.
 8. [x] Tests: a fatal `compute.Discover`-level failure and an unmatched `disks.selected` device_name
        (`registry.Select`-level failure) each block the very next `reconcile()` call even with a
        deliberately generous `maxDiscoveryAge`.
+
+> **Refined (2026-08-30, pre-merge review): `metrics_stale` conflated two different facts, and a
+> discovery-skip cycle went unjournaled.** The three-way reason table above assumed every disk reaching
+> `Decide`'s default branch had been sampled at least once — `!a.Fresh` was read as "stale," full stop.
+> But `a.Fresh` is also `false` for a disk that has *never* had a single sample buffered (a fresh disk, a
+> sampler not yet wired, a guest path that never resolved): the zero value of a `bool` field nobody has
+> set yet. Reported as `metrics_stale`, that reads as "data once flowed and has since gone stale" — a
+> different operational fact, and a different fix, than "no data has ever arrived." Separately: both
+> `managedValid`-triggered and age-triggered discovery-skip cycles (items 3/8 above) `return`ed out of
+> `reconcile()` before a single disk was analyzed or journaled — a cycle skipped for stale discovery
+> produced *no record at all*, breaking this codebase's own journal guarantee (§4.3/§7.2: "why didn't it
+> scale? must always be answerable from the log alone") for exactly the failure mode most likely to need
+> that answer.
+>
+> `Analysis.HasData` closes the first gap: true the moment `Analyze` is handed a non-empty sample slice,
+> false only for true cold start. `Decide`'s default branch checks it first, ahead of `!a.Fresh` — since
+> `!a.HasData` implies `!a.Fresh` too, ordering is what makes the distinction real rather than
+> unreachable. `SampleAge` is meaningless when `HasData` is false (there is no sample to measure the age
+> of), so `reconcile()` now guards `telemetry.RecordStaleness` with `if an.HasData` — a cold-start disk
+> gets no `metric_staleness_seconds` series at all, rather than a misleading `0` (which reads as
+> maximally fresh, the opposite of the truth).
+>
+> `Agent.journalDiscoveryStale` closes the second gap: called immediately before both of `reconcile()`'s
+> early-`return`s (the `!managedValid` guard and the age-based `maxDiscoveryAge` guard), it writes one
+> `NoAction`/`discovery_stale` journal record per disk still sitting in the untrusted managed snapshot.
+> No `Decide` call happens on this path, so there is no real `Analysis` or guardrail state to report —
+> `Inputs`/`VMHeadroomIOPS`/`BudgetRemaining` stay honestly zero-valued rather than fabricated. The
+> updated reason ladder:
+>
+> | Reason | Condition | Where |
+> |---|---|---|
+> | `no_data` | `!a.HasData` (never sampled) | `Decide`'s default branch |
+> | `metrics_stale` | `a.HasData` but `!a.Fresh` (sampled before, now too old) | `Decide`'s default branch |
+> | `window_not_full` | `a.Fresh` but neither `WindowFullUp` nor `WindowFullDown` | `Decide`'s default branch |
+> | `no_signal` | `a.Fresh` and at least one window full, nothing triggered | `Decide`'s default branch |
+> | `discovery_stale` | snapshot invalidated or aged out — `Decide` never called this cycle | `reconcile()`, before the loop |
+
+9. [x] `internal/analyzer/types.go`: `Analysis.HasData bool`.
+10. [x] `internal/analyzer/analyzer.go`: `HasData` set true once samples is non-empty.
+11. [x] `internal/decider/decider.go`: default branch gains `!a.HasData` → `no_data`, checked first.
+12. [x] `cmd/mws-iops-autoscaler/agent.go`: `RecordStaleness` guarded by `an.HasData`;
+        `journalDiscoveryStale` writes a `discovery_stale` record per managed disk on both discovery-skip
+        paths.
+13. [x] Tests: `decider.TestDecide_noDataIsNoAction`; agent-level tests proving `journalDiscoveryStale`
+        actually emits one record per disk on each skip path, and that `RecordStaleness` publishes
+        nothing for a disk with an empty sample buffer.
+14. [x] `docs/design.md` synced: `Decide`'s reason-ladder comment, §6.1 failure-mode table, new §7.2
+        paragraph on `no_data`/`metrics_stale`/`discovery_stale`.

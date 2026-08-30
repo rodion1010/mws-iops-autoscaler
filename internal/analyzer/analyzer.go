@@ -64,8 +64,13 @@ func NewWindowAnalyzer() *WindowAnalyzer {
 func (a *WindowAnalyzer) Analyze(diskID string, samples []metrics.Sample, p EvaluationPolicy, specIOPS int64, now time.Time) Analysis {
 	out := Analysis{DiskID: diskID}
 	if len(samples) == 0 {
+		// HasData stays false (zero value) — true cold start, distinct
+		// from Fresh going false after having had real data (issue: "no
+		// data yet" and "data went stale" are different situations, must
+		// not share metrics_stale as their one reason).
 		return out
 	}
+	out.HasData = true
 
 	newest := samples[len(samples)-1]
 	upWindow := trailingWindow(samples, p.ScaleUpWindow)

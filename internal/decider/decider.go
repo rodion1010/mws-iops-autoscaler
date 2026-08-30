@@ -124,13 +124,23 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		return withReason(base, ActionScaleDown, "underutilized")
 
 	default:
-		// Distinguish *why* neither verdict fired (issue #15) — "no_signal"
-		// alone conflated three very different situations in the journal:
-		// data that's too old to trust, a window that hasn't accumulated
-		// enough history yet, and a genuinely quiet-but-fresh-and-full disk
-		// with nothing to do. The first two are transient/operational; only
-		// the third is the disk actually behaving.
+		// Distinguish *why* neither verdict fired (issue #15, extended
+		// pre-merge review) — "no_signal" alone conflated four very
+		// different situations in the journal: no sample has ever arrived
+		// for this disk at all, data arrived before but is now too old to
+		// trust, a window that hasn't accumulated enough history yet, and
+		// a genuinely quiet-but-fresh-and-full disk with nothing to do.
+		// The first three are transient/operational; only the fourth is
+		// the disk actually behaving. no_data is checked first — a.Fresh
+		// is false (zero value) in that case too, so ordering matters:
+		// without this case ahead of it, a disk that has simply never
+		// been sampled would misreport as metrics_stale, implying data
+		// once flowed and has since gone stale, which is a different
+		// operational fact (and a different fix) than never having
+		// received any data at all.
 		switch {
+		case !a.HasData:
+			return withReason(base, ActionNoAction, "no_data")
 		case !a.Fresh:
 			return withReason(base, ActionNoAction, "metrics_stale")
 		case !a.WindowFullUp && !a.WindowFullDown:

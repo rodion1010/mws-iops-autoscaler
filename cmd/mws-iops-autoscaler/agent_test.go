@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http/httptest"
@@ -340,7 +342,11 @@ func (emptySource) Sample(_ context.Context, _ []metrics.DiskRef) ([]metrics.Sam
 }
 func (emptySource) Kind() metrics.SourceKind { return metrics.SourceGuest }
 
-func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent, *recordingActuator) {
+// newReconcileTestAgent's third return value is the journal's raw output —
+// a real bytes.Buffer rather than discard{} so tests can assert on what got
+// written (or, on the success path, that nothing did), not just on
+// Actuator.Apply call counts.
+func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent, *recordingActuator, *bytes.Buffer) {
 	t.Helper()
 	act := &recordingActuator{}
 	budget, err := state.LoadBudget(t.TempDir() + "/budget.jsonl")
@@ -351,6 +357,7 @@ func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent
 	if err != nil {
 		t.Fatalf("NewSampler: %v", err)
 	}
+	var journalOut bytes.Buffer
 	return &Agent{
 		vmName:               "vm-1",
 		allowScaleDown:       true,
@@ -368,32 +375,94 @@ func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent
 		actuator:     act,
 		tracker:      state.NewTracker(budget),
 		telemetry:    telemetry.NewRegistry(),
-		journal:      journal.NewWriter(discard{}),
+		journal:      journal.NewWriter(&journalOut),
 		readiness:    &health.Readiness{},
-	}, act
+	}, act, &journalOut
 }
 
 func TestReconcile_skipsWhenDiscoveryStale(t *testing.T) {
-	a, act := newReconcileTestAgent(t, time.Now().Add(-time.Hour)) // far past maxDiscoveryAge
+	a, act, journalOut := newReconcileTestAgent(t, time.Now().Add(-time.Hour)) // far past maxDiscoveryAge
 	a.reconcile(context.Background())
 	if len(act.calls) != 0 {
 		t.Errorf("Actuator.Apply called %d times, want 0 — a stale discovery snapshot must never reach the Decider (issue #15)", len(act.calls))
 	}
+	assertSingleJournalReason(t, journalOut, "discovery_stale")
 }
 
 func TestReconcile_skipsWhenNeverDiscovered(t *testing.T) {
-	a, act := newReconcileTestAgent(t, time.Time{}) // zero value: discover() never succeeded
+	a, act, journalOut := newReconcileTestAgent(t, time.Time{}) // zero value: discover() never succeeded
 	a.reconcile(context.Background())
 	if len(act.calls) != 0 {
 		t.Errorf("Actuator.Apply called %d times, want 0 — a zero-value lastDiscoverySuccess must fail closed, not be treated as fresh", len(act.calls))
 	}
+	assertSingleJournalReason(t, journalOut, "discovery_stale")
 }
 
 func TestReconcile_proceedsWhenDiscoveryFresh(t *testing.T) {
-	a, act := newReconcileTestAgent(t, time.Now())
+	a, act, journalOut := newReconcileTestAgent(t, time.Now())
 	a.reconcile(context.Background())
 	if len(act.calls) != 1 {
 		t.Errorf("Actuator.Apply called %d times, want 1 — a fresh discovery snapshot must not be blocked", len(act.calls))
+	}
+	if journalOut.Len() == 0 {
+		t.Error("journal is empty on a normal reconcile — every cycle must emit a record, discovery_stale or otherwise (design.md §4.3)")
+	}
+	if strings.Contains(journalOut.String(), `"discovery_stale"`) {
+		t.Error("journal contains a discovery_stale record on a fresh-discovery cycle that reached the Decider")
+	}
+}
+
+// TestReconcile_doesNotPublishStalenessForColdStartDisk is the pre-merge
+// review's second half of item 8: "для пустого буфера не следует
+// публиковать metrics_stale со значением staleness 0." newReconcileTestAgent
+// wires emptySource, so the Sampler's ring buffer for this disk has never
+// received a single Tick() — an.HasData is false, the true cold-start case
+// — and reconcile must skip the RecordStaleness call entirely rather than
+// publish a misleading 0-second reading.
+func TestReconcile_doesNotPublishStalenessForColdStartDisk(t *testing.T) {
+	a, _, _ := newReconcileTestAgent(t, time.Now())
+	a.reconcile(context.Background())
+
+	body := scrapeAgentTelemetry(t, a)
+	if strings.Contains(body, "iops_autoscaler_metric_staleness_seconds") {
+		t.Errorf("metric_staleness_seconds published for a disk that has never had a sample:\n%s", body)
+	}
+}
+
+// assertSingleJournalReason asserts that journalOut holds exactly one
+// journal line and that its reason field matches want — proving
+// journalDiscoveryStale (pre-merge review: "for discovery_stale... a
+// journal/decision record") is the source of the record, not that reconcile
+// merely happened to skip.
+func assertSingleJournalReason(t *testing.T, journalOut *bytes.Buffer, want string) {
+	t.Helper()
+	assertJournalReasons(t, journalOut, 1, want)
+}
+
+// assertJournalReasons asserts journalOut holds exactly wantCount lines, one
+// per still-managed disk on the skipped-cycle path, and that every one
+// carries reason=wantReason and action=NoAction.
+func assertJournalReasons(t *testing.T, journalOut *bytes.Buffer, wantCount int, wantReason string) {
+	t.Helper()
+	trimmed := strings.TrimSpace(journalOut.String())
+	var lines []string
+	if trimmed != "" {
+		lines = strings.Split(trimmed, "\n")
+	}
+	if len(lines) != wantCount {
+		t.Fatalf("journal has %d lines, want %d: %q", len(lines), wantCount, journalOut.String())
+	}
+	for _, line := range lines {
+		var rec journal.Record
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("unmarshal journal line: %v", err)
+		}
+		if rec.Reason != wantReason {
+			t.Errorf("journal record reason = %q, want %q", rec.Reason, wantReason)
+		}
+		if rec.Action != string(decider.ActionNoAction) {
+			t.Errorf("journal record action = %q, want %q", rec.Action, decider.ActionNoAction)
+		}
 	}
 }
 
@@ -415,6 +484,8 @@ func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
 	a.maxDiscoveryAge = time.Hour
 	a.decider = fixedDecider{action: decider.ActionScaleUp, target: 2000}
 	a.analyzer = analyzer.NewWindowAnalyzer()
+	var journalOut bytes.Buffer
+	a.journal = journal.NewWriter(&journalOut)
 
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("first discover(): %v", err)
@@ -434,6 +505,7 @@ func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
 	if len(act.calls) != 0 {
 		t.Errorf("Actuator.Apply called %d times, want 0 — a fatal discovery error must block reconcile immediately, not wait for maxDiscoveryAge", len(act.calls))
 	}
+	assertSingleJournalReason(t, &journalOut, "discovery_stale")
 }
 
 // TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk is the same
@@ -454,6 +526,8 @@ func TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk(t *testing.T) {
 	a.decider = fixedDecider{action: decider.ActionScaleUp, target: 2000}
 	a.analyzer = analyzer.NewWindowAnalyzer()
 	a.cfg.Disks = config.DisksSpec{Mode: "auto-discovery"}
+	var journalOut bytes.Buffer
+	a.journal = journal.NewWriter(&journalOut)
 
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("first discover(): %v", err)
@@ -470,6 +544,10 @@ func TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk(t *testing.T) {
 	if len(act.calls) != 0 {
 		t.Errorf("Actuator.Apply called %d times, want 0 — an unmatched disks.selected device_name must block reconcile immediately", len(act.calls))
 	}
+	// Two disks ("good" and "bad") were still in the managed set from the
+	// first, successful discover() — both must get a discovery_stale
+	// record, not just whichever one the fatal error itself named.
+	assertJournalReasons(t, &journalOut, 2, "discovery_stale")
 }
 
 // perDiskDecider returns a fixed Decision per DiskID, looked up by the

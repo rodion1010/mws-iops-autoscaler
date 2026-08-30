@@ -261,19 +261,34 @@ func TestDecide_neitherSignalIsNoAction(t *testing.T) {
 	// Fresh and both windows full — a genuinely quiet, trustworthy disk
 	// with nothing to do, distinct from the metrics_stale/window_not_full
 	// cases below (issue #15).
-	a := analyzer.Analysis{Saturated: false, Underutilized: false, Fresh: true, WindowFullUp: true, WindowFullDown: true}
+	a := analyzer.Analysis{Saturated: false, Underutilized: false, HasData: true, Fresh: true, WindowFullUp: true, WindowFullDown: true}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionNoAction || got.Reason != "no_signal" {
 		t.Errorf("got %+v, want NoAction/no_signal", got)
 	}
 }
 
+func TestDecide_noDataIsNoAction(t *testing.T) {
+	d := NewPolicyDecider(true)
+	// HasData=false (true cold start — no sample has ever arrived for this
+	// disk) must be reported distinctly from metrics_stale (had data, now
+	// too old) — different operational situations, different fixes
+	// (pre-merge review). Checked ahead of Fresh, which is also false
+	// here (zero value) — HasData must win, not get shadowed by it.
+	a := analyzer.Analysis{Saturated: false, Underutilized: false, HasData: false, Fresh: false}
+	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionNoAction || got.Reason != "no_data" {
+		t.Errorf("got %+v, want NoAction/no_data", got)
+	}
+}
+
 func TestDecide_staleMetricsIsNoAction(t *testing.T) {
 	d := NewPolicyDecider(true)
-	// Fresh=false must be reported distinctly from a plain "no_signal" —
-	// this is the case an operator needs to be able to tell apart from a
-	// disk that's simply idle (issue #15).
-	a := analyzer.Analysis{Saturated: false, Underutilized: false, Fresh: false, WindowFullUp: true, WindowFullDown: true}
+	// HasData=true (data arrived before) but Fresh=false (it's since gone
+	// stale) must be reported distinctly from both no_data and a plain
+	// "no_signal" — this is the case an operator needs to be able to tell
+	// apart from a disk that's simply idle (issue #15).
+	a := analyzer.Analysis{Saturated: false, Underutilized: false, HasData: true, Fresh: false, WindowFullUp: true, WindowFullDown: true}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionNoAction || got.Reason != "metrics_stale" {
 		t.Errorf("got %+v, want NoAction/metrics_stale", got)
@@ -284,7 +299,7 @@ func TestDecide_windowNotFullIsNoAction(t *testing.T) {
 	d := NewPolicyDecider(true)
 	// Fresh but cold-start (neither window has enough history yet) must
 	// also be distinct from both metrics_stale and a genuine no_signal.
-	a := analyzer.Analysis{Saturated: false, Underutilized: false, Fresh: true, WindowFullUp: false, WindowFullDown: false}
+	a := analyzer.Analysis{Saturated: false, Underutilized: false, HasData: true, Fresh: true, WindowFullUp: false, WindowFullDown: false}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionNoAction || got.Reason != "window_not_full" {
 		t.Errorf("got %+v, want NoAction/window_not_full", got)

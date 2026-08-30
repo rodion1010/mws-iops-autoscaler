@@ -256,6 +256,32 @@ func (a *Agent) discover(ctx context.Context) error {
 	return nil
 }
 
+// journalDiscoveryStale writes one NoAction/discovery_stale journal record
+// per disk still sitting in the (now-untrusted) managed snapshot, when
+// reconcile bails before ever reaching Decide (pre-merge review: "why
+// didn't it scale" must always be answerable from the journal alone,
+// design.md §4.3 — a cycle skipped for stale discovery previously emitted
+// nothing at all, a silent gap in that guarantee). No Decide call happens
+// on this path, so there is no real Analysis or guardrail state to
+// report — Inputs/VMHeadroomIOPS/BudgetRemaining stay zero-valued,
+// honestly reflecting that this cycle never looked at any of it, rather
+// than fabricating values Decide never computed.
+func (a *Agent) journalDiscoveryStale(managed []registry.ManagedDisk, now time.Time) {
+	for _, m := range managed {
+		d := decider.Decision{
+			DiskID:  m.Disk.DiskName,
+			Current: m.Disk.IOPS,
+			Target:  m.Disk.IOPS,
+			Action:  decider.ActionNoAction,
+			Reason:  "discovery_stale",
+		}
+		class := string(m.Disk.Class)
+		if err := a.journal.Write(journal.NewRecord(now, a.vmName, class, d)); err != nil {
+			log.Printf("journal: %v", err)
+		}
+	}
+}
+
 // diskRef builds m's metrics.DiskRef, including IncarnationID — the one
 // place this construction happens, so every caller (guest-path
 // verification, Sampler.SetDisks, reconcile's own Samples lookup) derives
@@ -331,6 +357,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 	// again (pre-merge review finding).
 	if !managedValid {
 		log.Printf("reconcile: managed snapshot invalidated by the last discover() call failing — skipping this cycle until the next successful discovery")
+		a.journalDiscoveryStale(managed, now)
 		return
 	}
 
@@ -348,6 +375,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 	// and never revisited — could never detect on its own.
 	if age := now.Sub(lastDiscovery); lastDiscovery.IsZero() || age > a.maxDiscoveryAge {
 		log.Printf("reconcile: discovery snapshot stale (age=%s, max=%s) — skipping this cycle (issue #15)", age, a.maxDiscoveryAge)
+		a.journalDiscoveryStale(managed, now)
 		return
 	}
 
@@ -358,7 +386,15 @@ func (a *Agent) reconcile(ctx context.Context) {
 		ep := toEvaluationPolicy(m.Policy.Advanced, a.maxSampleAge, a.maxSampleGap)
 		an := a.analyzer.Analyze(diskID, samples, ep, m.Disk.IOPS, now)
 		analyses[diskID] = an
-		a.telemetry.RecordStaleness(diskID, an.SampleAge.Seconds())
+		// Only once this disk has ever had a real sample (pre-merge
+		// review) — an.SampleAge is meaningless before that (nothing to
+		// measure the age of), and publishing it as 0 would read as
+		// maximally fresh, the opposite of the true "no data yet" state.
+		// A cold-start disk simply has no metric_staleness_seconds series
+		// until its first sample lands, rather than a misleading 0.
+		if an.HasData {
+			a.telemetry.RecordStaleness(diskID, an.SampleAge.Seconds())
+		}
 	}
 
 	// Aggregated across every disk decided this cycle and reported once,
