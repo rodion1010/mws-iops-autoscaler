@@ -112,7 +112,6 @@ func TestSampler_samplesReturnsACopy(t *testing.T) {
 	}
 }
 
-
 func TestSampler_recreatedDiskUnderSameDiskIDStartsEmpty(t *testing.T) {
 	src := &fakeSource{}
 	s, err := NewSampler(src, 10)

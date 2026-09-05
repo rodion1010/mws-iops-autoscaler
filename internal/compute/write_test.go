@@ -195,7 +195,6 @@ func TestUpdateDependentDiskIOPS_deviceNotFound(t *testing.T) {
 	}
 }
 
-
 func TestUpdateDependentDiskIOPS_duplicateAliasRefusedWithoutWriting(t *testing.T) {
 	c := newFakeClient()
 	c.vms["iops-test-vm"] = &VirtualMachine{
@@ -355,7 +354,6 @@ func (m *mismatchDependentClient) UpdateDependentDisk(ctx context.Context, req D
 	}
 	return vm, nil
 }
-
 
 // vmWithDependentDiskNamed matches a real VM read: DiskName set, IncarnationID empty.
 func vmWithDependentDiskNamed(diskName string) *VirtualMachine {

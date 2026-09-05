@@ -1,0 +1,10 @@
+apiVersion: autoscaling.mws.cloud/v1alpha1
+kind: IOPSAutoScaler
+mode: local
+policy:
+  limits:
+    min_iops: 1000
+    max_iops: 10000
+disks:
+  mode: auto-discovery
+runtime: {}

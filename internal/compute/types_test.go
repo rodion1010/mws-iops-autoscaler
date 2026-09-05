@@ -2,7 +2,6 @@ package compute
 
 import "testing"
 
-
 func TestStorageDisk_IdentityKey_differsAcrossIncarnations(t *testing.T) {
 	original := StorageDisk{DiskName: "vm-1-data", IncarnationID: "incarnation-1"}
 	recreated := StorageDisk{DiskName: "vm-1-data", IncarnationID: "incarnation-2"}

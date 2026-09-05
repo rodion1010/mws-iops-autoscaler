@@ -563,7 +563,6 @@ func TestValidateSamplerCapacity_directDefenseInDepth(t *testing.T) {
 	}
 }
 
-
 func TestValidateCollectionIntervalAgainstWindows_rejectsTooLongForShortestWindow(t *testing.T) {
 	rc := &ResolvedConfig{
 		VMPolicy: ResolvedPolicy{Advanced: ResolvedAdvanced{

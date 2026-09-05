@@ -422,6 +422,28 @@ vms, err := client.ListVirtualMachines(ctx, computeclient.ListVirtualMachinesReq
 
 Credential sources: static token, SA authorized key, custom provider, Instance Metadata Service.
 
+### Endpoint discovery and transport [V]
+
+Verified by probing the SDK against an in-process `httptest` fake (see `internal/platformfake`).
+
+- Environment seams exercised: `MWS_BASE_ENDPOINT`, `MWS_TOKEN` (static credential, no IAM round
+  trip), `MWS_PROJECT`, and `MWS_COMPUTE_METADATA_HOST` (IMDS host override, path
+  `/computeMetadata/v1/<key>`).
+- `mws.Load` performs one discovery call, `GET <base>/endpoint`, expecting a body of the shape
+  `[{"id":"compute","address":"..."}]`.
+- A plain `http://` base endpoint is accepted — no TLS is demanded and `mws.Load` succeeds.
+- Every response must carry `Content-Type: application/json`. Without it the SDK discards the body
+  and returns `invalid Content-Type: '<type>'`, losing the original HTTP status code.
+
+### Retry policy and error decoding [V]
+
+- The idempotency header is `Idempotency-Key` — no `X-` prefix.
+- The default retryer (`retry.NewStandardRetry`) retries any transport error plus HTTP 408, 409, 423,
+  424, 429, 500, 502, 503, 504, 521, 522 and 524, with exponential jitter from 20 ms to 10 s, up to
+  three attempts total (`defaultAttempts = 3` in the interceptor that drives the retryer).
+- An error body must carry a `code` field or the SDK cannot decode it into a classified `APIError`.
+  `INVALID_ETAG_KEY` is the code `mwserrors.IsAPIErrorInvalidEtagKeyStatus` recognises.
+
 ### Disk client [V]
 
 `computesdk.NewDisk(ctx, sdk)` exists — alongside `NewDiskBackup`, `NewDiskType`, `NewImage`,

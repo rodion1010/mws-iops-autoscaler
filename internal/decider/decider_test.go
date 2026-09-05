@@ -295,7 +295,6 @@ func TestDecide_diskIDAndCurrentSetEvenOnNoAction(t *testing.T) {
 	}
 }
 
-
 func TestGuardrails_ceilingNeverExceededEvenWhenNotOnGrid(t *testing.T) {
 	// A fractional VM ceiling must floor to the billing grid, never round above the bound.
 	target, changed := guardrails(10000 /* raw */, 3000 /* current */, 4523, /* ceiling */
@@ -382,7 +381,7 @@ func TestDemand_closedRegimeUnavailableWithoutBaseline(t *testing.T) {
 	}
 }
 
-	// Byte-denominated queue growth cannot be added to served IOPS.
+// Byte-denominated queue growth cannot be added to served IOPS.
 func TestDemand_invalidQueueGrowthRateNeverSums(t *testing.T) {
 	a := analyzer.Analysis{
 		QueueGrowthRate:      1_000_000, // a bytes/s-scale number, not ops/s
@@ -396,7 +395,7 @@ func TestDemand_invalidQueueGrowthRateNeverSums(t *testing.T) {
 	}
 }
 
-	// Invalid queue units fall back to latency demand rather than max-clamp.
+// Invalid queue units fall back to latency demand rather than max-clamp.
 func TestDecide_invalidQueueGrowthRateFallsBackNotMaxClamp(t *testing.T) {
 	d := NewPolicyDecider(true)
 	a := analyzer.Analysis{

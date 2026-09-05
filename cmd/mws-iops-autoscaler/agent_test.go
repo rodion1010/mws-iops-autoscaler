@@ -151,7 +151,7 @@ type stubClient struct {
 	getVMCalls int
 	vm         *compute.VirtualMachine
 	disks      map[string]*compute.Disk
-	getVMErr error
+	getVMErr   error
 }
 
 func (s *stubClient) GetVirtualMachine(_ context.Context, _ string) (*compute.VirtualMachine, error) {
@@ -211,7 +211,7 @@ func newDiscoverableTestAgent(t *testing.T, act actuator.Actuator, client comput
 }
 
 func TestActuate_successAdoptsAppliedValueImmediately(t *testing.T) {
-// A successful write must immediately update the managed snapshot.
+	// A successful write must immediately update the managed snapshot.
 	act := &recordingActuator{}
 	a, _ := newTestAgent(t, true, act)
 	a.managed = []registry.ManagedDisk{independentDisk()}
@@ -275,7 +275,7 @@ func TestActuate_telemetry_failedWriteNeverMovesProvisionedIOPS(t *testing.T) {
 }
 
 func TestActuate_conflictNeverUpdatesManagedAndForcesRediscovery(t *testing.T) {
-// A stale decision must not write or adopt the externally changed value.
+	// A stale decision must not write or adopt the externally changed value.
 	client := &stubClient{vm: &compute.VirtualMachine{Name: "vm-1", VMType: "t1"}}
 	conflictErr := fmt.Errorf("update independent disk %q: %w (expected current 1000, live 5000)", "vm-1-data", compute.ErrConcurrentModification)
 	act := erroringActuator{err: conflictErr}
@@ -285,7 +285,7 @@ func TestActuate_conflictNeverUpdatesManagedAndForcesRediscovery(t *testing.T) {
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
-// Empty rediscovery invalidates the previous managed snapshot.
+	// Empty rediscovery invalidates the previous managed snapshot.
 	if len(a.managed) != 0 {
 		t.Errorf("managed = %+v, want empty — forced rediscovery must replace the stale snapshot with a fresh one, never leave the conflicting entry in place", a.managed)
 	}
@@ -344,7 +344,7 @@ func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent
 		allowScaleDown:       true,
 		maxDiscoveryAge:      time.Minute,
 		lastDiscoverySuccess: lastDiscoverySuccess,
-// Immediate invalidation and age-based staleness are independent guards.
+		// Immediate invalidation and age-based staleness are independent guards.
 		managedValid: true,
 		managed:      []registry.ManagedDisk{independentDisk()},
 		sampler:      sampler,
@@ -451,7 +451,7 @@ func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
 		t.Fatal("test setup: first discover() did not populate the managed set")
 	}
 
-// Fail discovery after a previously successful snapshot.
+	// Fail discovery after a previously successful snapshot.
 	a.client = &stubClient{getVMErr: errors.New("simulated: transient Compute API failure")}
 	if err := a.discover(context.Background()); err == nil {
 		t.Fatal("test setup: second discover() unexpectedly succeeded")
@@ -496,7 +496,7 @@ func TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk(t *testing.T) {
 	if len(act.calls) != 0 {
 		t.Errorf("Actuator.Apply called %d times, want 0 — an unmatched disks.selected device_name must block reconcile immediately", len(act.calls))
 	}
-// The previous managed set still contains both disks.
+	// The previous managed set still contains both disks.
 	assertJournalReasons(t, &journalOut, 2, "discovery_stale")
 }
 
@@ -608,7 +608,7 @@ func TestActuate_incarnationMismatchReleasesReservationAndForcesRediscovery(t *t
 	if got := len(a.tracker.PendingChanges()); got != 0 {
 		t.Errorf("PendingChanges() = %d, want 0 — an incarnation mismatch proves nothing was written, so the reservation must be released", got)
 	}
-// Empty rediscovery invalidates the previous managed snapshot.
+	// Empty rediscovery invalidates the previous managed snapshot.
 	if len(a.managed) != 0 {
 		t.Errorf("managed = %+v, want empty — an incarnation mismatch must force rediscovery, not leave the stale snapshot in place", a.managed)
 	}
@@ -669,7 +669,6 @@ func TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder(t *testing.T) {
 		})
 	}
 }
-
 
 func vmWithTwoIndependentDisks() *compute.VirtualMachine {
 	return &compute.VirtualMachine{
@@ -742,7 +741,6 @@ func TestHasManagedDisks(t *testing.T) {
 	}
 }
 
-
 func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *testing.T) {
 	client := &stubClient{
 		vm: vmWithTwoIndependentDisks(), // has "good" and "bad", not "missing-disk"
@@ -755,7 +753,7 @@ func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *test
 	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "good"}, {DeviceName: "missing-disk"},
 	}}
-// Start from a previously healthy readiness state.
+	// Start from a previously healthy readiness state.
 	a.readiness.SetConfigValid(true)
 	a.readiness.SetDiscoverySucceeded(true)
 	a.readiness.SetSourceReachable(true)
@@ -799,7 +797,6 @@ func TestDiscover_selectedSucceedsWhenEveryDeviceMatches(t *testing.T) {
 	}
 }
 
-
 func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
 	act := &recordingActuator{}
 	a, tracker := newTestAgent(t, true, act)
@@ -813,7 +810,6 @@ func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
 		t.Errorf("PendingChanges() = %+v, want none — a successful write must be Confirmed, not left Pending", tracker.PendingChanges())
 	}
 }
-
 
 func TestActuate_writeFailure_liveStillAtBefore_releases(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
@@ -836,7 +832,7 @@ func TestActuate_writeFailure_liveStillAtBefore_releases(t *testing.T) {
 }
 
 func TestActuate_writeFailure_liveAtTarget_confirmsNotReleases(t *testing.T) {
-// The platform may have applied the request despite the returned transport error.
+	// The platform may have applied the request despite the returned transport error.
 	act := &erroringActuatorRecording{err: errors.New("simulated: response lost after the request landed")}
 	a, tracker := newTestAgent(t, true, act)
 	a.managed = []registry.ManagedDisk{independentDisk()}
@@ -894,7 +890,7 @@ func TestActuate_writeFailure_liveReadFails_staysPending(t *testing.T) {
 }
 
 func TestActuate_dryRunErrorAlwaysReleases(t *testing.T) {
-// Dry-run errors cannot hide a mutation, so the reservation is releasable.
+	// Dry-run errors cannot hide a mutation, so the reservation is releasable.
 	act := &erroringActuatorRecording{err: errors.New("simulated dry-run validation failure")}
 	a, tracker := newTestAgent(t, true, act)
 	a.dryRun = true
@@ -1060,7 +1056,7 @@ func TestReconcilePendingBudget_detachedDiskLeftPending(t *testing.T) {
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-// The reservation targets a disk absent from the managed set.
+	// The reservation targets a disk absent from the managed set.
 	if err := a.tracker.ReserveChange("vm-1-detached", "key-1", 1000, 2000, time.Now()); err != nil {
 		t.Fatalf("ReserveChange: %v", err)
 	}
@@ -1084,13 +1080,13 @@ func TestReconcilePendingBudget_recreatedDiskUnderSameNameNeverMatchesStaleReser
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-// The reservation belongs to the original incarnation.
+	// The reservation belongs to the original incarnation.
 	original := compute.StorageDisk{DiskName: "vm-1-good", IncarnationID: "incarnation-1"}
 	if err := a.tracker.ReserveChange(original.IdentityKey(), "key-1", 1000, 2000, time.Now()); err != nil {
 		t.Fatalf("ReserveChange: %v", err)
 	}
 
-// Discovery now contains a replacement with the same name.
+	// Discovery now contains a replacement with the same name.
 	client.disks["vm-1-good"] = &compute.Disk{Name: "vm-1-good", SpecIOPS: 2000, IncarnationID: "incarnation-2"}
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("second discover: %v", err)

@@ -69,3 +69,16 @@ Before every manual or E2E run:
 Detailed platform behaviour and API contracts are recorded in
 [platform-reference.md](platform-reference.md). E2E infrastructure work remains explicitly deferred
 in [TODO.md](TODO.md) until it is scheduled.
+
+## Integration tests
+
+`docs/design.md` §8.2's scenarios and the binary smoke test sit behind the `integration` build tag
+and run with:
+
+```bash
+go test -race -tags integration ./...
+```
+
+They drive the real `Agent` against an in-process fake MWS API and metadata service
+(`internal/platformfake`), so they need no credentials and no network. `go test ./...` (no tag) skips
+them, which keeps the default local loop fast.

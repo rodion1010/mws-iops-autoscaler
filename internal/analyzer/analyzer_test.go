@@ -15,8 +15,8 @@ var testPolicy = EvaluationPolicy{
 	UtilizationThreshold:      0.98,
 	QueueDepthThreshold:       1,
 	LatencyBaselineMultiplier: 1.5,
-	MaxSampleAge: time.Hour,
-	MaxSampleGap: time.Hour,
+	MaxSampleAge:              time.Hour,
+	MaxSampleGap:              time.Hour,
 }
 
 var epoch = time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
@@ -94,7 +94,7 @@ func TestAnalyze_gatePassesButNoSignal_notSaturated(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
-	// Utilization reaches 100%, but no saturation signal fires.
+		// Utilization reaches 100%, but no saturation signal fires.
 		samples = append(samples, sampleAt(m, 1000, 0, 0, 0, 0, time.Millisecond, time.Millisecond))
 	}
 	got := a.Analyze("disk1", samples, testPolicy, specIOPS, asOf(samples))
@@ -110,7 +110,7 @@ func TestAnalyze_queueDepthAloneTriggers(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
-	// Bandwidth alone opens the resource gate for this large-block workload.
+		// Bandwidth alone opens the resource gate for this large-block workload.
 		samples = append(samples, sampleAt(m, 100, 0, 40*1024*1024, 0, 5, time.Millisecond, time.Millisecond))
 	}
 	got := a.Analyze("disk1", samples, testPolicy, specIOPS, asOf(samples))
@@ -308,7 +308,7 @@ func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
-	// Queue rises from 0 to 5 over 300 seconds.
+		// Queue rises from 0 to 5 over 300 seconds.
 		samples = append(samples, sampleAt(m, 300, 200, 0, 0, float64(m), time.Millisecond, time.Millisecond))
 	}
 	got := a.Analyze("disk1", samples, testPolicy, specIOPS, asOf(samples))
@@ -323,7 +323,6 @@ func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
 		t.Error("QueueGrowthRateValid = false, want true — guest samples are always ops-denominated (docs/design.md §4.2)")
 	}
 }
-
 
 func sampleWithQueueUnit(minute int, queue float64, unit metrics.QueueDepthUnit) metrics.Sample {
 	s := sampleAt(minute, 100, 0, 0, 0, queue, time.Millisecond, time.Millisecond)
@@ -465,12 +464,11 @@ func TestAnalyze_nonPositiveSpecIOPSIsDefensive(t *testing.T) {
 	}
 }
 
-
 func TestAnalyze_staleSamplesNeverSaturate(t *testing.T) {
 	a := NewWindowAnalyzer()
 	samples := make([]metrics.Sample, 0, 6)
 	for m := 0; m <= 5; m++ {
-	// This shape would be saturated if its evidence were fresh.
+		// This shape would be saturated if its evidence were fresh.
 		samples = append(samples, sampleAt(m, 1000, 0, 0, 0, 5, time.Millisecond, time.Millisecond))
 	}
 	policy := testPolicy
@@ -513,7 +511,6 @@ func TestAnalyze_sampleAgeReportedEvenWhenFresh(t *testing.T) {
 	}
 }
 
-
 func TestWindowFull_gapBreaksFullness(t *testing.T) {
 	// Count and total span pass, but the internal outage invalidates the window.
 	samples := []metrics.Sample{
@@ -529,7 +526,6 @@ func TestWindowFull_gapBreaksFullness(t *testing.T) {
 		t.Error("windowFull = false, want true — a 10-minute maxGap tolerates the 8-minute gap")
 	}
 }
-
 
 func TestComputeBaseline_excludesInactiveDirectionZero(t *testing.T) {
 	// Only reads are active; write latency is a phantom zero value.
@@ -572,7 +568,6 @@ func TestReadWriteLatencies_excludeInactiveSamples(t *testing.T) {
 		t.Errorf("writeLatencies = %v, want [7ms] (only the write-active sample)", w)
 	}
 }
-
 
 func TestWindowFull_toleratesJitterWithinMaxGap(t *testing.T) {
 	// Scheduler jitter alternates 55s and 65s around a one-minute cadence.
@@ -620,7 +615,6 @@ func TestAnalyze_recoversAfterLongOutageWithoutPoisoningFromOldHistory(t *testin
 		t.Error("WindowFullUp = false, want true — the trailing slice is a clean, gap-free 5-minute window; old pre-outage history sitting deeper in the buffer must not block it")
 	}
 }
-
 
 func TestTrailingWindow_jitterNeverPreventsFullSpan(t *testing.T) {
 	// Thirty-one samples include small scheduler jitter around one-minute cadence.
@@ -678,7 +672,6 @@ func TestAnalyze_baselineNotEstablishedFromIdleWindow(t *testing.T) {
 		t.Error("BaselineEstablished = true, want false — an idle window has nothing honest to seed a baseline from")
 	}
 }
-
 
 func blockSample(minute int, opsPerSec float64, blockSize int64) metrics.Sample {
 	return sampleAt(minute, opsPerSec, 0, opsPerSec*float64(blockSize), 0, 0, time.Millisecond, time.Millisecond)
