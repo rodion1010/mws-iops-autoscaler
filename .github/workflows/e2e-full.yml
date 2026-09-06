@@ -1,0 +1,56 @@
+name: E2E (full)
+
+# The full tier provisions and tears down an ephemeral VM and disk.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Never cancel a run while it may own live resources.
+  group: e2e-full
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  full:
+    runs-on: [self-hosted, mws-iops-autoscaler-runner]
+    timeout-minutes: 25
+    steps:
+      # Pin third-party actions because this runner has cloud credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # The persistent runner already retains its module cache.
+          cache: false
+
+      - name: Write SSH key
+        run: |
+          umask 077
+          printf '%s\n' "${{ secrets.E2E_SSH_PRIVATE_KEY }}" > "${RUNNER_TEMP}/e2e_ssh_key"
+          chmod 600 "${RUNNER_TEMP}/e2e_ssh_key"
+
+      - name: Run full e2e
+        env:
+          MWS_PROJECT: ${{ vars.MWS_PROJECT }}
+          MWS_ZONE: ${{ vars.MWS_ZONE }}
+          E2E_RUN_ID: ${{ github.run_id }}
+          E2E_SUBNET_ID: ${{ vars.E2E_SUBNET_ID }}
+          E2E_BOOT_IMAGE: ${{ vars.E2E_BOOT_IMAGE }}
+          E2E_VM_TYPE: ${{ vars.E2E_VM_TYPE }}
+          E2E_AGENT_SA: ${{ vars.E2E_AGENT_SA }}
+          E2E_SSH_PUBLIC_KEY: ${{ vars.E2E_SSH_PUBLIC_KEY }}
+          E2E_SSH_USER: ${{ vars.E2E_SSH_USER }}
+          E2E_SSH_KEY_PATH: ${{ runner.temp }}/e2e_ssh_key
+        # The harness builds the agent dynamically, so cached test results are unsafe.
+        run: go test -count=1 -tags e2e ./e2e/... -run 'TestFull|TestRegression' -v
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/e2e_ssh_key"

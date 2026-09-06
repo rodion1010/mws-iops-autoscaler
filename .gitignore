@@ -12,8 +12,8 @@ id_ed25519
 id_ed25519*
 !*.pub
 
-# Claude Code local overrides (permissions, per-checkout settings)
-.claude/settings.local.json
+# Claude Code — local to this checkout, never shared
+.claude/
 
 # Go
 /bin/

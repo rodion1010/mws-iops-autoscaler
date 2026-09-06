@@ -1,18 +1,5 @@
-// Package platformfake is an in-process fake of the MWS Compute API and
-// instance metadata service, used to prove the repository's SDK translation
-// code against real go.mws.cloud/go-sdk decoders without credentials or
-// network access (docs/design.md §8.2).
-//
-// Success bodies are hand-written fixtures mirroring the subset of each SDK
-// response type its translator in internal/compute/sdk_client.go actually
-// reads, not bodies marshalled from the SDK's own model types: the
-// generated encoders and decoders are not provably symmetric for every
-// optional/oneOf field, so marshalling from the model would have assumed
-// the exact thing this fake exists to verify. fake_test.go's untagged
-// tests pin these fixtures by round-tripping them through the real SDK
-// client. A go.mws.cloud/go-sdk version bump must re-run those tests — a
-// new generated decoder could silently accept or reject a fixture shape
-// that used to be right.
+// Package platformfake implements the Compute and metadata wire protocols
+// needed by integration tests. Hand-written fixtures are decoded by the real SDK.
 package platformfake
 
 import (
@@ -24,11 +11,7 @@ import (
 	"testing"
 )
 
-// Fixed identifiers shared by every test using the fake. DependentDisk and
-// IndependentDisk are cloud resource names (status.storage.disks[].ref), not
-// the VM-local attachment aliases ("bootdisk"/"datadisk") — state below is
-// keyed the same way so a write reachable by resource name (e.g. through the
-// VM update path) and a direct GetDisk on that name observe the same state.
+// Disk constants are resource names, not VM attachment aliases.
 const (
 	Project         = "iops-test-project"
 	VMName          = "iops-test-vm"
@@ -57,12 +40,8 @@ type Fake struct {
 	applies    map[string]int         // disk resource name -> count of actual state mutations (excludes idempotency replays)
 }
 
-// Request is one HTTP request the Compute server observed on a write path,
-// recorded before idempotency replay, failure injection or bounds
-// validation run — so a test can assert a write was attempted regardless of
-// how the fake then handled it. Status is filled in afterwards, once the
-// handler's outcome is known; it is 0 for a request whose connection was
-// dropped by AbortNext instead of receiving a response.
+// Request records a write before replay, injection, or validation. Status is
+// zero when AbortNext drops the connection.
 type Request struct {
 	Method         string
 	Path           string
@@ -71,9 +50,7 @@ type Request struct {
 	Status         int
 }
 
-// injection is one queued fake response for a method+path pair (FailNext or
-// AbortNext), consumed ahead of the handler's own idempotency, validation
-// and mutation logic.
+// injection is a queued response consumed before validation and mutation.
 type injection struct {
 	abort  bool
 	status int
@@ -102,16 +79,9 @@ func New(t *testing.T) *Fake {
 	computeMux.HandleFunc("GET /compute/v1/projects/{project}/disks/{disk}", f.handleGetDisk)
 	computeMux.HandleFunc("POST /compute/v1/projects/{project}/disks/{disk}", f.handleUpdateDisk)
 	computeMux.HandleFunc("GET /compute/v1/vmTypes/{vmType}", f.handleGetVmType)
-	// Catch-all: ServeMux's own default 404 has no Content-Type header, which the
-	// generated SDK decoders reject before ever reporting the 404 itself (see
-	// handleNotFound). Route every unmatched path through the same JSON error path.
+	// SDK error decoding requires JSON even for unmatched routes.
 	computeMux.HandleFunc("/", handleNotFound)
-	// NewUnstartedServer + Start (instead of NewServer, which starts serving
-	// before it returns) keeps this assignment ordered strictly before the
-	// server's serving goroutine is spawned, so the goroutine's later read of
-	// f.computeServer in handleDiscovery has a happens-before edge through
-	// that goroutine's start. Plain network I/O between a client and this
-	// server would not otherwise provide one.
+	// Assign before starting so handleDiscovery can read the server safely.
 	f.computeServer = httptest.NewUnstartedServer(computeMux)
 	f.computeServer.Start()
 
@@ -139,9 +109,7 @@ func (f *Fake) MetadataURL() string {
 	return f.metadataServer.URL
 }
 
-// SetEnv points the SDK's environment-based configuration at this fake. The
-// token value is a placeholder: it only needs to be non-empty so the SDK
-// selects its static-credential path instead of trying an IAM round trip.
+// SetEnv points the SDK at the fake and avoids an IAM round trip.
 func (f *Fake) SetEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("MWS_BASE_ENDPOINT", f.BaseURL())
@@ -150,10 +118,6 @@ func (f *Fake) SetEnv(t *testing.T) {
 	t.Setenv("MWS_COMPUTE_METADATA_HOST", f.MetadataURL())
 }
 
-// handleDiscovery serves the SDK's service discovery lookup that every
-// service client performs before its first call. f.computeServer is set
-// once in New before this handler's goroutine can run (see New), so no
-// lock is needed to read it here.
 func (f *Fake) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, []discoveryEntry{{ID: "compute", Address: f.computeServer.URL}})
 }
@@ -192,14 +156,7 @@ func (f *Fake) handleGetVmType(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, vmTypeFixture{Spec: vmTypeSpecFixture{Cpu: vmTypeCpuFixture{VcpuCount: "2"}}})
 }
 
-// handleUpdateDisk implements POST .../disks/{disk}?updateOnly=true, the
-// independent-disk write path (UpdateIndependentDisk). Order matters: an
-// idempotency-key replay short-circuits before injection or validation even
-// run (the platform answers a repeated key from the first result without
-// reprocessing the body); a fresh request then consults injection before
-// bounds validation, so a test can inject a platform-side failure on a
-// request that would otherwise pass the fake's own bounds check, and only
-// a request that clears both actually mutates state.
+// handleUpdateDisk checks replay before injection, validation, and mutation.
 func (f *Fake) handleUpdateDisk(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -254,14 +211,7 @@ func (f *Fake) handleUpdateDisk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, newDiskFixture(state))
 }
 
-// handleUpdateVirtualMachine implements POST
-// .../virtualMachines/{vm}?updateOnly=true, the dependent-disk write path
-// (UpdateDependentDisk). spec.storage.disks[] names its entries by
-// VM-local alias ("bootdisk"), but state.disks is keyed by cloud resource
-// name — aliasToDiskName resolves alias to resource name before touching
-// state, or an update reachable through this path would leave a later
-// DiskIOPS(resourceName) assertion looking unapplied even though the
-// write landed under the wrong key.
+// handleUpdateVirtualMachine resolves attachment aliases to resource names.
 func (f *Fake) handleUpdateVirtualMachine(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -311,9 +261,7 @@ func (f *Fake) handleUpdateVirtualMachine(w http.ResponseWriter, r *http.Request
 		break
 	}
 	if !found {
-		// No attachment in this request carries a new spec.iops — nothing
-		// to apply. Echo current state back, matching an update that only
-		// touches fields this fake does not track.
+		// Nothing tracked changed; echo current state.
 		writeJSON(w, newVMFixture(f.disks[DependentDisk].iops))
 		return
 	}
@@ -335,30 +283,20 @@ func (f *Fake) handleUpdateVirtualMachine(w http.ResponseWriter, r *http.Request
 	writeJSON(w, newVMFixture(f.disks[DependentDisk].iops))
 }
 
-// aliasToDiskName resolves a VM attachment alias (spec.storage.disks[].name,
-// unique only within the VM) to the cloud disk resource name that
-// state.disks is keyed by; see handleUpdateVirtualMachine.
+// aliasToDiskName joins VM attachments to disk-resource state.
 var aliasToDiskName = map[string]string{
 	"bootdisk": DependentDisk,
 	"datadisk": IndependentDisk,
 }
 
-// updateDiskRequestBody is the minimal shape handleUpdateDisk needs from
-// UpdateDiskRequest's wire body — spec.iops only, matching what
-// UpdateIndependentDisk (internal/compute/sdk_client.go) actually sends:
-// {"metadata":{"etag":"..."},"spec":{"iops":N}}.
+// updateDiskRequestBody contains the only request field the fake consumes.
 type updateDiskRequestBody struct {
 	Spec struct {
 		Iops int64 `json:"iops"`
 	} `json:"spec"`
 }
 
-// updateVMRequestBody is the minimal shape handleUpdateVirtualMachine needs
-// from UpdateVirtualMachineRequest's wire body, matching what
-// UpdateDependentDisk (internal/compute/sdk_client.go) actually sends: every
-// current alias in spec.storage.disks[], each carrying only "name" except
-// the target alias, which additionally carries disk.spec.iops, e.g.
-// {"spec":{"storage":{"disks":[{"name":"bootdisk","disk":{"spec":{"iops":N}}},{"name":"datadisk"}]}}}.
+// updateVMRequestBody contains the attachment fields the fake consumes.
 type updateVMRequestBody struct {
 	Spec struct {
 		Storage struct {
@@ -387,9 +325,7 @@ func (f *Fake) recordRequestLocked(r *http.Request) int {
 	return len(f.requests) - 1
 }
 
-// statusRecordingWriter wraps http.ResponseWriter to capture the status code
-// a handler writes, defaulting to 200 when the handler only calls Write
-// without an explicit WriteHeader (matching net/http's own behaviour).
+// statusRecordingWriter captures the effective response status.
 type statusRecordingWriter struct {
 	http.ResponseWriter
 	status *int
@@ -419,10 +355,7 @@ func (f *Fake) takeInjectionLocked(method, path string) (injection, bool) {
 	return q[0], true
 }
 
-// writeInjection renders a queued injection. AbortNext's entry panics with
-// http.ErrAbortHandler, which net/http's connection handler recognizes and
-// turns into a silently dropped connection — no response written at all —
-// rather than a logged panic (see net/http.Server's conn.serve recover).
+// AbortNext uses http.ErrAbortHandler to drop the connection without a response.
 func writeInjection(w http.ResponseWriter, inj injection) {
 	if inj.abort {
 		panic(http.ErrAbortHandler)
@@ -432,15 +365,7 @@ func writeInjection(w http.ResponseWriter, inj injection) {
 	_, _ = w.Write([]byte(inj.body))
 }
 
-// validateIOPS enforces the platform's real disk IOPS bounds
-// (docs/platform-reference.md "Server-side validation, measured", all
-// [V]). ok is false and msg carries the platform's verbatim 400 message
-// when iops is out of range.
-// Known divergence from the platform: iops == 0 is not special-cased here,
-// so it falls through to the "less than minimum" message below. The real
-// platform instead answers 0 with a distinct message, "Invalid request:
-// diskUpsertRequest.spec.iops has invalid value." (docs/platform-reference.md
-// "Server-side validation, measured").
+// validateIOPS mirrors measured platform bounds except the distinct zero message.
 func validateIOPS(iops int64) (msg string, ok bool) {
 	switch {
 	case iops > 10000:
@@ -454,10 +379,7 @@ func validateIOPS(iops int64) (msg string, ok bool) {
 	}
 }
 
-// bumpEtag returns a value that differs from etag, standing in for the
-// platform's own etag rotation on every successful write — a caller that
-// re-reads after an update must observe a changed etag for optimistic
-// concurrency to mean anything.
+// bumpEtag models etag rotation after a successful write.
 func bumpEtag(etag string) string {
 	return etag + "'"
 }
@@ -490,25 +412,14 @@ func (f *Fake) DiskIOPS(name string) int64 {
 	return f.disks[name].iops
 }
 
-// Applies returns how many times a write to diskName (by cloud resource
-// name) actually mutated seeded state, counted at the point state changes
-// in handleUpdateDisk or handleUpdateVirtualMachine. An idempotency-key
-// replay short-circuits before that point and does not count, so this
-// distinguishes "applied once" from "applied, then applied again" even
-// when both leave the same final value and the same request-log shape.
+// Applies counts actual mutations and excludes idempotency replays.
 func (f *Fake) Applies(diskName string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.applies[diskName]
 }
 
-// FailNext queues a single fake HTTP status+body response for the next
-// request matching method and the URL path (no query string). Consumed
-// once; a second matching request falls through to the fake's own
-// handling. A fresh request consults injection before bounds validation;
-// an idempotency-key replay (a repeated Idempotency-Key header) is answered
-// from the first result before either runs — use a key not already used by
-// the target path if the test needs the injection to actually fire.
+// FailNext queues one response for the next matching fresh request.
 func (f *Fake) FailNext(method, path string, status int, body string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -516,10 +427,7 @@ func (f *Fake) FailNext(method, path string, status int, body string) {
 	f.injections[key] = append(f.injections[key], injection{status: status, body: body})
 }
 
-// AbortNext queues a dropped connection — no HTTP response at all — for the
-// next request matching method and the URL path (no query string).
-// Simulates a network failure mid-request, distinct from FailNext's
-// well-formed error response.
+// AbortNext drops the next matching connection before applying the request.
 func (f *Fake) AbortNext(method, path string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -545,26 +453,14 @@ func handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeNotFound(w, "no route for "+r.Method+" "+r.URL.Path)
 }
 
-// writeNotFound writes a 404 shaped like common.ApiError — the wire body the
-// generated SDK decoders require for every non-2xx status, "code" included:
-// ApiError.Decode treats "code" as a required field and errors without it,
-// and separately, an SDK decoder that receives a non-"application/json"
-// Content-Type (plain http.NotFound's default) discards the body and
-// reports "invalid Content-Type" instead of ever surfacing the 404. Either
-// mistake would turn a deliberate routing-mismatch check into a decode
-// error that looks like a fake bug instead of the real 404 it represents.
+// writeNotFound emits the JSON shape required by SDK error decoding.
 func writeNotFound(w http.ResponseWriter, description string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
 	_ = json.NewEncoder(w).Encode(apiErrorFixture{Code: "NOT_FOUND", Description: description})
 }
 
-// apiErrorFixture mirrors the subset of
-// go.mws.cloud/go-sdk/service/common/model.ApiError that error responses
-// must carry. Code must be one of the SDK's known status strings (here,
-// "NOT_FOUND") for mwserrors.IsAPIErrorNotFoundStatus and friends to
-// recognize it; an unrecognized string still decodes but classifies as
-// errors.Unknown.
+// apiErrorFixture contains the fields required for SDK classification.
 type apiErrorFixture struct {
 	Code        string `json:"code"`
 	Description string `json:"description,omitempty"`
@@ -576,12 +472,7 @@ type discoveryEntry struct {
 	Address string `json:"address"`
 }
 
-// The vmFixture* types mirror the subset of
-// go.mws.cloud/go-sdk/service/compute/model.VirtualMachineOptionalResponse
-// that translateVMResponse (internal/compute/sdk_client.go) reads. Resource
-// references (vmType, disk ref) decode as bare strings (their generated
-// UnmarshalJSON rejects an object), not the {"disk": "..."} shape a first
-// reading of the OpenAPI schema suggests.
+// VM resource references must be bare strings for the generated decoder.
 type vmFixture struct {
 	Metadata vmMetadataFixture `json:"metadata"`
 	Spec     vmSpecFixture     `json:"spec"`
@@ -698,11 +589,7 @@ func newDiskFixture(s diskState) diskFixture {
 	}
 }
 
-// vmTypeFixture mirrors the subset of
-// go.mws.cloud/go-sdk/service/compute/model.VmTypeOptionalResponse that
-// GetVmType (internal/compute/sdk_client.go) reads. VcpuCount decodes with
-// decode.StringInt32, which requires a quoted numeric string, not a bare
-// number.
+// VcpuCount is quoted because the SDK decodes it with StringInt32.
 type vmTypeFixture struct {
 	Spec vmTypeSpecFixture `json:"spec"`
 }

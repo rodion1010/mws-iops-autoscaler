@@ -97,10 +97,7 @@ func translateVMResponse(name string, resp *model.VirtualMachineOptionalResponse
 			}
 		}
 
-		// The status entry is the authoritative source for DeviceName
-		// (required there, defaulted server-side if unset at attach time —
-		// docs/platform-reference.md "Guest device mapping") and for the disk's own resource
-		// name (Ref), needed to call GetDisk/UpdateDisk on either class.
+		// Status is authoritative for server-defaulted DeviceName and disk Ref.
 		if status, ok := statusByAlias[specEntry.Name]; ok {
 			disk.DeviceName = strings.TrimPrefix(status.DeviceName, "mws-")
 			disk.DiskName = status.Ref.GetDisk()
@@ -139,11 +136,7 @@ func (c *sdkClient) GetDisk(ctx context.Context, name string) (*Disk, error) {
 		if etag := resp.Metadata.Value.GetEtag(); etag != nil {
 			out.Etag = *etag
 		}
-		// metadata.id — the platform's own stable, creation-time-assigned
-		// identifier (pre-merge review: DiskName alone is not a safe
-		// long-term identity for samples/cooldown/budget). Left empty,
-		// not an error, if the response carried none — StorageDisk.
-		// IdentityKey degrades gracefully in that case.
+		// metadata.id distinguishes same-name disk incarnations.
 		if id := resp.Metadata.Value.GetId(); id != nil {
 			out.IncarnationID = id.ID()
 		}
@@ -189,7 +182,8 @@ func (c *sdkClient) UpdateIndependentDisk(ctx context.Context, req IndependentUp
 	})
 	if err != nil {
 		if mwserrors.IsAPIErrorInvalidEtagKeyStatus(err) {
-			return nil, fmt.Errorf("etag conflict — disk changed since it was read, retry next cycle: %w", err)
+			// A stale-etag rejection proves the request did not mutate state.
+			return nil, fmt.Errorf("etag conflict — %w: %w", ErrConcurrentModification, err)
 		}
 		return nil, err
 	}
@@ -201,14 +195,8 @@ func (c *sdkClient) UpdateIndependentDisk(ctx context.Context, req IndependentUp
 	return out, nil
 }
 
-// UpdateDependentDisk sends the minimal safe partial update: every current
-// attachment alias, in the current order (Upsert treats a missing existing
-// collection element as a delete — MWS API openapi.gen.yaml's complex-
-// collection merge rules), with no field on any of them except
-// TargetAlias's spec.iops. name/boot/deviceName are immutable on update and
-// the API accepts them omitted entirely; only the collection key (name) is
-// sent, never a value round-tripped through a response→domain→request
-// translation that could drift from what the platform considers current.
+// UpdateDependentDisk preserves every attachment alias because omission means
+// deletion, while sending only the target's mutable IOPS field.
 func (c *sdkClient) UpdateDependentDisk(ctx context.Context, req DependentUpdateRequest) (*VirtualMachine, error) {
 	if req.Etag == "" {
 		return nil, fmt.Errorf("update dependent disk %q: empty etag — refusing to write without optimistic concurrency", req.VMName)
@@ -232,7 +220,8 @@ func (c *sdkClient) UpdateDependentDisk(ctx context.Context, req DependentUpdate
 	})
 	if err != nil {
 		if mwserrors.IsAPIErrorInvalidEtagKeyStatus(err) {
-			return nil, fmt.Errorf("etag conflict — VM changed since it was read, retry next cycle: %w", err)
+			// A stale-etag rejection proves the request did not mutate state.
+			return nil, fmt.Errorf("etag conflict — %w: %w", ErrConcurrentModification, err)
 		}
 		return nil, err
 	}
@@ -243,10 +232,7 @@ func (c *sdkClient) UpdateDependentDisk(ctx context.Context, req DependentUpdate
 	return translateVMResponse(req.VMName, resp)
 }
 
-// buildDependentUpdateBody is the pure part of UpdateDependentDisk — no
-// network, no *sdkClient — so the wire shape (issue #3's actual safety
-// claim) can be asserted directly against a marshaled body in tests instead
-// of only by code review.
+// buildDependentUpdateBody isolates the wire shape for direct tests.
 func buildDependentUpdateBody(req DependentUpdateRequest) (model.UpdateVirtualMachineRequest, error) {
 	disks := make([]model.UpdateStorageDiskSpecOrRefWithAttachmentsRequest, len(req.Aliases))
 	found := false

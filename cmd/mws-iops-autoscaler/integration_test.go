@@ -50,12 +50,7 @@ func newIntegrationAgent(t *testing.T, f *platformfake.Fake) *Agent {
 	}
 	return &Agent{
 		vmName: platformfake.VMName,
-		// cfg, resolved, sampler and readiness are not exercised by any test
-		// today (actuate never reaches discover — see the §8.5 note in
-		// docs/superpowers/specs/2026-08-30-integration-tests-ci-design.md),
-		// but a nil-pointer panic there would be an illegible failure if that
-		// changes. Populated the same way as newDiscoverableTestAgent in
-		// agent_test.go so discover fails with a real error instead.
+		// Conflict tests exercise a real rediscovery path.
 		cfg:       &config.Config{Disks: config.DisksSpec{Mode: "auto-discovery"}},
 		resolved:  &config.ResolvedConfig{},
 		client:    client,
@@ -151,13 +146,7 @@ func TestIntegration_OutOfBoundsIOPSSurfacesPlatform400AndAppliesNothing(t *test
 	}
 	a.actuate(context.Background(), independentManaged(), d, time.Now())
 
-	// A write that never reached the fake at all (e.g. a budget reservation
-	// failure before Apply is ever called) has the exact same DiskIOPS/budget
-	// signature as one the platform rejected — confirm the write was actually
-	// attempted before trusting the assertions below. A 404, a 403 or an
-	// undecodable body would satisfy those same signatures too, so also
-	// confirm the fake actually answered with the platform's 400: nothing
-	// else observes the status this test's name promises.
+	// Confirm the expected wire response, not merely unchanged state.
 	var posts int
 	var statuses []int
 	for _, r := range f.Requests() {
@@ -193,11 +182,7 @@ func TestIntegration_EtagConflictMutatesNothing(t *testing.T) {
 	a := newIntegrationAgent(t, f)
 
 	path := "/compute/v1/projects/" + platformfake.Project + "/disks/" + platformfake.IndependentDisk
-	// The SDK retries 409, so queue enough rejections to outlast its attempts.
-	// The code must be "INVALID_ETAG_KEY" — the SDK's decoder requires a "code"
-	// field on every error body, and the IsAPIErrorInvalidEtagKeyStatus branch
-	// in UpdateIndependentDisk (internal/compute/sdk_client.go) keys on that
-	// exact string to recognize an etag conflict.
+	// Queue the exact classified code long enough to exhaust SDK retries.
 	for i := 0; i < 6; i++ {
 		f.FailNext("POST", path, 409, `{"code":"INVALID_ETAG_KEY","message":"invalid etag"}`)
 	}
@@ -220,15 +205,64 @@ func TestIntegration_EtagConflictMutatesNothing(t *testing.T) {
 			posts++
 		}
 	}
-	// "Nothing mutated" is also true if the write was never attempted, or if
-	// the injected body failed to decode into a classified APIError at all
-	// (a decode error is not retryable, so the SDK stops after exactly one
-	// POST). A genuinely classified 409/INVALID_ETAG_KEY is retryable and
-	// produces several — so posts > 1 is what actually proves the SDK
-	// recognized this as an etag conflict, without depending on any
-	// particular log or error-message wording.
+	// Multiple attempts prove the SDK classified the 409 as retryable.
 	if posts <= 1 {
 		t.Fatalf("only %d POST(s) reached the fake, want more than 1 — a single attempt means the error was never classified as a retryable etag conflict (e.g. the injected body failed to decode), so the disk was never really at risk of mutating", posts)
+	}
+}
+
+func TestIntegration_ServerSideEtagConflictForcesRediscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		managed  registry.ManagedDisk
+		postPath string
+	}{
+		{
+			name:     "independent",
+			managed:  independentManaged(),
+			postPath: "/compute/v1/projects/" + platformfake.Project + "/disks/" + platformfake.IndependentDisk,
+		},
+		{
+			name:     "dependent",
+			managed:  dependentManaged(),
+			postPath: "/compute/v1/projects/" + platformfake.Project + "/virtualMachines/" + platformfake.VMName,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := platformfake.New(t)
+			a := newIntegrationAgent(t, f)
+
+			// Queue enough 409s to outlast SDK retries.
+			for i := 0; i < 6; i++ {
+				f.FailNext("POST", tc.postPath, 409, `{"code":"INVALID_ETAG_KEY","message":"invalid etag"}`)
+			}
+
+			a.mu.Lock()
+			generationBefore := a.generation
+			a.mu.Unlock()
+
+			d := decider.Decision{
+				DiskID: tc.managed.Disk.DiskName, Action: decider.ActionScaleUp,
+				Current: 1000, Target: 2000,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			a.actuate(ctx, tc.managed, d, time.Now())
+
+			if got := f.DiskIOPS(tc.managed.Disk.DiskName); got != 1000 {
+				t.Errorf("disk IOPS = %d, want 1000 — a server-rejected write must not mutate", got)
+			}
+			if used := a.tracker.State(tc.managed.Disk.IdentityKey(), time.Now()).ChangesInLast24h; used != 0 {
+				t.Errorf("budget changes in last 24h = %d, want 0 — a server-rejected write proves nothing landed, so the reservation must be released", used)
+			}
+
+			a.mu.Lock()
+			generationAfter := a.generation
+			a.mu.Unlock()
+			if generationAfter == generationBefore {
+				t.Errorf("discovery generation unchanged after a server-side etag conflict — the conflict must force an immediate rediscovery (and thereby abort the rest of the reconcile cycle), not wait for the next scheduled discovery tick (issue #38)")
+			}
+		})
 	}
 }
 
@@ -289,12 +323,7 @@ func TestIntegration_AbortedWriteRetriesAndAppliesExactlyOneChange(t *testing.T)
 	if got := f.DiskIOPS(platformfake.IndependentDisk); got != 2000 {
 		t.Errorf("disk IOPS = %d, want 2000 — the SDK retries transport errors", got)
 	}
-	// The fake's write is value-idempotent and the retried request reuses the
-	// same idempotency key, so the final IOPS value and key-repetition count
-	// alone cannot distinguish "abort, then apply once" from "apply, then
-	// apply again". Applies counts only actual state mutations, not replayed
-	// keys, so this is what actually asserts §8.2's single-effective-change
-	// half of the contract.
+	// Applies excludes replayed keys and therefore counts effective mutations.
 	if applies := f.Applies(platformfake.IndependentDisk); applies != 1 {
 		t.Errorf("disk was mutated %d time(s), want 1 — a retried write must apply exactly once", applies)
 	}

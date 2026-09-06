@@ -6,10 +6,9 @@ import (
 	"fmt"
 )
 
-// ErrConcurrentModification marks a pre-write refusal when live IOPS differs from
-// the value used to compute the decision. Callers must rediscover instead of retrying
-// the stale target.
-var ErrConcurrentModification = errors.New("live current differs from the decision's expected current — concurrent modification")
+// ErrConcurrentModification marks a client-side mismatch or server-side
+// stale-etag rejection. Both prove no mutation and require rediscovery.
+var ErrConcurrentModification = errors.New("concurrent modification — the target changed since the decision was computed")
 
 // ErrIncarnationMismatch marks a pre-write refusal when live identity differs from
 // the decision or cannot be verified. Callers must rediscover and must not retry the stale target.

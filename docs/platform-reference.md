@@ -3,7 +3,7 @@
 This is the canonical record of external MWS Cloud Platform behaviour used by the autoscaler.
 It contains platform facts and measurements, not product requirements or architecture decisions.
 Architectural consequences belong in [design.md](design.md); known upstream gaps and their temporary
-workarounds belong in [../PLATFORM_DEPENDENCIES.md](../PLATFORM_DEPENDENCIES.md).
+workarounds belong in [platform-dependencies.md](platform-dependencies.md).
 
 `[V]` means verified against a primary source or a live test. `[?]` means not yet verified.
 Scope: MWS Cloud Platform documentation, public API, generated Go SDK and measured service behaviour.

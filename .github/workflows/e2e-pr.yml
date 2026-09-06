@@ -1,0 +1,52 @@
+name: E2E (smoke)
+
+# The smoke tier reuses one persistent target. Fork PRs do not receive its
+# SSH secret; the trust-boundary decision is tracked in docs/TODO.md.
+on:
+  pull_request:
+
+concurrency:
+  # All smoke runs share one target and must execute serially.
+  group: e2e-smoke-vm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, mws-iops-autoscaler-runner]
+    timeout-minutes: 15
+    steps:
+      # Pin third-party actions because this runner has cloud credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # The persistent runner already retains its module cache.
+          cache: false
+
+      - name: Write SSH key
+        run: |
+          umask 077
+          printf '%s\n' "${{ secrets.E2E_SSH_PRIVATE_KEY }}" > "${RUNNER_TEMP}/e2e_ssh_key"
+          chmod 600 "${RUNNER_TEMP}/e2e_ssh_key"
+
+      - name: Run smoke e2e
+        env:
+          MWS_PROJECT: ${{ vars.MWS_PROJECT }}
+          MWS_ZONE: ${{ vars.MWS_ZONE }}
+          E2E_VM_NAME: ${{ vars.E2E_SMOKE_VM_NAME }}
+          E2E_DEVICE_NAME: ${{ vars.E2E_SMOKE_DEVICE_NAME }}
+          E2E_SSH_HOST: ${{ vars.E2E_SMOKE_SSH_HOST }}
+          E2E_SSH_USER: ${{ vars.E2E_SSH_USER }}
+          E2E_SSH_KEY_PATH: ${{ runner.temp }}/e2e_ssh_key
+        # The harness builds the agent dynamically, so cached test results are unsafe.
+        run: go test -count=1 -tags e2e ./e2e/... -run 'TestSmoke|TestRegression' -v
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/e2e_ssh_key"

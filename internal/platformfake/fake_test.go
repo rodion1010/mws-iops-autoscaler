@@ -93,11 +93,6 @@ func TestFake_GetDisk_carriesEtagAndIncarnation(t *testing.T) {
 	}
 }
 
-// TestFake_GetDisk_unknownDiskIsCleanNotFound exercises the fake's routing-
-// mismatch path (fake.go's writeNotFound/handleNotFound): a wrong disk name
-// must come back as a decodable 404 the SDK classifies as NotFound, not as
-// an "invalid Content-Type" decode failure that a Content-Type-less
-// http.NotFound would otherwise produce.
 func TestFake_GetDisk_unknownDiskIsCleanNotFound(t *testing.T) {
 	f := platformfake.New(t)
 	c := newClient(t, f)
@@ -180,12 +175,6 @@ func TestFake_IdempotencyKeyReplay_mutatesOnce(t *testing.T) {
 	}
 }
 
-// TestFake_UpdateDependentDisk_resolvesAliasToResourceName exercises the VM
-// write path end to end: spec.storage.disks[] names the target by VM-local
-// alias ("bootdisk"), but DiskIOPS looks state up by cloud resource name
-// (DependentDisk). If the handler applied the write under the alias instead
-// of resolving it first, this test would see the applied value on the
-// response but DiskIOPS would still read 1000.
 func TestFake_UpdateDependentDisk_resolvesAliasToResourceName(t *testing.T) {
 	f := platformfake.New(t)
 	c := newClient(t, f)
@@ -255,13 +244,6 @@ func TestFake_UpdateDisk_rejectsOutOfBoundsIOPS(t *testing.T) {
 	}
 }
 
-// TestFake_AbortNext_dropsConnectionThenSDKRetrySucceeds documents a real
-// interaction, not an assumption: the SDK's default retryer classifies a
-// dropped connection as a retryable TransportError and transparently resends
-// the same request (same Idempotency-Key) on the caller's behalf. So a
-// single AbortNext does not surface as a client-visible error — it proves
-// the connection was genuinely dropped (two requests recorded for one call)
-// while the eventual retry still lands cleanly.
 func TestFake_AbortNext_dropsConnectionThenSDKRetrySucceeds(t *testing.T) {
 	f := platformfake.New(t)
 	c := newClient(t, f)

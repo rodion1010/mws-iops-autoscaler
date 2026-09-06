@@ -350,10 +350,10 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 			return
 		}
 
-		// Typed pre-write refusals prove that no mutation was sent.
+		// A typed conflict proves no mutation, so the reservation is releasable.
 		if errors.Is(err, compute.ErrConcurrentModification) {
 			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
-				log.Printf("actuate %s (%s): failed to release the reservation for a write refused pre-flight (concurrent modification): %v", diskID, m.Disk.DeviceName, rerr)
+				log.Printf("actuate %s (%s): failed to release the reservation for a conflict-refused write — no mutation was applied (client-side pre-write refusal or server-side etag rejection): %v", diskID, m.Disk.DeviceName, rerr)
 			}
 			// Refresh immediately; the target is no longer meaningful against live state.
 			log.Printf("actuate %s (%s): %v — forcing rediscovery before the next decision", diskID, m.Disk.DeviceName, err)

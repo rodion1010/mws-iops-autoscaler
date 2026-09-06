@@ -10,7 +10,9 @@ not an architecture or platform reference.
 - User-facing configuration contract: [docs/configuration.md](docs/configuration.md)
 - Verified MWS API, SDK and monitoring behaviour: [docs/platform-reference.md](docs/platform-reference.md)
 - Local setup and the reference test environment: [docs/development.md](docs/development.md)
-- Known upstream limitations and temporary workarounds: [PLATFORM_DEPENDENCIES.md](PLATFORM_DEPENDENCIES.md)
+- How the test tiers are implemented and organized: [docs/testing.md](docs/testing.md)
+- The CI/CD pipeline that runs them: [docs/ci-cd.md](docs/ci-cd.md)
+- Known upstream limitations and temporary workarounds: [docs/platform-dependencies.md](docs/platform-dependencies.md)
 - Deferred ideas: [docs/TODO.md](docs/TODO.md)
 
 If documents contradict one another, surface the conflict instead of silently choosing an
@@ -40,8 +42,12 @@ Each fact has one canonical home:
 - `docs/design.md`: the accepted architecture, flows, contracts and safety invariants the implementation must satisfy.
 - `docs/configuration.md`: the user-facing configuration schema, defaults and examples.
 - `docs/platform-reference.md`: verified behaviour of external MWS APIs, SDKs and metrics.
-- `PLATFORM_DEPENDENCIES.md`: upstream limitations, ownership, workarounds and removal conditions.
+- `docs/platform-dependencies.md`: upstream limitations, ownership, workarounds and removal conditions.
 - `docs/development.md`: developer setup and test-environment conventions.
+- `docs/testing.md`: how the unit/integration/e2e tiers are implemented — what each covers, how to run
+  it, and how the test code is organized.
+- `docs/ci-cd.md`: the CI/CD pipeline — verification tiers, runner and service-account infrastructure,
+  IAM, and the provisioning runbook.
 - `docs/TODO.md`: uncommitted ideas and deferred work.
 - ADRs: temporary decision requests from an agent to the Product Lead; never accepted architecture.
 

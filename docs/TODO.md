@@ -20,64 +20,66 @@ Leave the decision open unless it is genuinely settled.
 
 ## Open items
 
-### CI/CD and E2E test infrastructure on self-hosted GitLab Runners
+### CI/CD hardening deferred from the initial GitHub Actions build
 
-There is currently no CI/CD infrastructure at all — no automated build, no automated unit/integration
-run, and no way to exercise the agent against a real MWS VM and disk. We need one, and testing this
-project honestly eventually means writing real IOPS values to a real disk and watching the platform
-react, which local unit tests can't cover.
+The live e2e CI/CD design (`docs/ci-cd.md`) deliberately ships a minimal-but-safe first version.
+These were identified during design/review but explicitly deferred, not solved:
 
-**Constraint, already decided:** not GitHub Actions. Pipelines run on GitLab Runner(s) hosted on our
-own MWS Cloud Platform infrastructure. Everything else below is open.
-
-**Reference, not a blueprint:** `github.com/user578/mws_webinar_26-04` has MWS Terraform for
-VPC/subnet, Kubernetes, GitLab + Runner deployment, and prep scripts. Worth reusing provider
-configuration and individual resource examples from; its architecture (Kubernetes in particular) is
-not something to copy by default — see the open question below.
-
-**Two infrastructures, different lifetimes:**
-
-- **Persistent CI infrastructure** — exists all the time, runs pipelines. Candidate pieces: the
-  runner(s) themselves, a CI service account, its IAM grant, network (if the runner needs one beyond
-  what MWS gives every VM), somewhere to keep Terraform state, somewhere to keep CI/CD secrets, maybe
-  a container registry / artifact store.
-- **Ephemeral E2E infrastructure** — created per pipeline run, destroyed after. At minimum: a test VM,
-  a disk attached to it with specific parameters, the agent installed/running on it, a controlled I/O
-  load (fio), a wait for the agent to react, verification that the disk's IOPS actually changed via
-  the API, log/metric/result collection, then teardown.
-
-**Open — not to be decided in passing:**
-
-- **Kubernetes or plain VM(s) for the runner.** The reference repo uses Kubernetes; that is not a
-  reason to default to it here. Prefer whatever is minimal in cost and operational complexity for
-  what we actually need — likely one or a few VMs running `gitlab-runner`, unless a concrete reason
-  for Kubernetes shows up.
-- **Terraform layout.** A tentative split — `infra/ci/` (persistent), `infra/e2e/` (ephemeral),
-  reusable modules for VM/disk/network — is a reasonable starting guess, not a decision. Design it
-  when the work is picked up, not before.
-- **IAM for the CI service account.** Needs to be scoped to what E2E actually requires — create/update
-  IAM: create/delete VMs, create/change/delete disks, network operations if needed, read platform
-  metrics, whatever else the first scenario turns out to need. Not Project Admin. How credentials
-  reach the runner and Terraform safely (not hardcoded in the repo) is part of the same question.
-- **E2E isolation.** Tests must be independently runnable and parallelizable: unique resource names
-  per pipeline/job, `pipeline_id`/`job_id` tags on everything created, a separate Terraform state per
-  test environment, no dependency on a pre-existing, slowly-drifting "the test VM."
-- **Cleanup as architecture, not a shell script bolted on afterward.** Must reliably run when the test
-  fails, the agent crashes, the pipeline is cancelled, it times out, or the runner loses its
-  connection mid-test. Wants both a primary teardown path and a secondary sweep for orphaned
-  resources — e.g. a TTL / pipeline-id tag every ephemeral resource carries, checked by a periodic
-  cleanup job independent of any single pipeline run.
-
-**First E2E scenario (proof of concept for the whole vertical path, not just the infra):** pipeline
-creates a VM and disk → installs the agent → runs `fio` with a load that should trigger scale-up →
-agent decides to raise IOPS → test confirms via the API that the disk's IOPS actually changed → agent
-and `fio` logs/artifacts are saved → Terraform destroys the environment. Later scenarios (scale-down,
-dry-run, platform vs. guest metrics, other disk types, API-error injection, fleet mode) should be able
-to reuse the same infrastructure without redesigning it.
-
-**Definition of done, per the original ask:** CI infra is code and reproducibly deployable; the
-runner can run this project's pipeline; no hardcoded credentials; the pipeline can create a VM and
-disk in MWS; the agent and a test load can run on that VM; the first E2E scenario automatically
-verifies the agent's behavior; artifacts and logs survive the pipeline; created infrastructure is
-reliably deleted; there is a guard against orphaned resources; and there's documentation for both
-standing up the CI infrastructure and reproducing the E2E environment locally.
+- **`monitoring.metricExporter` on the agent-under-test service account.** Not granted yet because the
+  first e2e scenario verifies the IOPS change via the compute API, not platform metrics. Add it (console-only
+  grant, per `docs/platform-reference.md`) when fleet mode's `metrics.source: platform` needs live e2e
+  coverage.
+- **Fork-PR handling needs a decision before the repo goes public.** GitHub's default only requires
+  approval for a contributor's *first* PR; afterward their workflows run unattended on the self-hosted
+  runner. Approval alone never makes fork smoke work, though: the job needs the `E2E_SSH_PRIVATE_KEY`
+  secret, which is not sent to public-fork `pull_request` workflows at all (private-fork secret
+  sharing is a separate, explicit repository/organization setting), so an approved fork PR's smoke run
+  just fails on the missing key. Before going public, either stop triggering the PR-tier e2e job from
+  `pull_request` entirely (label-gated or maintainer-dispatched instead) or build the secret and
+  runner-isolation model from the trust-boundary item below.
+- **Runner SA privilege is broader than the PR-tier smoke test needs.** The runner's SA carries
+  `compute.editor` + `vpc.editor` so the same runner can also drive the merge-tier full
+  create/destroy test; any code that reaches the runner (post fork-approval) can use all of it, not just
+  what a smoke run touches. Revisit splitting into per-tier runners/SAs, or dropping `vpc.editor` if the
+  network/address setup turns out not to need per-run changes, once it's clear this matters in practice.
+- **CI-dedicated SSH key is long-lived, not rotated per run.** Reused this repo's existing
+  `SSH_PRIVKEY_CLAUDE`-style pattern (one keypair, public key baked into target VMs at creation, private
+  key as a GitHub secret) for speed. A per-run ephemeral keypair (generated in `$RUNNER_TEMP`, public key
+  injected only for that run, removed after) would be tighter; not built now.
+- **No orphan sweeper for merge-tier ephemeral resources.** The merge-tier full test tags what it creates
+  and tears down on completion, but nothing independently sweeps resources left behind by a crashed run,
+  a cancelled pipeline, or a runner that lost its connection mid-test. Needs a periodic job checking for
+  stale run-id-tagged resources past some TTL.
+- **No automated drift check for the hand-provisioned persistent resources.** Runner VM, agent-under-test
+  SA bindings, the persistent test VM/disk's baseline IOPS, and the GitHub fork-approval setting are all
+  provisioned by hand per `docs/ci-cd.md`'s runbook, with no idempotent "verify environment matches the
+  runbook" check. Worth a checklist/script once drift actually causes a confusing failure.
+- **Branch protection on `main` is not configured.** `docs/ci-cd.md` describes fast checks and PR-tier
+  e2e as intended required status checks, but nothing enforces that yet — a red check does not block a
+  merge today. Two independent blockers: (a) the current GitHub plan does not offer branch protection
+  for this private repository at all — the API answers 403, "Upgrade to GitHub Pro or make this
+  repository public to enable this feature" — so it needs a plan upgrade, and *not* making the repo
+  public (that must wait for the trust-boundary decision below); and (b) the trust-boundary question
+  below: making PR-tier e2e *required* is what turns "PR code runs on the credentialed runner" from
+  an option into a merge prerequisite. Order: upgrade the plan, resolve the trust decision, then
+  configure `verify` and `smoke` as required checks.
+- **Trust boundary: PR-supplied code runs on a credentialed self-hosted runner.** `e2e-pr.yml` checks
+  out and executes the PR's own code on the persistent runner, whose attached SA is ambient via IMDS,
+  and whose SSH key reaches target VMs (which themselves expose an SA through their own IMDS — so
+  guest access is not the "SSH only, no cloud API" boundary it might look like). Known critical risk,
+  accepted for now with two trusted committers on a private repo; needs a real decision before the
+  repo goes public or before PR-tier e2e becomes a required check. As implemented, the smoke path is
+  usable for same-repository collaborator branches only: the job requires the `E2E_SSH_PRIVATE_KEY`
+  secret, which GitHub never sends to public-fork `pull_request` workflows (private-fork secret
+  sharing is a separate, explicit repository/organization setting) — fork-PR approval permits
+  execution but does not deliver the secret, so an approved fork PR's smoke run fails on the missing
+  key. Fork-PR smoke is unresolved/unsupported until a safe secret and runner-isolation model is
+  chosen. Options: keep it same-repo-only and informational, gate it behind a maintainer-applied
+  label, or move to ephemeral per-job runners with per-run credentials so no long-lived credentialed
+  machine executes untrusted code.
+- **Seven of `docs/design.md` §8.3's ten e2e scenarios are not implemented.** Three are covered today:
+  scale-up on saturation, plus the dependent and independent write paths — each tier exercises its own
+  real write path with the disk's class asserted per tier (`AssertDiskClass`), not separate test cases
+  of their own. See `docs/testing.md`'s coverage table for the honest per-scenario status. Two of the
+  missing seven (scale-down, no-flapping) are blocked on Phase 3 shipping scale-down at all; the rest
+  are just unwritten.

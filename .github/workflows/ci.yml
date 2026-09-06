@@ -17,9 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      # Pin third-party actions to immutable revisions.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -44,3 +45,7 @@ jobs:
 
       - name: integration tests (race)
         run: go test -race -tags integration ./...
+
+      # Run only infrastructure-free harness tests on the hosted runner.
+      - name: e2e harness regression tests
+        run: go test -count=1 -tags e2e ./e2e/... -run '^TestRegression_' -v

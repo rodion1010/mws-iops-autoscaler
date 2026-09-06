@@ -7,7 +7,9 @@
 | [`configuration.md`](configuration.md) | User-facing policy model, defaults, validation rules and examples |
 | [`platform-reference.md`](platform-reference.md) | Verified behaviour of external MWS APIs, SDKs, metrics and billing |
 | [`development.md`](development.md) | Credential handling, developer setup and the reference test environment |
-| [`../PLATFORM_DEPENDENCIES.md`](../PLATFORM_DEPENDENCIES.md) | Upstream gaps, temporary workarounds and removal conditions |
+| [`testing.md`](testing.md) | How the unit/integration/e2e test tiers are implemented: what each covers, how to run it, how the test code is organized |
+| [`ci-cd.md`](ci-cd.md) | The CI/CD pipeline: verification tiers, service accounts and IAM, the provisioning runbook |
+| [`platform-dependencies.md`](platform-dependencies.md) | Upstream gaps, temporary workarounds and removal conditions |
 | [`TODO.md`](TODO.md) | Parking lot; nothing is implemented from here without an explicit decision |
 | [`adr/`](adr/) | Temporary decision requests awaiting Product Lead input; normally empty |
 | [`../CLAUDE.md`](../CLAUDE.md) | Repository instructions for coding agents |
@@ -42,7 +44,7 @@ A change updates only the documents whose own contracts changed:
 2. Change `design.md` when architecture, a flow, a contract or a safety invariant changes.
 3. Change `configuration.md` when the user-facing schema, default or validation behaviour changes.
 4. Change `platform-reference.md` when an external fact is verified or corrected.
-5. Change `PLATFORM_DEPENDENCIES.md` when an upstream limitation, status or workaround changes.
+5. Change `platform-dependencies.md` when an upstream limitation, status or workaround changes.
 6. Add a temporary ADR only when an unresolved material choice requires Product Lead input.
 
 If a measured platform fact invalidates a requirement or design, update the fact's canonical record
