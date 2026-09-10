@@ -48,6 +48,18 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 
 	switch {
 	case a.Saturated:
+		// An unmeasurable sibling's real consumption is folded into
+		// SiblingP95IOPS as zero (analyzer.Analysis's zero value), not
+		// reported as unknown, so ceiling itself may already overstate true
+		// headroom — checked ahead of the ceiling comparison below rather
+		// than folded into it. ActionNoAction, not ActionVMCapReached: the
+		// latter drives iops_autoscaler_vm_cap_reached, documented as
+		// "actionable — add vCPU" (design.md §7.3) — a missing/stale
+		// sibling sample is a different remediation (fix that disk's
+		// metrics path) and must not alias onto that signal.
+		if vm.SiblingDemandUnknown {
+			return withReason(base, ActionNoAction, "sibling_demand_unmeasurable")
+		}
 		if ceiling <= current {
 			return withReason(base, ActionVMCapReached, "vm_headroom_insufficient")
 		}

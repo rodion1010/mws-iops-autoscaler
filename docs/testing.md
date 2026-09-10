@@ -52,51 +52,146 @@ Two tiers, sharing one set of scenario steps, differing only in where the target
 
 | Test | Tier | Target VM |
 |---|---|---|
-| `TestSmoke_ScaleUpOnPersistentVM` | PR-tier ("smoke") | Reuses one persistent VM+disk |
-| `TestFull_ProvisionScaleUpTeardown` | Merge-tier ("full") | Provisions a fresh VM+disk, tears it down after |
+| `TestSmoke_Decisions_ScaleUpOnSaturation` | PR-tier ("smoke") | Reuses one persistent VM+disk |
+| `TestFull_Lifecycle_ProvisionScaleUpTeardown` | Merge-tier ("full") | Provisions a fresh VM+disk, tears it down after |
 
-**File map** — the same one in `e2e/config.go`'s package doc, expanded here:
+### Test files group by subject, not by tier
+
+Test files are named for what they cover (`decisions_test.go`, `cold_start_test.go`,
+`independent_test.go`, `dependent_test.go`, `lifecycle_test.go`, `device_naming_test.go`,
+`discovery_test.go`, `headroom_test.go`, and further subjects as more scenarios land —
+guardrails), never for which tier runs them. Tier lives in the test *name* instead:
+`Test<Tier>_<Group>_<Scenario>`, tier one of `Smoke`, `Full`, `Regression`. This is what lets one
+scenario exist once and be picked up by whichever workflow's `-run` pattern matches its tier prefix,
+instead of the same scenario forking into a smoke copy and a full copy the moment both tiers need it.
+
+`TestRegression_Naming_ScenarioTestsMatchConvention` (`naming_test.go`) enforces this: it parses
+every `e2e/*_test.go` file as source with `go/ast` (build tags don't affect parsing, so this needs no
+live infrastructure) and fails on any function `go test` would run as a test whose name doesn't match
+the convention. Without it, a name that drifts from the pattern is silently dropped from every
+workflow's `-run` filter rather than failing loud — CI would just quietly stop running it.
+
+**File map**:
 
 | File | What it's for |
 |---|---|
 | `config.go` | `Target` (one VM+disk pair under test) and environment-variable loading (`SmokeTarget`, `Project`, `Zone`, `SkipOrFail`). |
-| `ssh.go` | Guest-OS access primitives (`Run`, `RunBackground`, `Copy`) over the system `ssh`/`scp` binaries — not a Go SSH library, since this is harness-only code never shipped in the production binary. |
+| `ssh.go` | Guest-OS access primitives (`Run`, `RunBackground`, `RunBackgroundToLog`, `Copy`) over the system `ssh`/`scp` binaries — not a Go SSH library, since this is harness-only code never shipped in the production binary. `RunBackground` derives its output log path from the command itself (unique among concurrent background commands, not meant to be reconstructed by a caller); `RunBackgroundToLog` takes an explicit, stable path instead, for a caller that needs to read the output back later. |
 | `reset.go` | Builds the compute-API client (`NewComputeClient`) and discovers/verifies/resets a disk (`AssertDiskClass`, `ResetDiskToBaseline`, `CurrentIOPS`) — shared by both tiers' preflight and cleanup. |
-| `scenario.go` | The actual scenario: `Preflight`, `InstallAgent`, `StartAgent`, `StopAgent`, `DriveLoad`, `WaitForScaleUp`. **This is where "what the test does" lives** — both tiers call these in the same order. |
+| `scenario.go` | The actual scenario steps: `Preflight`, `InstallAgent`/`InstallAgentWithDisks`, `StartAgent`, `FetchAgentLog`, `StopAgent`, `DriveLoad`/`DriveRateLimitedLoad`/`DriveBandwidthLoad`, `WaitForScaleUp`, `WaitForDecision`/`WaitForJournalRecord`, `AssertNoIOPSChange`, and `runAgentScenario`/`runAgentScenarioWithDisks` (build+install+start+stop, wrapping `run(agentStarted)` with journal-on-failure diagnostics). **This is where "what a test does" lives** — every test assembles these in the same order. `InstallAgent`/`runAgentScenario` are thin wrappers over the `*WithDisks` forms, defaulting to `SelectedDisksSpec(target.DeviceName)` at `defaultDiscoveryInterval` — today's exact original behavior, unchanged by `DisksSpec`'s addition. `runAgentScenarioWithDisks` is itself a thin `*testing.T`-facing wrapper over `runAgentScenarioWithDisksErr`, which returns an error instead of calling `t.Fatalf` — the primitive an `xfail`-wrapped scenario needs, since Go cannot catch a `*testing.T` failure raised from inside a test. The agent's stdout/stderr is captured at the stable path `StartAgent` passes to `RunBackgroundToLog` (`FetchAgentLog` reads it back), not at `RunBackground`'s auto-derived one. |
 | `build.go` | Cross-compiles the agent binary for the target's guest OS (linux/amd64) regardless of what the runner itself is. |
-| `smoke_test.go` | The PR-tier test entry point. |
-| `full_test.go` | The merge-tier test entry point, plus `provision()`/`runScript()` wrapping `scripts/provision.sh`/`teardown.sh`. |
-| `regression_test.go` | Deterministic, infrastructure-free regression tests for the observable-baseline precondition and agent-stop verification, driven by a scripted `compute.Client` and a scripted guest-OS runner — they run in the GitHub-hosted `CI` verify job on every PR (`-run '^TestRegression_'`) and alongside both live e2e tiers, and need no VM. |
+| `decisions_test.go` | Scale-up/scale-down decision scenarios against the persistent VM's dependent disk: `TestSmoke_Decisions_ScaleUpOnSaturation` (also exercises the dependent write path as a side effect — see the coverage table below), `TestSmoke_Decisions_NoScaleUpWhenEfficient` (a light, sustained, sub-threshold load, gated on a liveness-proving journal record before crediting "no change" as meaningful — see below), `TestSmoke_Decisions_ScaleUpOnBandwidthSaturation` (a bandwidth-bound, ops-light load; asserts saturation was *detected*, not that a scale-up necessarily follows). |
+| `cold_start_test.go` | `TestSmoke_Decisions_ScaleUpFromColdStart` — load is driven *before* the agent starts, so its first samples already show saturation with no established baseline; the one scenario where `DriveLoad` deliberately precedes `runAgentScenario` rather than living inside its callback. |
+| `independent_test.go` | The independent write path on the PR tier: `TestSmoke_Independent_ScaleUpOnSaturation` (write path) and `TestSmoke_Independent_DryRunValidateOnly` (US-013's server-confirmed dry-run verdict), both against the persistent VM's second, independent disk (`SmokeIndependentTarget`). |
+| `dependent_test.go` | `TestSmoke_Dependent_DryRunComputedOnly` — the dependent disk's dry-run counterpart to `independent_test.go`'s: no server-side validation exists for this write path (§4.7), so this asserts the decision is still reached and the disk is still never mutated. |
+| `lifecycle_test.go` | Provisioning and teardown: `TestFull_Lifecycle_ProvisionScaleUpTeardown`, the merge-tier entry point, plus `provision()`/`runScript()` wrapping `scripts/provision.sh`/`teardown.sh`, the lazy `fullFixture` (`ensureFullFixture`/`fullTarget`/`fullNoDeviceNameTarget`) that provisions the merge tier's shared ephemeral VM and its three disks — one explicitly named, one left unnamed to default, one (churn) created but left unattached for `churn_test.go`'s live attach/detach scenarios — once per process (`sync.Once`) no matter how many full-tier tests ask for one, and the package's `TestMain`, which tears that fixture down exactly once after every test has run. |
+| `device_naming_test.go` | `TestFull_DeviceNaming_NoDeviceNameDefaultsToAlias` — the merge tier's second disk, attached with no `deviceName` at all, on the same shared VM as `lifecycle_test.go`'s explicitly-named one; both forms of `docs/platform-reference.md`'s guest-device-mapping default are exercised side by side. Not a `naming_test.go` naming-convention concern — a live platform behavior. |
+| `naming_test.go` | The naming-convention guard described above. |
+| `churn_test.go` | Live attach/detach for the merge tier's churn disk: `setStorageDisks` resends the VM's whole `--storage-disks` list via the `mws` CLI (`compute.Client` deliberately exposes no attach/detach capability — production code never attaches or detaches a disk), since that list is the only way to change one disk's attachment without dropping the others (`docs/ci-cd.md`); `AttachChurnDisk`/`DetachChurnDisk` wrap it with the fixture's own known-good entries; `waitForDiskAttached` polls past the update's propagation lag. |
+| `discovery_test.go` | The `disks.selected`/`disks.exclude` discovery-and-scope scenarios: `TestFull_Discovery_AttachedDiskManagedWithoutRestart` (auto-discovery picks up a disk attached after the agent has already started, within one `discovery_interval`, no restart) and `TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart` (an unresolved `disks.exclude` name refuses to manage anything at cold start — `docs/design.md` §4.1). See "Discovery and scope coverage" below for what's implemented here versus proven only at the unit level so far. |
+| `headroom_test.go` | `TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap` (E5) — an unmanaged sibling doing real, sustained I/O must still count toward a managed disk's VM headroom (`docs/design.md` §4.6, D4/US-009). Runs unconditionally as an ordinary required scenario (see "VM headroom coverage" below); no longer `xfail`-wrapped. |
+| `xfail.go` | `xfail(t, issueURL, scenario)` — converts a `func() error` scenario's outcome into a non-blocking `t.Skip` on error (a known, tracked gap) or a forced `t.Fatal` on nil (the fix shipped; remove this wrapper). The scenario it wraps must never call a `*testing.T` failure method itself — Go cannot catch one raised from inside a test — so it is built from `runAgentScenarioWithDisksErr` and the package's other error-returning primitives, never `runAgentScenarioWithDisks` or a bare `t.Fatalf`. Currently unused — available for the still-unimplemented §8.3 scenarios listed above. |
+| `regression_test.go` | Deterministic, infrastructure-free regression tests for the observable-baseline precondition and agent-stop verification, driven by a scripted `compute.Client` and a scripted guest-OS runner — they run in the GitHub-hosted `CI` verify job on every PR (`-run '^TestRegression_'`) and alongside both live e2e tiers, and need no VM. Grouped by mechanism: `TestRegression_Preflight_*` (baseline reset, stale-agent stop) and `TestRegression_WaitForScaleUp_*` (convergence and timing). |
 | `scripts/provision.sh`, `scripts/teardown.sh` | Shell scripts wrapping the `mws` CLI directly (not the Go SDK) to create/destroy the merge-tier's ephemeral VM+disk — see `docs/ci-cd.md`'s provisioning runbook for why a CLI wrapper instead of Terraform. |
 
 To find where a given behavior is implemented: the scenario steps themselves are always in
-`scenario.go`; what differs *between* the two tests is only in `smoke_test.go`/`full_test.go`
-(assembling those steps, and where `Target` comes from).
+`scenario.go`; what differs *between* tests is only in each subject file (assembling those steps,
+and where `Target` comes from) — never in which tier runs them.
+
+### Why the merge tier provisions its shared VM lazily
+
+`ensureFullFixture` provisions the merge tier's ephemeral VM and its disks once, behind `sync.Once`;
+`fullTarget(t)` and `fullNoDeviceNameTarget(t)` each return a `Target` for one of the two disks
+attached at creation to every full-tier test in the process, and `TestMain` tears the fixture down
+once after `m.Run()` returns. The fixture's third disk (churn) is created but left unattached — only
+`discovery_test.go`'s live-attach scenario uses it, via `fix.churnTarget()` and
+`AttachChurnDisk`/`DetachChurnDisk` directly, so it has no `fullChurnTarget(t)`-style wrapper yet. Two
+things sharing one fixture buys, both necessary once more than one full-tier scenario exists:
+
+- A `-run` selecting only some full-tier tests never pays for provisioning it doesn't need — the
+  fixture is created on first actual use, not eagerly.
+- Multiple full-tier tests share one VM instead of one each, the same economy the smoke tier already
+  gets for free from its persistent target.
+
+Isolation between full-tier tests sharing that VM comes from `Preflight`, not from a fresh VM per
+test — the identical guarantee the smoke tier's shared persistent target already relies on (see
+below). Teardown itself stays unconditional on `E2E_RUN_ID` (set once per workflow run, not generated
+per test), so it still recovers a partially provisioned run exactly as it did before this fixture
+existed.
 
 ### Scenario coverage — what's actually implemented today
 
-`docs/design.md` §8.3 lists ten scenarios as the accepted end state. Today, **three** of them are
-covered — scale-up on saturation, plus both write-path rows: each tier exercises its own real write
-path (dependent on the smoke tier's persistent disk, independent on the full tier's ephemeral disk),
-with the disk's class asserted (`AssertDiskClass`) rather than trusted from a naming convention. The
-remaining seven are not yet separate test cases. Recorded here honestly rather than as a coverage
-claim the code doesn't back up yet:
+`docs/design.md` §8.3 lists ten scenarios as the accepted end state. Today, **seven** of them are
+covered — each disk's class asserted (`AssertDiskClass`) rather than trusted from a naming convention.
+The remaining three depend on features that don't exist yet. Recorded here honestly rather than as a
+coverage claim the code doesn't back up yet:
 
 | §8.3 scenario | Status |
 |---|---|
 | Scale-up on saturation | Implemented, both tiers |
-| Dependent write path | Implemented, smoke tier — the persistent VM's target disk is dependent (`docs/design.md` §4.7); its class is asserted by `Preflight` (`AssertDiskClass`), not trusted from the device-name convention |
-| Independent write path | Implemented, full tier — the ephemeral disk is independent; its class is asserted at scenario start (`AssertDiskClass`), not trusted from the provisioning script |
-| No scale-up when efficient | Not implemented |
-| Cold start | Not implemented |
-| Dry run | Not implemented |
-| VM cap detection | Not implemented |
-| Bandwidth-bound case | Not implemented |
+| Dependent write path | Implemented, smoke tier — the persistent VM's dependent disk (`docs/design.md` §4.7); class asserted by `Preflight` (`AssertDiskClass`), not trusted from the device-name convention |
+| Independent write path | Implemented, both tiers — the persistent VM's second, permanently attached independent disk on the smoke tier (`TestSmoke_Independent_ScaleUpOnSaturation`), the ephemeral disk on the full tier; class asserted at scenario start either way |
+| Dry run | Implemented for both disk classes, smoke tier — `TestSmoke_Independent_DryRunValidateOnly` observes the platform's real `ValidateOnly` verdict; `TestSmoke_Dependent_DryRunComputedOnly` observes the same `scale_up` journal record on the class with no server-side validation to confirm against (§4.7). Both confirm zero mutation via repeated fresh reads |
+| No scale-up when efficient | Implemented, smoke tier (`TestSmoke_Decisions_NoScaleUpWhenEfficient`) — a real, sustained, sub-threshold load. Asserting only "IOPS never changed" would pass vacuously for a dead or crashed agent, so this first requires a `no_action`/`no_signal` journal record proving a full evaluation window was reached before crediting the no-change observation |
+| Cold start | Implemented, smoke tier (`TestSmoke_Decisions_ScaleUpFromColdStart`) — load is already present when the agent starts, so its first samples show saturation with no established baseline yet |
+| VM cap detection | Not implemented — this row is §8.3's original scenario, loading *both managed* smoke-tier disks past the pool together; already correctly summed today without needing any fix. See "VM headroom coverage" below for the separate, narrower unmanaged-sibling gap (D4/US-009, E5) |
+| Bandwidth-bound case | Implemented, smoke tier (`TestSmoke_Decisions_ScaleUpOnBandwidthSaturation`) — a large-block, high-depth load that saturates bandwidth while ops stay under the IOPS-utilization threshold. Asserts saturation was *detected* via the journal reasons only reachable from `decider.go`'s saturated branch (the IOPS-utilization reading is logged, not asserted on — a single newest-sample value, not a window average) — not that a scale-up necessarily follows, since `demand()`'s ops-denominated estimate may legitimately fail to clear the scale-up ratio against a bandwidth-bound workload. A `target_not_above_current` outcome here is a real, reportable gap in the demand estimator, not a test bug |
 | Scale-down after quiet | Not implemented — the feature itself doesn't exist yet (`allowScaleDown = false`, Phase 1 scope) |
 | No flapping | Not implemented — depends on scale-down |
 
-See `docs/TODO.md` for turning the remaining rows into real test cases as separate, explicit scenarios
-rather than incidental side effects of which disk class a given persistent/ephemeral VM happens to use.
+See `docs/TODO.md` for VM cap detection and the scale-down-dependent rows.
+
+### Discovery and scope coverage — what's actually implemented today
+
+`docs/design.md` §4.1's cold-start-vs-runtime degradation model (an unresolved `disks.selected` or
+`disks.exclude` name is fatal on the very first discovery of the process's life, degrades only that
+name afterward) is fully covered at the unit level
+(`internal/registry/registry_test.go`, `cmd/mws-iops-autoscaler/agent_test.go`). `discovery_test.go`
+adds the two live scenarios that needed real infrastructure to prove: attaching a disk without a
+restart, and the process actually refusing to start rather than merely returning an error a unit test
+can catch:
+
+| Scenario | Status |
+|---|---|
+| Auto-discovery picks up a live-attached disk within one `discovery_interval`, no restart | Implemented (`TestFull_Discovery_AttachedDiskManagedWithoutRestart`) |
+| An unresolved `disks.exclude` name is fatal at cold start | Implemented (`TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart`) |
+| An unresolved `disks.exclude`/`disks.selected` name degrades without being fatal once at least one discovery has already succeeded | Proven at the unit level only (`TestReconcile_degradesPartiallyWhenASelectedDiskIsRemovedAtRuntime`) — shares `discover()`'s decision path with the cold-start case above, so no new product code path needs live proof yet |
+| Auto-discovery drops a live-detached disk, other managed disks keep scaling | Not implemented |
+| An excluded disk being attached or detached has no effect on the managed set | Not implemented |
+| Moving a disk into or out of `disks.exclude`/`disks.selected` (config change, requires a restart — `docs/TODO.md`'s config hot-reload item) | Not implemented |
+| `n+1` disks attached, `n` selected → exactly `n` managed | Not implemented |
+| A `disks.selected` disk never attached at cold start → fatal, nothing managed | Proven at the unit level only (`TestDiscover_unmatchedSelectedDeviceAtColdStartIsFatal`) — same reasoning as the exclude row above: the exclude scenario already exercises this code path live, and `selected` shares it |
+| Adding an already-attached disk to `disks.selected` (config change, requires a restart) | Not implemented |
+
+The unimplemented rows all reuse `churn_test.go`'s attach/detach plumbing and `discovery_test.go`'s
+`DisksSpec`-parameterized config; nothing further needs building in the harness itself to add them.
+
+### VM headroom coverage
+
+`docs/design.md` §4.6 defines VM headroom from "other disks", not "other **managed** disks" — the
+VM's shared IOPS pool is consumed by every attached disk, whether or not this agent happens to manage
+it. `TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap` (`headroom_test.go`, E5 in the test-plan
+shorthand, [issue #54][issue-54]) asserts exactly that: `disks.selected` names only the managed disk,
+an unmanaged sibling (the churn disk) is driven with sustained load, and the managed disk's own
+`vm_headroom_iops` journal field must fall meaningfully below the VM's full pool.
+
+[Issue #54][issue-54]'s fix (`cmd/mws-iops-autoscaler/agent.go`'s `discover()`/`reconcile()`: every VM
+disk outside the managed set is now sampled and analyzed too, feeding `siblingP95` without ever being
+decided, actuated, or journaled itself) is covered directly at the unit level
+(`TestDiscover_populatesUnmanagedFromDisksOutsideSelection`,
+`TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption`) — proven deterministically there, the
+same way the cold-start/runtime degradation split above is. The scenario ran under R4.5's `xfail`
+pattern (`xfail.go`) until [issue #57][issue-57] removed that wrapper on the strength of #54's unit
+coverage; the wrapper's own removal condition (a passing run forcing its own deletion) was therefore
+never triggered live. This scenario now runs unconditionally, like every other required full-tier
+scenario, and its first live confirmation has since happened: a `workflow_dispatch` full-tier run
+passed `TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap` in 71.74s
+([run 34458884280](https://github.com/rodion1010/mws-iops-autoscaler/actions/runs/34458884280),
+2026-09-10), alongside every other full-tier scenario including both of `discovery_test.go`'s — so
+neither carries the "not yet run against live infrastructure" caveat anymore.
+
+[issue-54]: https://github.com/rodion1010/mws-iops-autoscaler/issues/54
+[issue-57]: https://github.com/rodion1010/mws-iops-autoscaler/issues/57
 
 ### Why preflight matters more than cleanup
 

@@ -4,6 +4,7 @@ package telemetry
 
 import (
 	"net/http"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -16,22 +17,32 @@ import (
 type Registry struct {
 	reg *prometheus.Registry
 
-	provisionedIOPS       *prometheus.GaugeVec
-	proposedTargetIOPS    *prometheus.GaugeVec
-	observedIOPS          *prometheus.GaugeVec
-	utilizationRatio      *prometheus.GaugeVec
-	estimatedDemand       *prometheus.GaugeVec
-	latencyBaseline       *prometheus.GaugeVec
-	saturated             *prometheus.GaugeVec
-	decisionsTotal        *prometheus.CounterVec
-	vmHeadroom            *prometheus.GaugeVec
-	vmCapReached          *prometheus.GaugeVec
-	metricSource          *prometheus.GaugeVec
-	metricStaleness       *prometheus.GaugeVec
-	windowFillRatio       *prometheus.GaugeVec
-	changeBudgetRemaining *prometheus.GaugeVec
-	discoverySkippedTotal *prometheus.CounterVec
-	budgetHealthy         prometheus.Gauge
+	provisionedIOPS         *prometheus.GaugeVec
+	proposedTargetIOPS      *prometheus.GaugeVec
+	observedIOPS            *prometheus.GaugeVec
+	utilizationRatio        *prometheus.GaugeVec
+	estimatedDemand         *prometheus.GaugeVec
+	latencyBaseline         *prometheus.GaugeVec
+	saturated               *prometheus.GaugeVec
+	decisionsTotal          *prometheus.CounterVec
+	vmHeadroom              *prometheus.GaugeVec
+	vmCapReached            *prometheus.GaugeVec
+	metricSource            *prometheus.GaugeVec
+	metricStaleness         *prometheus.GaugeVec
+	windowFillRatio         *prometheus.GaugeVec
+	changeBudgetRemaining   *prometheus.GaugeVec
+	discoverySkippedTotal   *prometheus.CounterVec
+	diskConfiguredUnmanaged *prometheus.GaugeVec
+	budgetHealthy           prometheus.Gauge
+
+	// configuredUnmanagedMu guards configuredUnmanaged only — every other
+	// field above relies on the underlying prometheus types' own thread
+	// safety and needs no lock of its own. This one gauge's label set is
+	// unbounded and operator-controlled (device_name), unlike every other
+	// metric here, so SyncDiskConfiguredUnmanaged has to remember what it
+	// last set in order to delete what's no longer current.
+	configuredUnmanagedMu sync.Mutex
+	configuredUnmanaged   map[[2]string]bool
 }
 
 func NewRegistry() *Registry {
@@ -52,6 +63,7 @@ func NewRegistry() *Registry {
 	r.windowFillRatio = r.gauge("iops_autoscaler_window_fill_ratio", "Fraction of the configured window currently buffered.", "disk", "direction")
 	r.changeBudgetRemaining = r.gauge("iops_autoscaler_change_budget_remaining", "Changes remaining in the trailing 24h budget.", "disk")
 	r.discoverySkippedTotal = r.counter("iops_autoscaler_disk_discovery_skipped_total", "Disk attachments excluded from the managed set, by reason.", "alias", "reason")
+	r.diskConfiguredUnmanaged = r.gauge("iops_autoscaler_disk_configured_unmanaged", "1 while a disks.selected or disks.exclude entry named device_name cannot be resolved against the VM's live disks (docs/design.md §4.1) — the series is deleted, not set to 0, once it resolves again (SyncDiskConfiguredUnmanaged), so a resolved disk disappears from this metric entirely rather than leaving a stale 'still degraded' reading.", "device_name", "reason")
 	r.budgetHealthy = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "iops_autoscaler_budget_healthy",
 		Help: "1 if the durable 24h change budget can currently be trusted, else 0 (issue #10).",
@@ -123,6 +135,34 @@ func (r *Registry) RecordStaleness(diskID string, seconds float64) {
 // RecordDiscoverySkipped counts excluded attachments by alias and stable reason category.
 func (r *Registry) RecordDiscoverySkipped(alias, reason string) {
 	r.discoverySkippedTotal.WithLabelValues(alias, reason).Inc()
+}
+
+// SyncDiskConfiguredUnmanaged replaces the full current set of degraded
+// disks with current (device_name -> reason), called every discovery cycle
+// including with an empty map. Entries no longer present are deleted, not
+// zeroed, so a disk that resolves again disappears from the metric
+// entirely instead of leaving a stale "still degraded" series behind
+// (issue #19's discipline, extended here to deletion since this is the one
+// gauge in this file whose label set is unbounded and operator-controlled
+// rather than fixed in advance).
+func (r *Registry) SyncDiskConfiguredUnmanaged(current map[string]string) {
+	r.configuredUnmanagedMu.Lock()
+	defer r.configuredUnmanagedMu.Unlock()
+
+	next := make(map[[2]string]bool, len(current))
+	for device, reason := range current {
+		key := [2]string{device, reason}
+		next[key] = true
+		if !r.configuredUnmanaged[key] {
+			r.diskConfiguredUnmanaged.WithLabelValues(device, reason).Set(1)
+		}
+	}
+	for key := range r.configuredUnmanaged {
+		if !next[key] {
+			r.diskConfiguredUnmanaged.DeleteLabelValues(key[0], key[1])
+		}
+	}
+	r.configuredUnmanaged = next
 }
 
 // RecordBudgetHealthy exports the tracker's durable-budget health without coupling state to telemetry.

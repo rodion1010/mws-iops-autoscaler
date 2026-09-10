@@ -196,6 +196,25 @@ contain the complete contracts, edge cases and failure behaviour.
 Discovery is idempotent and rebuilds the registry wholesale. A disk that changed class, was detached,
 or was resized externally is picked up here.
 
+A `disks.selected` or `disks.exclude` entry that doesn't resolve against the VM's live disks
+(`registry.Degradation`) is handled differently depending on discovery history, not treated as one
+fixed outcome — `registry.Select` itself has no memory of prior cycles (it is rebuilt wholesale every
+time, per above) and always returns the managed set it could build plus the unresolved names; deciding
+whether that's fatal belongs to `Agent.discover`, which does have history:
+
+- **Cold start** — no discovery has yet succeeded for this process. Managing a silently partial set
+  with no prior successful discovery to fall back to would diverge from operator intent with nothing
+  to show for it, so this is fatal: the managed snapshot is invalidated exactly as any other discovery
+  failure is (`Agent.managedValid`), and nothing is managed until the mismatch is resolved.
+- **Runtime** — at least one discovery has already succeeded. Only the unresolved name degrades; every
+  other disk keeps being managed normally. The degraded name is reported via
+  `health.Readiness.SetDegradedDisks` (§7.3) and the `iops_autoscaler_disk_configured_unmanaged` gauge
+  (§7.1) — neither of which affects `/readyz`'s binary verdict — and a `WARN` log line is emitted only
+  on the transition into or out of a degraded state, not on every cycle it persists.
+
+No timer escalates a runtime degradation back to fatal; an operator who wants an escalation policy
+builds it on top of the exposed signal (docs/TODO.md's alerting entry).
+
 Every exclusion above returns a `compute.SkippedDisk{Alias, DiskName, Category, Reason}` rather than
 silently dropping the disk (US-002) — `Category` is one of a small set of stable codes
 (`ambiguous_class`, `empty_identity`, `duplicate_disk_name`, `duplicate_device_name`, `empty_alias`,
@@ -502,6 +521,18 @@ resize. It emits `VM_IOPS_CAP_REACHED` and reports that the bottleneck is vCPU.
 This matters more here than on most platforms: **the VM ceiling is not enforced by the API.** A 2-vCPU
 VM with a 6000 pool accepts a disk set to 10000 and bills for it. `validateOnly` does not catch it
 either. The guardrail is the only thing preventing billed-but-unusable IOPS.
+
+"Other disks" means every disk on the VM, managed or not — including one dropped from the managed
+set this cycle because its guest path could not be resolved (§4.1). A sibling with no fresh sample
+this cycle contributes `IOPSP95Down`'s zero value to the aggregate, which understates its real
+consumption rather than reporting it as unknown. Scale-up must fail closed on that gap: if any
+sibling sharing the pool has no data or a stale sample this cycle, the controller takes no action
+(reason `sibling_demand_unmeasurable`) instead of approving a resize against headroom that might
+already be spent. This is deliberately **not** `VM_IOPS_CAP_REACHED` — that action drives
+`iops_autoscaler_vm_cap_reached`, alert-worthy as "actionable — add vCPU" (§7.3), and a measurement
+gap is a different remediation (fix that disk's metrics path) that must not alias onto the vCPU-upgrade
+signal. Scale-down is unaffected — reducing this disk's own IOPS never consumes more of the shared
+pool, so an unmeasured sibling has nothing to fail closed against on that path (issue #56).
 
 ### 4.7 Actuation
 
@@ -822,7 +853,13 @@ type Analyzer interface {
 // be redoing work the caller already did.
 type VMState struct {
     IOPSPool       int64   // 3000 × vCPU (Discover, M1) — not enforced by the platform
-    SiblingP95IOPS float64 // aggregate p95 IOPS of every other managed disk on this VM
+    SiblingP95IOPS float64 // aggregate p95 IOPS of every other disk sharing the VM's pool
+
+    // SiblingDemandUnknown is true when at least one such disk had no fresh
+    // sample this cycle — its real consumption was folded into
+    // SiblingP95IOPS as zero rather than reported as unknown (§4.6). Decide
+    // fails closed on scale-up when this is true (issue #56).
+    SiblingDemandUnknown bool
 }
 
 // EffectivePolicy is the narrow slice of the resolved policy Decide needs —
@@ -1000,7 +1037,8 @@ exposing them.
 |---|---|
 | Metrics unavailable | Mark disks "no data" — reason `no_data` if never sampled at all (`Analysis.HasData = false`), `metrics_stale` if sampled before but now too old (`Analysis.Fresh = false`, issue #15, pre-merge review) — take no action, alert after `n` cycles |
 | Compute API unavailable | Retry with backoff; decisions queue but never stack up (latest wins). Once the last successful discovery exceeds `max_discovery_age` (3× `discovery_interval`), reconcile skips every disk for that cycle rather than keep acting on a snapshot that may no longer reflect reality (issue #15) |
-| Discovery fails outright (Compute API error, or an unmatched `disks.selected` device_name, issue #5 reopened) | The managed snapshot is invalidated the instant the failure happens (`Agent.managedValid`), not merely once `max_discovery_age` eventually elapses — a fatal error and staleness-by-age are two independent, both-checked gates (pre-merge review) |
+| Discovery fails outright (Compute API error, or an unmatched `disks.selected`/`disks.exclude` name at cold start, issue #5 reopened) | The managed snapshot is invalidated the instant the failure happens (`Agent.managedValid`), not merely once `max_discovery_age` eventually elapses — a fatal error and staleness-by-age are two independent, both-checked gates (pre-merge review) |
+| An unmatched `disks.selected`/`disks.exclude` name at runtime (≥1 prior successful discovery, §4.1) | Not fatal — only that name degrades (`registry.Degradation`); every other disk keeps being managed, reported via `/readyz`'s body and a gauge, never the binary verdict |
 | Write returns non-2xx | Log with full request context, back off, do not update state |
 | Write succeeds but value differs | Treat as failure, re-read, reconcile on next cycle |
 | Write call itself errors (network) | Reservation resolved from a fresh live read, never released on the error alone — the platform may have applied it before the response arrived (pre-merge review; see §9.4's budget crash-safety note) |
@@ -1034,6 +1072,7 @@ iops_autoscaler_window_fill_ratio{disk,direction}             gauge
 iops_autoscaler_change_budget_remaining{disk}                 gauge
 iops_autoscaler_cost_delta_iops_hours{disk}                   counter
 iops_autoscaler_disk_discovery_skipped_total{alias,reason}    counter
+iops_autoscaler_disk_configured_unmanaged{device_name,reason} gauge 1, deleted when resolved
 iops_autoscaler_budget_healthy                                gauge 0|1
 ```
 
@@ -1082,6 +1121,13 @@ Those three are added when their producing subsystem exists.
 
 `cost_delta_iops_hours` accumulates billable IOPS-hours above the free 1000 base, so the value the
 autoscaler delivers (or costs) is measurable rather than asserted.
+
+`disk_configured_unmanaged{device_name,reason}` is the one gauge here whose label set is unbounded and
+operator-controlled rather than fixed in advance — `device_name` is whatever a `disks.selected`/
+`disks.exclude` entry named, which may not correspond to any live disk at all (§4.1). It is therefore
+the one metric in this file that is *deleted*, not set to 0, once resolved
+(`telemetry.SyncDiskConfiguredUnmanaged`): a `GaugeVec` series set to 0 would still enumerate in
+`/metrics` forever, permanently listing every name an operator ever mistyped.
 
 ### 7.2 Decision journal
 
@@ -1154,9 +1200,16 @@ reconciliation pass below), not a wait, matching how the other three conditions 
 its own: an operator seeing `/readyz` fail for this reason specifically knows the fix is "restart," not
 "wait for the network to come back."
 
+`/readyz`'s JSON body also carries `configured_disks_unmanaged` — every currently-degraded
+`disks.selected`/`disks.exclude` name (§4.1), as `{device_name, reason}` — but this field is reported
+*alongside* the binary verdict above, never folded into it: a degraded disk at runtime does not make
+`/readyz` unready. The field is omitted entirely when nothing is degraded, so the healthy-state
+response is byte-for-byte what it was before this field existed.
+
 Alert-worthy: metric staleness beyond 3 publication intervals; write failure rate above threshold;
 change budget exhausted; `VM_IOPS_CAP_REACHED` sustained (actionable — add vCPU); any disk pinned at
-`max_iops` while still saturated (the ceiling is too low).
+`max_iops` while still saturated (the ceiling is too low); any entry in `configured_disks_unmanaged`
+sustained beyond a few discovery cycles (a typo an operator should fix, not merely observe).
 
 ---
 

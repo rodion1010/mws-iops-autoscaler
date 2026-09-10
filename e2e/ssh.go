@@ -28,10 +28,22 @@ func (t Target) Run(ctx context.Context, remoteCmd string) (string, error) {
 	return string(out), nil
 }
 
-// RunBackground detaches a long-running remote command from the SSH session.
+// RunBackground detaches a long-running remote command from the SSH session,
+// capturing its combined output to a path auto-derived from remoteCmd.
 func (t Target) RunBackground(ctx context.Context, remoteCmd string) error {
 	// The scenario stops detached processes explicitly during cleanup.
-	wrapped := fmt.Sprintf("nohup %s >/tmp/e2e-%s.log 2>&1 & disown", remoteCmd, sanitizeLogName(remoteCmd))
+	return t.RunBackgroundToLog(ctx, remoteCmd, fmt.Sprintf("/tmp/e2e-%s.log", sanitizeLogName(remoteCmd)))
+}
+
+// RunBackgroundToLog is RunBackground with an explicit, stable log path —
+// for a caller that needs to read the command's output back later (e.g.
+// diagnosing why a process that was expected to keep running instead
+// exited). RunBackground's auto-derived path is unsuitable for that: it's
+// truncated and hashed from remoteCmd for uniqueness among concurrent
+// background commands, not meant to be reconstructed by a caller that
+// doesn't have the exact command string on hand.
+func (t Target) RunBackgroundToLog(ctx context.Context, remoteCmd, logPath string) error {
+	wrapped := fmt.Sprintf("nohup %s >%s 2>&1 & disown", remoteCmd, logPath)
 	_, err := t.Run(ctx, wrapped)
 	return err
 }

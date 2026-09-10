@@ -4,11 +4,13 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/rodion1010/mws-iops-autoscaler/internal/compute"
@@ -26,9 +28,73 @@ func recoveryContext() (context.Context, context.CancelFunc) {
 // e2eScaleUpWindow drives both agent configuration and result validation.
 const e2eScaleUpWindow = 30 * time.Second
 
-// agentConfigYAML uses shorter windows and thresholds calibrated for the
-// harness's single-process fio load; production defaults remain unchanged.
+// defaultDiscoveryInterval is agentConfigYAML's discovery_interval, unchanged
+// since before DisksSpec existed. Every existing scenario relies on it.
+const defaultDiscoveryInterval = 5 * time.Minute
+
+// discoveryScenarioInterval is for scenarios that must observe rediscovery
+// within a test's lifetime (e.g. an attach picked up without a restart).
+// main.go derives reconcile()'s fail-closed staleness guard, maxDiscoveryAge,
+// as 3x discovery_interval, so this cannot become defaultDiscoveryInterval:
+// doing so would shrink every existing scenario's margin from 15 minutes
+// (never observed to fire) to 90 seconds, risking a spurious failure in the
+// multi-minute P1-P5 load scenarios if any single discovery cycle ever
+// stalled that long. 30s keeps that margin at 90s — ample slack for a single
+// compute-API call — while bounding how long a discovery scenario waits.
+const discoveryScenarioInterval = 30 * time.Second
+
+// DisksSpec configures the generated agent config's disks: block, mirroring
+// internal/config.DisksSpec's shape without importing it — e2e authors the
+// on-disk YAML contract the same way any other config consumer would.
+type DisksSpec struct {
+	Mode     string
+	Selected []string
+	Exclude  []string
+}
+
+// SelectedDisksSpec is agentConfigYAML's original, still-default shape: every
+// name in mode: selected.
+func SelectedDisksSpec(deviceNames ...string) DisksSpec {
+	return DisksSpec{Mode: "selected", Selected: deviceNames}
+}
+
+// AutoDiscoveryDisksSpec is mode: auto-discovery, optionally excluding names.
+func AutoDiscoveryDisksSpec(exclude ...string) DisksSpec {
+	return DisksSpec{Mode: "auto-discovery", Exclude: exclude}
+}
+
+func disksBlockYAML(spec DisksSpec) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "disks:\n  mode: %s\n", spec.Mode)
+	switch spec.Mode {
+	case "selected":
+		b.WriteString("  selected:\n")
+		for _, name := range spec.Selected {
+			fmt.Fprintf(&b, "    - device_name: %s\n", name)
+		}
+	case "auto-discovery":
+		if len(spec.Exclude) > 0 {
+			b.WriteString("  exclude:\n")
+			for _, name := range spec.Exclude {
+				fmt.Fprintf(&b, "    - %s\n", name)
+			}
+		}
+	}
+	return b.String()
+}
+
+// agentConfigYAML is InstallAgent's default rendering: mode: selected for
+// exactly t.DeviceName at the production discovery_interval default.
 func agentConfigYAML(t Target) string {
+	return agentConfigYAMLWithDisks(SelectedDisksSpec(t.DeviceName), defaultDiscoveryInterval)
+}
+
+// agentConfigYAMLWithDisks renders the harness's config with shorter windows
+// and thresholds calibrated for its single-process fio load (production
+// defaults remain unchanged), an explicit disks: selection, and an explicit
+// discovery_interval — see discoveryScenarioInterval's comment for why a
+// caller must not casually pass a value faster than defaultDiscoveryInterval.
+func agentConfigYAMLWithDisks(disks DisksSpec, discoveryInterval time.Duration) string {
 	return fmt.Sprintf(`apiVersion: autoscaling.mws.cloud/v1alpha1
 kind: IOPSAutoScaler
 mode: local
@@ -41,15 +107,11 @@ policy:
     saturation: {utilization_threshold: 0.90, queue_depth_threshold: 0.5}
     cooldown: {scale_up: 10s, scale_down: 20s}
 
-disks:
-  mode: selected
-  selected:
-    - device_name: %s
-
+%s
 runtime:
   metrics: {source: guest, collection_interval: 5s}
-  controller: {reconcile_interval: 10s, discovery_interval: 5m}
-`, e2eScaleUpWindow, t.DeviceName)
+  controller: {reconcile_interval: 10s, discovery_interval: %s}
+`, e2eScaleUpWindow, disksBlockYAML(disks), discoveryInterval)
 }
 
 // Bracketed patterns prevent pkill from matching its own command line.
@@ -194,8 +256,18 @@ func Cleanup(ctx context.Context, client compute.Client, t Target) error {
 	return errors.Join(errs...)
 }
 
-// InstallAgent copies localBinaryPath and a generated config to t's guest OS.
+// InstallAgent copies localBinaryPath and a generated config to t's guest OS,
+// selecting exactly t.DeviceName at the production discovery_interval
+// default — the shape every existing scenario relies on, unchanged by
+// InstallAgentWithDisks's addition.
 func InstallAgent(ctx context.Context, t Target, localBinaryPath string) error {
+	return InstallAgentWithDisks(ctx, t, localBinaryPath, SelectedDisksSpec(t.DeviceName), defaultDiscoveryInterval)
+}
+
+// InstallAgentWithDisks is InstallAgent for a scenario that needs an
+// explicit disks: selection and discovery_interval — the discovery/scope
+// scenarios, which must observe rediscovery within the test's lifetime.
+func InstallAgentWithDisks(ctx context.Context, t Target, localBinaryPath string, disks DisksSpec, discoveryInterval time.Duration) error {
 	if err := t.Copy(ctx, localBinaryPath, remoteWorkDir+"/mws-iops-autoscaler"); err != nil {
 		return fmt.Errorf("e2e: install agent binary: %w", err)
 	}
@@ -208,7 +280,7 @@ func InstallAgent(ctx context.Context, t Target, localBinaryPath string) error {
 		return fmt.Errorf("e2e: install agent config: %w", err)
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString(agentConfigYAML(t)); err != nil {
+	if _, err := tmp.WriteString(agentConfigYAMLWithDisks(disks, discoveryInterval)); err != nil {
 		tmp.Close()
 		return fmt.Errorf("e2e: install agent config: %w", err)
 	}
@@ -221,10 +293,17 @@ func InstallAgent(ctx context.Context, t Target, localBinaryPath string) error {
 	return nil
 }
 
+// agentLogPath is a stable path (unlike RunBackground's auto-derived one) so
+// a scenario that expects the agent to keep running can still read back why
+// it didn't (FetchAgentLog) — e.g. a cold-start-fatal discovery exits the
+// whole process almost immediately (docs/design.md §4.1).
+const agentLogPath = remoteWorkDir + "/agent.log"
+
 // StartAgent forwards SDK scope explicitly and confines mutable state to the
-// disposable remote work directory.
-func StartAgent(ctx context.Context, t Target, project string) error {
-	// env works when RunBackground places the command directly after nohup.
+// disposable remote work directory. dryRun appends US-013's -dry-run flag,
+// so the process discovers, samples and decides but applies no change.
+func StartAgent(ctx context.Context, t Target, project string, dryRun bool) error {
+	// env works when RunBackgroundToLog places the command directly after nohup.
 	envAssign := "MWS_PROJECT=" + project
 	if zone := Zone(); zone != "" {
 		envAssign += " MWS_ZONE=" + zone
@@ -233,7 +312,20 @@ func StartAgent(ctx context.Context, t Target, project string) error {
 		"env %s %s/mws-iops-autoscaler -config %s/config.yaml -state-dir %s/state -journal %s/journal.jsonl -listen :9435",
 		envAssign, remoteWorkDir, remoteWorkDir, remoteWorkDir, remoteWorkDir,
 	)
-	return t.RunBackground(ctx, cmd)
+	if dryRun {
+		cmd += " -dry-run"
+	}
+	return t.RunBackgroundToLog(ctx, cmd, agentLogPath)
+}
+
+// FetchAgentLog returns the agent's captured stdout/stderr — diagnostic
+// only, the same convention as FetchJournal.
+func FetchAgentLog(ctx context.Context, t Target) string {
+	out, err := t.Run(ctx, "cat "+agentLogPath+" 2>/dev/null || true")
+	if err != nil {
+		return fmt.Sprintf("(failed to fetch agent log: %v)", err)
+	}
+	return out
 }
 
 // StopAgent requests a graceful shutdown.
@@ -247,6 +339,35 @@ func DriveLoad(ctx context.Context, t Target) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
 	cmd := fmt.Sprintf(
 		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --iodepth=64 --direct=1 --time_based=1 --runtime=600",
+		guestPath,
+	)
+	return t.RunBackground(ctx, cmd)
+}
+
+// DriveRateLimitedLoad caps ops well under the saturation gate (this
+// harness's config uses a 0.90 utilization threshold against a 1000-IOPS
+// baseline, i.e. 900 ops) so a scenario can drive real, sustained I/O
+// without ever crossing into saturation. Shares DriveLoad's job name and
+// guest path convention so killLoadCmd and DriveLoad's own cleanup cover it
+// identically.
+func DriveRateLimitedLoad(ctx context.Context, t Target, rateIOPS int) error {
+	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
+	cmd := fmt.Sprintf(
+		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --iodepth=1 --direct=1 --time_based=1 --runtime=600 --rate_iops=%d",
+		guestPath, rateIOPS,
+	)
+	return t.RunBackground(ctx, cmd)
+}
+
+// DriveBandwidthLoad uses a large block size at depth to saturate bandwidth
+// while keeping ops well below what an ops-denominated demand estimate
+// would read as saturated — the fingerprint sustainedResourceGate's
+// bandwidth branch (internal/analyzer) exists to catch. It is DriveLoad's
+// only difference: same job name, same guest path, a larger block size.
+func DriveBandwidthLoad(ctx context.Context, t Target) error {
+	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
+	cmd := fmt.Sprintf(
+		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=64k --iodepth=64 --direct=1 --time_based=1 --runtime=600",
 		guestPath,
 	)
 	return t.RunBackground(ctx, cmd)
@@ -298,6 +419,177 @@ func FetchJournal(ctx context.Context, t Target) string {
 		return fmt.Sprintf("(failed to fetch journal: %v)", err)
 	}
 	return out
+}
+
+// journalRecord decodes only the journal fields e2e scenarios need to
+// assert on. It mirrors internal/journal.Record's field names rather than
+// importing that type — the journal is an external contract (design.md
+// §7.2, internal/journal.go's own doc comment), so an e2e scenario reads it
+// the same way any other external consumer would.
+type journalRecord struct {
+	Action         string  `json:"action"`
+	Reason         string  `json:"reason"`
+	CurrentIOPS    int64   `json:"current_iops"`
+	TargetIOPS     int64   `json:"target_iops"`
+	Utilization    float64 `json:"utilization"`
+	VMHeadroomIOPS int64   `json:"vm_headroom_iops"`
+}
+
+// journalRecords fetches and decodes every well-formed line the guest's
+// journal currently holds. A line that isn't a JSON record (an ssh
+// host-key warning, a partial write) is skipped rather than failing the
+// whole read on it.
+func journalRecords(ctx context.Context, t Target) ([]journalRecord, error) {
+	out, err := t.Run(ctx, "cat "+remoteWorkDir+"/journal.jsonl 2>/dev/null || true")
+	if err != nil {
+		return nil, fmt.Errorf("fetch journal: %w", err)
+	}
+	var recs []journalRecord
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec journalRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		recs = append(recs, rec)
+	}
+	return recs, nil
+}
+
+// WaitForJournalRecord polls the remote decision journal until some record
+// satisfies match, or fails at timeout. Preflight resets the guest's
+// journal file for every scenario, so any record found here was produced
+// by this run — no need to additionally filter by timestamp.
+func WaitForJournalRecord(ctx context.Context, t Target, timeout, pollInterval time.Duration, match func(journalRecord) bool) (journalRecord, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		recs, err := journalRecords(ctx, t)
+		if err != nil {
+			return journalRecord{}, fmt.Errorf("e2e: wait for journal record: %w", err)
+		}
+		for _, rec := range recs {
+			if match(rec) {
+				return rec, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return journalRecord{}, fmt.Errorf("e2e: wait for journal record: no matching record in the journal after %s", timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return journalRecord{}, ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// WaitForDecision polls the remote decision journal until a record shows
+// wantAction, or fails at timeout. This is how a dry run's decision is
+// observed: US-013 applies no change, so CurrentIOPS/WaitForScaleUp have
+// nothing to detect, but the journal is written unconditionally before
+// actuation (design.md §7.2) whether or not the write itself is real.
+func WaitForDecision(ctx context.Context, t Target, timeout, pollInterval time.Duration, wantAction string) error {
+	_, err := WaitForJournalRecord(ctx, t, timeout, pollInterval, func(rec journalRecord) bool {
+		return rec.Action == wantAction
+	})
+	return err
+}
+
+// AssertNoIOPSChange polls until duration elapses and fails if the disk is
+// ever observed off baseline — the dry-run counterpart to WaitForScaleUp,
+// which expects a rise. Zero mutation is confirmed positively, through
+// repeated fresh reads, rather than assumed from a single reading.
+func AssertNoIOPSChange(ctx context.Context, client compute.Client, t Target, duration, pollInterval time.Duration) error {
+	deadline := time.Now().Add(duration)
+	for {
+		current, err := CurrentIOPS(ctx, client, t)
+		if err != nil {
+			return fmt.Errorf("e2e: assert no IOPS change: %w", err)
+		}
+		if current != t.BaselineIOPS {
+			return fmt.Errorf("e2e: assert no IOPS change: observed %d, want baseline %d — a dry run must apply no change", current, t.BaselineIOPS)
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// runAgentScenario builds, installs and starts the agent against target,
+// calls run once it is up, and stops it afterward — the sequence every
+// scenario test in this package repeats identically before diverging into
+// its own load and assertions. Preflight and Cleanup deliberately stay at
+// each call site rather than moving in here: the full tier skips Cleanup
+// (its VM is torn down instead) while the smoke tier does not, so neither
+// belongs in a helper both tiers share.
+//
+// run receives the moment the agent started — the same origin
+// WaitForScaleUp's window-timing guard needs. Any load a scenario drives
+// before this point (a cold-start scenario driving load before the agent
+// even starts) must be issued by the caller before calling
+// runAgentScenario, never inside run: moving it into run would silently
+// change what's being tested.
+//
+// On a run error, the remote journal is fetched and folded into the
+// failure for diagnostics, regardless of which step inside run failed.
+func runAgentScenario(t *testing.T, ctx context.Context, target Target, project string, dryRun bool, run func(agentStarted time.Time) error) {
+	t.Helper()
+	runAgentScenarioWithDisks(t, ctx, target, project, dryRun, SelectedDisksSpec(target.DeviceName), defaultDiscoveryInterval, run)
+}
+
+// runAgentScenarioWithDisks is runAgentScenario for a scenario that needs an
+// explicit disks: selection and discovery_interval (see
+// InstallAgentWithDisks and discoveryScenarioInterval).
+func runAgentScenarioWithDisks(t *testing.T, ctx context.Context, target Target, project string, dryRun bool, disks DisksSpec, discoveryInterval time.Duration, run func(agentStarted time.Time) error) {
+	t.Helper()
+	if err := runAgentScenarioWithDisksErr(ctx, target, project, dryRun, disks, discoveryInterval, run); err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+// runAgentScenarioWithDisksErr is runAgentScenarioWithDisks with every step
+// returning an error instead of calling t.Fatalf — the primitive an xfail
+// scenario needs (see xfail's doc comment), since Go gives no way to catch a
+// *testing.T failure raised from inside a test. runAgentScenarioWithDisks is
+// the *testing.T-facing wrapper every other scenario keeps using unchanged.
+func runAgentScenarioWithDisksErr(ctx context.Context, target Target, project string, dryRun bool, disks DisksSpec, discoveryInterval time.Duration, run func(agentStarted time.Time) error) error {
+	binPath, err := BuildAgentBinary(ctx, "..")
+	if err != nil {
+		return fmt.Errorf("build agent binary: %w", err)
+	}
+	defer os.Remove(binPath)
+
+	if err := InstallAgentWithDisks(ctx, target, binPath, disks, discoveryInterval); err != nil {
+		return fmt.Errorf("install agent: %w", err)
+	}
+	if err := StartAgent(ctx, target, project, dryRun); err != nil {
+		return fmt.Errorf("start agent: %w", err)
+	}
+	agentStarted := time.Now()
+	defer func() {
+		stopCtx, stopCancel := recoveryContext()
+		defer stopCancel()
+		// Best-effort cleanup only — there is no *testing.T here to log a
+		// failure to, and a failure to stop is never this function's own
+		// error to report (the caller's run() error, if any, already is).
+		_ = StopAgent(stopCtx, target)
+	}()
+
+	if err := run(agentStarted); err != nil {
+		diagnosticCtx, diagnosticCancel := recoveryContext()
+		journal := FetchJournal(diagnosticCtx, target)
+		diagnosticCancel()
+		return fmt.Errorf("%w\njournal:\n%s", err, journal)
+	}
+	return nil
 }
 
 // BuildAgentBinary cross-compiles the agent for the target's guest OS

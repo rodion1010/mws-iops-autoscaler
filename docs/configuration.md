@@ -176,18 +176,34 @@ disks:
 `exclude` is a plain list of device names. `selected` entries are mappings, because each one may
 carry a policy.
 
-**`mode: selected` is exhaustive, not best-effort (issue #5).** Every `device_name` listed must
-resolve against the VM's live disks on every discovery cycle — a name that doesn't match anything is a
-startup/discovery error, not a logged omission. This is deliberately asymmetric with
-`mode: auto-discovery`'s `exclude`, where naming a disk that doesn't exist is harmless (there's nothing
-to exclude): under `selected`, the list *is* the operator's entire stated intent, so silently managing
-fewer disks than named would make the agent's actual behavior diverge from what was configured, with no
-signal beyond a log line. On this error the agent keeps whatever managed set the previous successful
-discovery produced (never a partial one built from only the matched names) and `/readyz` reports not
-ready until the mismatch is resolved — either the missing disk is attached, or the config is corrected.
+**`mode: selected` is exhaustive, not best-effort (issue #5, reopened).** Every `device_name` listed is
+the operator's stated intent, not a best-effort filter — silently managing fewer disks than named would
+make the agent's actual behavior diverge from what was configured, with no signal beyond a log line.
+What happens when one doesn't resolve depends on discovery history, not one fixed rule:
+
+- **On the first discovery attempt of the process's life** (cold start), an unresolved `device_name` is
+  a startup error: nothing is managed until it's resolved — either the missing disk is attached, or the
+  config is corrected — and `/readyz` reports not ready. Managing a silently partial set with no prior
+  successful discovery to fall back to would diverge from configured intent with nothing to show for
+  it.
+- **Once at least one discovery has already succeeded** (runtime — a disk detaches, say), only the
+  unresolved name degrades: every other selected disk keeps being managed normally. The degraded name
+  appears in `/readyz`'s body as `configured_disks_unmanaged` (`{device_name, reason}`) and as the
+  `iops_autoscaler_disk_configured_unmanaged{device_name,reason}` gauge — neither of which flips
+  `/readyz`'s binary verdict, which stays reserved for whole-agent failures. There is no escalation
+  timer back to fatal; an operator who wants one builds it on the exposed signal.
+
+`mode: auto-discovery`'s `exclude` gets the identical treatment for the same reason, not the asymmetric
+"harmless no-op" it used to be: an exclude entry that never matches a live disk could just as easily be
+a typo that leaves a disk the operator meant to exclude managed anyway, and the two cases are otherwise
+indistinguishable. A cold-start mismatch there is fatal the same way; a runtime one degrades the same
+way, only the reported `reason` differs (`exclude_target_not_found` rather than `selected_not_found`
+— see docs/design.md §4.1).
 
 Rediscovery runs on an interval, so disks attached after startup are picked up without a restart —
-including recovering from this error once the VM's inventory becomes consistent with `selected` again.
+including recovering from either kind of mismatch once the VM's inventory becomes consistent with the
+configured list again, at which point the entry disappears from both `/readyz` and the gauge rather
+than merely reading resolved.
 
 **Classification is automatic and not user-configurable.** Each disk is dependent (VM-owned, written
 through the VM spec) or independent (written through the disk API) — see design.md §4.7. Both are managed;

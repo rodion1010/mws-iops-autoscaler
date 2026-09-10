@@ -77,9 +77,58 @@ These were identified during design/review but explicitly deferred, not solved:
   chosen. Options: keep it same-repo-only and informational, gate it behind a maintainer-applied
   label, or move to ephemeral per-job runners with per-run credentials so no long-lived credentialed
   machine executes untrusted code.
-- **Seven of `docs/design.md` §8.3's ten e2e scenarios are not implemented.** Three are covered today:
-  scale-up on saturation, plus the dependent and independent write paths — each tier exercises its own
-  real write path with the disk's class asserted per tier (`AssertDiskClass`), not separate test cases
-  of their own. See `docs/testing.md`'s coverage table for the honest per-scenario status. Two of the
-  missing seven (scale-down, no-flapping) are blocked on Phase 3 shipping scale-down at all; the rest
-  are just unwritten.
+- **Three of `docs/design.md` §8.3's ten e2e scenarios are not implemented.** VM cap detection is just
+  unwritten; scale-down and no-flapping are blocked on Phase 3 shipping scale-down at all. See
+  `docs/testing.md`'s coverage table for the honest per-scenario status of the other seven.
+
+### Alerting: what the agent should page a human about, and how
+
+`docs/design.md` §7.3 lists alert-worthy conditions (metric staleness beyond three publication
+intervals, write failure rate above threshold, budget exhaustion, `/readyz` false) but nothing
+defines how an operator actually receives them. Today every one of these is visible only by scraping
+`/metrics` or reading logs — the agent has no notion of an alert, and the repository ships no
+alerting rules.
+
+This became concrete while planning e2e discovery scenarios: several of them ("a `selected`
+disk disappeared", "a `selected` disk is not attached yet") were cases where the *right* product
+behaviour was "keep autoscaling the other disks and raise a loud, addressable signal" rather than
+"stop acting" — now implemented (docs/design.md §4.1, docs/configuration.md §4.2): a runtime mismatch
+degrades only the affected disk, surfaced via `/readyz`'s `configured_disks_unmanaged` and the
+`iops_autoscaler_disk_configured_unmanaged{device_name,reason}` gauge. That signal existing is not the
+same as it reaching anyone, though, which is exactly what stays undefined.
+
+Open question — does the agent own alerting at all, or only expose signals for a platform-side
+alerting stack, and if the latter, do we ship recommended Prometheus alerting rules alongside the
+binary — is now a pending decision request: [`docs/adr/adr-020-alerting-ownership.md`](adr/adr-020-alerting-ownership.md)
+(issue #59).
+
+### Config hot-reload
+
+The agent reads its config once, in `LoadAndValidate` at startup: there is no SIGHUP handler and no
+file watch, so every configuration change needs a process restart. Rediscovery already picks up newly
+attached *disks* without a restart (`docs/configuration.md` §4.2), which makes the asymmetry easy to
+miss — what cannot change at runtime is the operator's *intent*, not the inventory.
+
+Noticed while planning e2e discovery scenarios: moving a disk in or out of `disks.exclude`, or adding
+an already-attached disk to `disks.selected`, are ordinary operational actions, and today each costs a
+restart — which also throws away the sampling windows and in-memory cooldowns the agent needs before
+it can act again. Those scenarios are written against a restart for now; the same tests would cover a
+reload mechanism unchanged, only swapping the restart step.
+
+Open questions: SIGHUP or a file watch (a watch also reloads on a half-written file, so it needs the
+usual atomic-rename discipline); what happens to sampling windows and cooldowns of disks that stay in
+scope across a reload; whether an invalid new config is rejected while the old one keeps running, and
+how that state is surfaced.
+
+### Second CI runner, split by tier, and a second persistent smoke VM
+
+Today one self-hosted runner serves both e2e tiers, so a merge-tier full run (~20 min) blocks every
+PR's smoke run behind it, and all smoke runs are additionally serialized on one shared persistent VM
+(`concurrency: e2e-smoke-vm`) regardless of runner count.
+
+Two independent moves, worth separating:
+- A second runner dedicated to one tier (e.g. runner A = PR smoke only, runner B = merge full only)
+  removes the tier-vs-tier queueing with no new cloud resources.
+- A second persistent smoke VM would let PR smoke runs parallelize across PRs, but only pays off
+  once the PR-tier suite is large enough that queueing on a single VM is the actual bottleneck —
+  decide after the real per-suite timing measurement from the growing e2e scenario set.

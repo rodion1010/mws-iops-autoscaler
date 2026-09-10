@@ -464,40 +464,102 @@ func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
 	assertSingleJournalReason(t, &journalOut, "discovery_stale")
 }
 
-func TestReconcile_skipsImmediatelyOnUnmatchedSelectedDisk(t *testing.T) {
-	client := &stubClient{
-		vm: vmWithTwoIndependentDisks(), // "good" and "bad", not "missing-disk"
+// vmWithGoodAndMissingDisk and vmWithGoodDiskOnly model the same VM, one
+// discovery cycle apart, after "missing-disk" detaches — the config never
+// changes between the two calls, only the VM's live inventory does. That
+// is what makes the second discover() call here a genuine *runtime*
+// mismatch (docs/design.md §4.1) rather than a cold start: a real process
+// never mutates cfg.Disks mid-run (config hot-reload is out of scope,
+// docs/TODO.md), so a test simulating the mismatch must vary the VM
+// instead — mutating cfg.Disks between two discover() calls, as an earlier
+// version of this test did, cannot happen outside a test and made the test
+// pass for the wrong reason.
+func vmWithGoodAndMissingDisk() *compute.VirtualMachine {
+	return &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
+		{Alias: "good", DeviceName: "good", Class: compute.ClassIndependent, DiskName: "vm-1-good"},
+		{Alias: "missing-disk", DeviceName: "missing-disk", Class: compute.ClassIndependent, DiskName: "vm-1-missing"},
+	}}
+}
+
+func vmWithGoodDiskOnly() *compute.VirtualMachine {
+	return &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
+		{Alias: "good", DeviceName: "good", Class: compute.ClassIndependent, DiskName: "vm-1-good"},
+	}}
+}
+
+func TestReconcile_degradesPartiallyWhenASelectedDiskIsRemovedAtRuntime(t *testing.T) {
+	firstClient := &stubClient{
+		vm: vmWithGoodAndMissingDisk(),
 		disks: map[string]*compute.Disk{
-			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000},
-			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+			"vm-1-good":    {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-missing": {Name: "vm-1-missing", SpecIOPS: 1000},
 		},
 	}
 	act := &recordingActuator{}
-	a := newDiscoverableTestAgent(t, act, client)
+	a := newDiscoverableTestAgent(t, act, firstClient)
 	a.maxDiscoveryAge = time.Hour
 	a.decider = fixedDecider{action: decider.ActionScaleUp, target: 2000}
 	a.analyzer = analyzer.NewWindowAnalyzer()
-	a.cfg.Disks = config.DisksSpec{Mode: "auto-discovery"}
-	var journalOut bytes.Buffer
-	a.journal = journal.NewWriter(&journalOut)
+	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
+		{DeviceName: "good"}, {DeviceName: "missing-disk"},
+	}}
 
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("first discover(): %v", err)
 	}
+	if len(a.managed) != 2 {
+		t.Fatalf("test setup: first discover() managed = %+v, want both disks", a.managed)
+	}
 
-	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
-		{DeviceName: "good"}, {DeviceName: "missing-disk"},
-	}}
-	if err := a.discover(context.Background()); err == nil {
-		t.Fatal("test setup: second discover() with an unmatched selected disk unexpectedly succeeded")
+	// missing-disk detaches — same config, a later cycle.
+	a.client = &stubClient{
+		vm:    vmWithGoodDiskOnly(),
+		disks: map[string]*compute.Disk{"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000}},
+	}
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("second discover() after missing-disk detached at runtime: %v, want no error — a runtime mismatch degrades, it does not block discovery", err)
+	}
+	if len(a.managed) != 1 || a.managed[0].Disk.DeviceName != "good" {
+		t.Errorf("managed = %+v, want exactly [good] — the rest of the set must keep being managed", a.managed)
+	}
+	if len(a.degraded) != 1 || a.degraded[0].DeviceName != "missing-disk" || a.degraded[0].Reason != registry.ReasonSelectedNotFound {
+		t.Errorf("degraded = %+v, want exactly [{missing-disk %s}]", a.degraded, registry.ReasonSelectedNotFound)
+	}
+
+	// Degradation must never flip the binary verdict (docs/design.md §4.1).
+	// discover() doesn't own config_valid/source_reachable; set them
+	// directly so Ready() isn't false for an unrelated reason.
+	a.readiness.SetConfigValid(true)
+	a.readiness.SetSourceReachable(true)
+	if !a.readiness.Ready() {
+		t.Error("Ready() = false after a runtime-only degradation, want true")
+	}
+	if body := scrapeAgentTelemetry(t, a); !strings.Contains(body, `iops_autoscaler_disk_configured_unmanaged{device_name="missing-disk",reason="selected_not_found"} 1`) {
+		t.Errorf("disk_configured_unmanaged not exposed as expected:\n%s", body)
 	}
 
 	a.reconcile(context.Background())
-	if len(act.calls) != 0 {
-		t.Errorf("Actuator.Apply called %d times, want 0 — an unmatched disks.selected device_name must block reconcile immediately", len(act.calls))
+	if len(act.calls) != 1 || act.calls[0].DiskID != "vm-1-good" {
+		t.Errorf("Actuator.Apply calls = %+v, want exactly one call for vm-1-good — the resolved disk must keep being managed despite the other's degradation", act.calls)
 	}
-	// The previous managed set still contains both disks.
-	assertJournalReasons(t, &journalOut, 2, "discovery_stale")
+
+	// missing-disk reattaches — degradation must clear, not linger.
+	a.client = &stubClient{
+		vm: vmWithGoodAndMissingDisk(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good":    {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-missing": {Name: "vm-1-missing", SpecIOPS: 1000},
+		},
+	}
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("third discover() after missing-disk reattached: %v", err)
+	}
+	if len(a.degraded) != 0 {
+		t.Errorf("degraded = %+v after reattaching, want none", a.degraded)
+	}
+	if body := scrapeAgentTelemetry(t, a); strings.Contains(body, "iops_autoscaler_disk_configured_unmanaged") {
+		t.Errorf("disk_configured_unmanaged still exposed after missing-disk reattached, want the series deleted:\n%s", body)
+	}
 }
 
 type perDiskDecider struct {
@@ -670,6 +732,275 @@ func TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder(t *testing.T) {
 	}
 }
 
+func TestDiscover_populatesUnmanagedFromDisksOutsideSelection(t *testing.T) {
+	client := &stubClient{
+		vm: &compute.VirtualMachine{
+			Name: "vm-1", VMType: "t1",
+			Disks: []compute.StorageDisk{
+				{Alias: "data", DeviceName: "data", Class: compute.ClassIndependent, DiskName: "vm-1-data"},
+				{Alias: "churn", DeviceName: "churn", Class: compute.ClassIndependent, DiskName: "vm-1-churn"},
+				{Alias: "noname", DeviceName: "noname", Class: compute.ClassIndependent, DiskName: "vm-1-noname"},
+			},
+		},
+		disks: map[string]*compute.Disk{
+			"vm-1-data":   {Name: "vm-1-data", SpecIOPS: 1000},
+			"vm-1-churn":  {Name: "vm-1-churn", SpecIOPS: 1000},
+			"vm-1-noname": {Name: "vm-1-noname", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	a.cfg = &config.Config{Disks: config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "data"}}}}
+	a.resolved = &config.ResolvedConfig{Disks: a.cfg.Disks, VMPolicy: testResolvedPolicy()}
+
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+
+	if len(a.managed) != 1 || a.managed[0].Disk.DeviceName != "data" {
+		t.Fatalf("managed = %+v, want exactly [data]", a.managed)
+	}
+	gotNames := make(map[string]bool, len(a.unmanaged))
+	for _, d := range a.unmanaged {
+		gotNames[d.DeviceName] = true
+	}
+	// Before this fix, discover() never retained anything about a disk it
+	// did not select — reconcile() had no way to know churn/noname existed
+	// at all, let alone how much IOPS they were consuming (D4/US-009).
+	if len(a.unmanaged) != 2 || !gotNames["churn"] || !gotNames["noname"] {
+		t.Errorf("unmanaged = %+v, want exactly [churn, noname] — every VM disk outside the managed set (docs/design.md §4.6)", a.unmanaged)
+	}
+}
+
+// fixedOpsSource returns a constant ops/s reading per DiskID on every Tick,
+// enough for analyzer.demandP95Down to compute a real p95 — demandP95Down
+// runs on whatever the trailing down-window actually holds and does not
+// itself require WindowFullDown (analyzer.go), so a handful of ticks well
+// under a production-scale ScaleDownWindow is sufficient here.
+type fixedOpsSource struct {
+	opsByDiskID map[string]float64
+}
+
+func (s fixedOpsSource) Sample(_ context.Context, disks []metrics.DiskRef) ([]metrics.Sample, error) {
+	now := time.Now()
+	var out []metrics.Sample
+	for _, d := range disks {
+		ops, ok := s.opsByDiskID[d.DiskID]
+		if !ok {
+			continue
+		}
+		out = append(out, metrics.Sample{DiskID: d.DiskID, Timestamp: now, ReadOps: ops, Source: metrics.SourceGuest})
+	}
+	return out, nil
+}
+func (fixedOpsSource) Kind() metrics.SourceKind { return metrics.SourceGuest }
+
+// TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption is D4/US-009's
+// regression test: docs/design.md §4.6 defines VM headroom from "other
+// disks", not "other managed disks", but until this fix reconcile() only
+// ever analyzed the managed set — an unmanaged sibling doing real, sustained
+// I/O was silently treated as if it consumed zero of the shared pool.
+func TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption(t *testing.T) {
+	dataDisk := registry.ManagedDisk{
+		Disk:   compute.StorageDisk{Alias: "data", DeviceName: "data", Class: compute.ClassIndependent, DiskName: "vm-1-data", IOPS: 1000},
+		Policy: testResolvedPolicy(),
+	}
+	churnDisk := compute.StorageDisk{Alias: "churn", DeviceName: "churn", Class: compute.ClassIndependent, DiskName: "vm-1-churn", IOPS: 1000}
+
+	source := fixedOpsSource{opsByDiskID: map[string]float64{
+		"vm-1-data":  0,   // idle managed disk
+		"vm-1-churn": 900, // heavily loaded, unmanaged sibling
+	}}
+	sampler, err := metrics.NewSampler(source, 10)
+	if err != nil {
+		t.Fatalf("NewSampler: %v", err)
+	}
+	sampler.SetDisks([]metrics.DiskRef{{DiskID: "vm-1-data"}, {DiskID: "vm-1-churn"}})
+	for i := 0; i < 3; i++ {
+		if err := sampler.Tick(context.Background()); err != nil {
+			t.Fatalf("sampler.Tick: %v", err)
+		}
+	}
+
+	budget, err := state.LoadBudget(t.TempDir() + "/budget.jsonl")
+	if err != nil {
+		t.Fatalf("LoadBudget: %v", err)
+	}
+	var journalOut bytes.Buffer
+	a := &Agent{
+		vmName:               "vm-1",
+		allowScaleDown:       true,
+		maxDiscoveryAge:      time.Minute,
+		lastDiscoverySuccess: time.Now(),
+		managedValid:         true,
+		managed:              []registry.ManagedDisk{dataDisk},
+		unmanaged:            []compute.StorageDisk{churnDisk},
+		iopsPool:             6000,
+		resolved:             &config.ResolvedConfig{VMPolicy: testResolvedPolicy()},
+		sampler:              sampler,
+		analyzer:             analyzer.NewWindowAnalyzer(),
+		decider:              decider.NewPolicyDecider(true),
+		actuator:             &recordingActuator{},
+		tracker:              state.NewTracker(budget),
+		telemetry:            telemetry.NewRegistry(),
+		journal:              journal.NewWriter(&journalOut),
+		readiness:            &health.Readiness{},
+	}
+	a.reconcile(context.Background())
+
+	lines := strings.Split(strings.TrimSpace(journalOut.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("journal has %d line(s), want exactly 1 (one managed disk): %s", len(lines), journalOut.String())
+	}
+	var rec struct {
+		Disk           string `json:"disk"`
+		VMHeadroomIOPS int64  `json:"vm_headroom_iops"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("decode journal record: %v", err)
+	}
+	if rec.Disk != "vm-1-data" {
+		t.Fatalf("journal record is for %q, want vm-1-data", rec.Disk)
+	}
+	// Before this fix, siblingP95 only ever summed the managed set (one
+	// disk here, itself excluded), so vm_headroom_iops always read the full
+	// 6000 pool no matter how loaded churn was.
+	if want := int64(6000 - 900); rec.VMHeadroomIOPS != want {
+		t.Errorf("vm_headroom_iops = %d, want %d (6000 pool - 900 unmanaged sibling p95, docs/design.md §4.6)", rec.VMHeadroomIOPS, want)
+	}
+}
+
+// presetSource returns a fixed, caller-built sample set regardless of the
+// disks requested — used to place samples at exact, controlled timestamps
+// (real sources stamp Sample.Timestamp from time.Now(), which cannot build
+// a deterministic multi-sample window fast enough for a unit test).
+type presetSource struct {
+	samples []metrics.Sample
+}
+
+func (p presetSource) Sample(_ context.Context, _ []metrics.DiskRef) ([]metrics.Sample, error) {
+	return p.samples, nil
+}
+func (presetSource) Kind() metrics.SourceKind { return metrics.SourceGuest }
+
+// buildSaturatedSamples returns 5 samples spanning 10 minutes ending at
+// base, each pegged at specIOPS (utilization 1.0) with queueDepths applied
+// in order — sustained utilization plus a growing queue satisfies both
+// analyzer.Analysis.Saturated and its open-workload demand regime.
+func buildSaturatedSamples(diskID string, base time.Time, specIOPS float64, queueDepths [5]float64) []metrics.Sample {
+	out := make([]metrics.Sample, 5)
+	for i := 0; i < 5; i++ {
+		age := time.Duration(4-i) * 150 * time.Second // 2.5m steps, oldest first
+		out[i] = metrics.Sample{
+			DiskID:     diskID,
+			Timestamp:  base.Add(-age),
+			ReadOps:    specIOPS,
+			QueueDepth: metrics.QueueDepth{Value: queueDepths[i], Unit: metrics.QueueDepthOps},
+			Source:     metrics.SourceGuest,
+		}
+	}
+	return out
+}
+
+// TestReconcile_unmeasurableSiblingBlocksScaleUp asserts docs/design.md
+// §4.6 headroom must not substitute zero for a sibling's unmeasured demand.
+// Blocking lands on ActionNoAction, not ActionVMCapReached, so a measurement
+// gap never aliases onto the "add vCPU" signal (design.md §7.3).
+func TestReconcile_unmeasurableSiblingBlocksScaleUp(t *testing.T) {
+	dataDisk := registry.ManagedDisk{
+		Disk:   compute.StorageDisk{Alias: "data", DeviceName: "data", Class: compute.ClassIndependent, DiskName: "vm-1-data", IOPS: 1000},
+		Policy: testResolvedPolicy(),
+	}
+	churnDisk := compute.StorageDisk{Alias: "churn", DeviceName: "churn", Class: compute.ClassIndependent, DiskName: "vm-1-churn", IOPS: 1000}
+
+	base := time.Now()
+	dataSamples := buildSaturatedSamples("vm-1-data", base, 1000, [5]float64{1, 6, 11, 16, 21})
+
+	tests := []struct {
+		name         string
+		churnSamples []metrics.Sample
+		wantAction   decider.Action
+		wantReason   string
+	}{
+		{
+			name:         "fresh measurable sibling allows scale-up",
+			churnSamples: buildSaturatedSamples("vm-1-churn", base, 1000, [5]float64{5, 5, 5, 5, 5}),
+			wantAction:   decider.ActionScaleUp,
+		},
+		{
+			name:         "missing sibling sample blocks scale-up",
+			churnSamples: nil,
+			wantAction:   decider.ActionNoAction,
+			wantReason:   "sibling_demand_unmeasurable",
+		},
+		{
+			name:         "stale sibling sample blocks scale-up",
+			churnSamples: buildSaturatedSamples("vm-1-churn", base.Add(-2*time.Hour), 1000, [5]float64{5, 5, 5, 5, 5}),
+			wantAction:   decider.ActionNoAction,
+			wantReason:   "sibling_demand_unmeasurable",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			source := presetSource{samples: append(append([]metrics.Sample(nil), dataSamples...), tc.churnSamples...)}
+			sampler, err := metrics.NewSampler(source, 10)
+			if err != nil {
+				t.Fatalf("NewSampler: %v", err)
+			}
+			sampler.SetDisks([]metrics.DiskRef{{DiskID: "vm-1-data"}, {DiskID: "vm-1-churn"}})
+			if err := sampler.Tick(context.Background()); err != nil {
+				t.Fatalf("sampler.Tick: %v", err)
+			}
+
+			budget, err := state.LoadBudget(t.TempDir() + "/budget.jsonl")
+			if err != nil {
+				t.Fatalf("LoadBudget: %v", err)
+			}
+			var journalOut bytes.Buffer
+			a := &Agent{
+				vmName:               "vm-1",
+				allowScaleDown:       true,
+				maxDiscoveryAge:      time.Minute,
+				maxSampleAge:         time.Hour,
+				maxSampleGap:         10 * time.Minute,
+				lastDiscoverySuccess: time.Now(),
+				managedValid:         true,
+				managed:              []registry.ManagedDisk{dataDisk},
+				unmanaged:            []compute.StorageDisk{churnDisk},
+				iopsPool:             6000,
+				resolved:             &config.ResolvedConfig{VMPolicy: testResolvedPolicy()},
+				sampler:              sampler,
+				analyzer:             analyzer.NewWindowAnalyzer(),
+				decider:              decider.NewPolicyDecider(true),
+				actuator:             &recordingActuator{},
+				tracker:              state.NewTracker(budget),
+				telemetry:            telemetry.NewRegistry(),
+				journal:              journal.NewWriter(&journalOut),
+				readiness:            &health.Readiness{},
+			}
+			a.reconcile(context.Background())
+
+			lines := strings.Split(strings.TrimSpace(journalOut.String()), "\n")
+			if len(lines) != 1 {
+				t.Fatalf("journal has %d line(s), want exactly 1 (one managed disk): %s", len(lines), journalOut.String())
+			}
+			var rec struct {
+				Action string `json:"action"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+				t.Fatalf("decode journal record: %v", err)
+			}
+			if rec.Action != string(tc.wantAction) {
+				t.Errorf("action = %q, want %q (journal: %s)", rec.Action, tc.wantAction, lines[0])
+			}
+			if tc.wantReason != "" && rec.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", rec.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
 func vmWithTwoIndependentDisks() *compute.VirtualMachine {
 	return &compute.VirtualMachine{
 		Name:   "vm-1",
@@ -678,6 +1009,77 @@ func vmWithTwoIndependentDisks() *compute.VirtualMachine {
 			{Alias: "good", DeviceName: "good", Class: compute.ClassIndependent, DiskName: "vm-1-good"},
 			{Alias: "bad", DeviceName: "bad", Class: compute.ClassIndependent, DiskName: "vm-1-bad"},
 		},
+	}
+}
+
+// TestReconcile_unresolvedGuestPathSiblingBlocksScaleUp covers the same
+// docs/design.md §4.6 invariant as the test above, but drives a sibling
+// into the unmeasured state via a real discover() call (unresolved guest
+// path) instead of a hand-built sample set.
+func TestReconcile_unresolvedGuestPathSiblingBlocksScaleUp(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
+	a.resolved = &config.ResolvedConfig{VMPolicy: testResolvedPolicy()}
+	a.maxDiscoveryAge = time.Minute
+	a.maxSampleAge = time.Hour
+	a.maxSampleGap = 10 * time.Minute
+	a.analyzer = analyzer.NewWindowAnalyzer()
+	a.decider = decider.NewPolicyDecider(true)
+	a.guestPathVerifier = func(ref metrics.DiskRef) error {
+		if ref.DeviceName == "bad" {
+			return errors.New("simulated: unresolvable guest path")
+		}
+		return nil
+	}
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(a.managed) != 1 || a.managed[0].Disk.DiskName != "vm-1-good" {
+		t.Fatalf("managed = %+v, want only vm-1-good", a.managed)
+	}
+	if len(a.unmanaged) != 1 || a.unmanaged[0].DiskName != "vm-1-bad" {
+		t.Fatalf("unmanaged = %+v, want exactly [vm-1-bad]", a.unmanaged)
+	}
+
+	base := time.Now()
+	dataSamples := buildSaturatedSamples("vm-1-good", base, 1000, [5]float64{1, 6, 11, 16, 21})
+	source := presetSource{samples: dataSamples} // no samples at all for vm-1-bad
+	sampler, err := metrics.NewSampler(source, 10)
+	if err != nil {
+		t.Fatalf("NewSampler: %v", err)
+	}
+	sampler.SetDisks([]metrics.DiskRef{a.diskRef(a.managed[0]), a.diskRefForDisk(a.unmanaged[0])})
+	if err := sampler.Tick(context.Background()); err != nil {
+		t.Fatalf("sampler.Tick: %v", err)
+	}
+	a.sampler = sampler
+
+	var journalOut bytes.Buffer
+	a.journal = journal.NewWriter(&journalOut)
+	a.reconcile(context.Background())
+
+	lines := strings.Split(strings.TrimSpace(journalOut.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("journal has %d line(s), want exactly 1: %s", len(lines), journalOut.String())
+	}
+	var rec struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("decode journal record: %v", err)
+	}
+	if rec.Action != string(decider.ActionNoAction) {
+		t.Errorf("action = %q, want %q (not ActionVMCapReached — this is a measurement gap, not a real VM cap)", rec.Action, decider.ActionNoAction)
+	}
+	if rec.Reason != "sibling_demand_unmeasurable" {
+		t.Errorf("reason = %q, want sibling_demand_unmeasurable", rec.Reason)
 	}
 }
 
@@ -741,7 +1143,7 @@ func TestHasManagedDisks(t *testing.T) {
 	}
 }
 
-func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *testing.T) {
+func TestDiscover_unmatchedSelectedDeviceAtColdStartIsFatal(t *testing.T) {
 	client := &stubClient{
 		vm: vmWithTwoIndependentDisks(), // has "good" and "bad", not "missing-disk"
 		disks: map[string]*compute.Disk{
@@ -753,7 +1155,13 @@ func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *test
 	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "good"}, {DeviceName: "missing-disk"},
 	}}
-	// Start from a previously healthy readiness state.
+	if !a.lastDiscoverySuccess.IsZero() {
+		t.Fatal("test setup: lastDiscoverySuccess must be zero — this test is specifically the cold-start case (docs/design.md §4.1)")
+	}
+	// Start from a previously healthy readiness state, and a managed set
+	// from... somewhere else entirely (this agent never discovered
+	// anything) — proving invalidateManaged leaves whatever was there
+	// untouched is the point, not that it's realistic cold-start state.
 	a.readiness.SetConfigValid(true)
 	a.readiness.SetDiscoverySucceeded(true)
 	a.readiness.SetSourceReachable(true)
@@ -765,7 +1173,7 @@ func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *test
 
 	err := a.discover(context.Background())
 	if err == nil {
-		t.Fatal("discover succeeded despite an unmatched disks.selected device_name")
+		t.Fatal("discover succeeded despite an unmatched disks.selected device_name on the first discovery attempt")
 	}
 	if !strings.Contains(err.Error(), "missing-disk") {
 		t.Errorf("err = %v, want it to name the unmatched device_name", err)
@@ -774,7 +1182,7 @@ func TestDiscover_unmatchedSelectedDeviceIsFatalAndPreservesPriorManaged(t *test
 		t.Errorf("managed = %+v, want the prior snapshot left untouched, never replaced by a partial one", a.managed)
 	}
 	if a.readiness.Ready() {
-		t.Error("readiness.Ready() = true after a fatal disks.selected mismatch, want false")
+		t.Error("readiness.Ready() = true after a fatal cold-start disks.selected mismatch, want false")
 	}
 }
 

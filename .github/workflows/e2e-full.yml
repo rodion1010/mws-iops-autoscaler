@@ -17,7 +17,9 @@ permissions:
 jobs:
   full:
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
-    timeout-minutes: 25
+    # Budget derivation and the job-level-kill/backstop-step split are in
+    # docs/ci-cd.md's "Timeout budgets" — recompute before changing this.
+    timeout-minutes: 90
     steps:
       # Pin third-party actions because this runner has cloud credentials.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,7 +51,19 @@ jobs:
           E2E_SSH_USER: ${{ vars.E2E_SSH_USER }}
           E2E_SSH_KEY_PATH: ${{ runner.temp }}/e2e_ssh_key
         # The harness builds the agent dynamically, so cached test results are unsafe.
-        run: go test -count=1 -tags e2e ./e2e/... -run 'TestFull|TestRegression' -v
+        # -timeout budget: docs/ci-cd.md's "Timeout budgets".
+        run: go test -count=1 -timeout=78m -tags e2e ./e2e/... -run 'TestFull|TestRegression' -v
+
+      # Backstop for go test's own -timeout killing the binary before
+      # TestMain's teardown runs. See docs/ci-cd.md's "Timeout budgets".
+      - name: Backstop teardown (in case go test's own -timeout fired before TestMain's teardown ran)
+        timeout-minutes: 8
+        if: always()
+        continue-on-error: true
+        env:
+          MWS_PROJECT: ${{ vars.MWS_PROJECT }}
+          E2E_RUN_ID: ${{ github.run_id }}
+        run: bash e2e/scripts/teardown.sh
 
       - name: Remove SSH key
         if: always()

@@ -190,3 +190,40 @@ func TestRecordStaleness(t *testing.T) {
 		t.Errorf("metric_staleness_seconds not exposed as expected:\n%s", body)
 	}
 }
+
+func TestSyncDiskConfiguredUnmanaged_setsCurrentEntries(t *testing.T) {
+	r := NewRegistry()
+	r.SyncDiskConfiguredUnmanaged(map[string]string{"datadisk": "selected_not_found"})
+	body := scrape(t, r)
+	if !strings.Contains(body, `iops_autoscaler_disk_configured_unmanaged{device_name="datadisk",reason="selected_not_found"} 1`) {
+		t.Errorf("disk_configured_unmanaged not exposed as expected:\n%s", body)
+	}
+}
+
+func TestSyncDiskConfiguredUnmanaged_deletesResolvedEntriesRatherThanZeroing(t *testing.T) {
+	r := NewRegistry()
+	r.SyncDiskConfiguredUnmanaged(map[string]string{"datadisk": "selected_not_found"})
+	r.SyncDiskConfiguredUnmanaged(map[string]string{}) // datadisk resolved this cycle
+
+	body := scrape(t, r)
+	if strings.Contains(body, "iops_autoscaler_disk_configured_unmanaged") {
+		t.Errorf("disk_configured_unmanaged still exposed after the disk resolved, want the series deleted entirely (not set to 0):\n%s", body)
+	}
+}
+
+func TestSyncDiskConfiguredUnmanaged_onlyDeletesEntriesNoLongerCurrent(t *testing.T) {
+	r := NewRegistry()
+	r.SyncDiskConfiguredUnmanaged(map[string]string{
+		"datadisk": "selected_not_found",
+		"logdisk":  "selected_not_found",
+	})
+	r.SyncDiskConfiguredUnmanaged(map[string]string{"logdisk": "selected_not_found"}) // datadisk resolved
+
+	body := scrape(t, r)
+	if strings.Contains(body, `device_name="datadisk"`) {
+		t.Errorf("datadisk still exposed after resolving:\n%s", body)
+	}
+	if !strings.Contains(body, `iops_autoscaler_disk_configured_unmanaged{device_name="logdisk",reason="selected_not_found"} 1`) {
+		t.Errorf("logdisk missing from disk_configured_unmanaged, want it still exposed:\n%s", body)
+	}
+}

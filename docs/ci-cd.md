@@ -89,6 +89,7 @@ GitHub repository variables (non-secret) and one secret:
 |---|---|---|
 | `MWS_PROJECT`, `MWS_ZONE` | variable | both |
 | `E2E_SMOKE_VM_NAME`, `E2E_SMOKE_DEVICE_NAME`, `E2E_SMOKE_SSH_HOST` | variable | smoke |
+| `E2E_SMOKE_INDEPENDENT_DEVICE_NAME` | variable | smoke — the second, independent disk permanently attached to the same persistent VM (`E2E_SMOKE_VM_NAME`), used for the independent write path and dry-run scenarios |
 | `E2E_SUBNET_ID`, `E2E_BOOT_IMAGE`, `E2E_VM_TYPE`, `E2E_AGENT_SA`, `E2E_SSH_PUBLIC_KEY` | variable | full |
 | `E2E_SSH_USER` | variable | both |
 | `E2E_SSH_PRIVATE_KEY` | **secret** | both — written to a `runner.temp` file for the job's duration, removed in an `if: always()` step |
@@ -99,6 +100,34 @@ grants guest-OS SSH access to the test VMs — and since every target VM has the
 attached, guest access on such a VM can reach IMDS for that SA's short-lived tokens, so it
 transitively grants cloud API access on that VM's attached identity. It does not grant the
 runner/provisioner SA's broader project-level privileges.
+
+## Timeout budgets
+
+A job-level `timeout-minutes` kill has no cleanup path — GitHub Actions tears the whole job down at
+that point, so no later step (not even `if: always()`) runs (`docs/TODO.md`'s "orphan sweeper" gap).
+Each workflow therefore sets `timeout-minutes` above the SUM of every test's own worst-case
+`context.WithTimeout`, not the sum of typical durations, and sets `go test -timeout` below
+`timeout-minutes` so a hung suite is killed by `go test` itself — leaving the job alive to run its
+backstop teardown step — rather than by the job-level kill.
+
+| Workflow | `go test -timeout` | Worst-case test budget | `timeout-minutes` |
+|---|---|---|---|
+| `e2e-pr.yml` (smoke) | 40m | ~36m (seven `TestSmoke_*` scenarios, 5–6m each) | 45 |
+| `e2e-full.yml` (full) | 78m | ~77m (shared fixture's 15m provisioning context, paid once, + each `TestFull_*` test's own context + teardown's `recoveryContext`) | 90 |
+
+Recompute the relevant worst-case sum before shrinking either `timeout-minutes` value, and again
+whenever a `TestSmoke_*`/`TestFull_*` test is added. The full tier's margin is already thin enough
+that the next addition should probably trigger the "split by subject" idea (`docs/TODO.md`) rather
+than another bump.
+
+`e2e-full.yml`'s backstop teardown step (`continue-on-error: true`, 8-minute budget) exists only for
+the case where `go test`'s own `-timeout` fires and kills the test binary before
+`TestMain`'s post-`m.Run()` teardown call runs (`e2e/lifecycle_test.go`). It does not cover the
+job-level kill — that has no backstop yet (`docs/TODO.md`'s TTL sweeper, issue #47). On an ordinary
+pass or failure, `TestMain`'s own teardown has already run, so this step reports "not found" for
+every resource — expected noise, not a signal. The smoke tier has no equivalent step: the shared
+target's hard-cleanup guarantee is Preflight, not teardown (`docs/testing.md`), so the next run
+resets the target regardless of how the previous one ended.
 
 ## Provisioning runbook
 
@@ -148,15 +177,27 @@ right now. Provisioned by hand via the `mws` CLI, in this order:
    `--vm-sa` authenticates via the runner's own attached service account through IMDS — same "no key
    file" model as the Go SDK, confirmed live (`mws profile list` shows the resulting profile with no
    `SUBJECT` shown, since it's resolved fresh from IMDS on each call rather than stored).
-6. **Create the persistent PR-tier test VM+disk**, per `docs/development.md`'s reference topology
-   (Ubuntu 24.04, ≥2 vCPU, NBS-PL2 boot + data disk both at 1000 IOPS), and attach `ci-agent-sa`.
+6. **Create the persistent PR-tier test VM+disks**, per `docs/development.md`'s reference topology
+   (Ubuntu 24.04, ≥2 vCPU, NBS-PL2 boot disk + one dependent data disk + one independent data disk,
+   all at 1000 IOPS — matching `docs/design.md` §8.3's `iops-test-vm`), and attach `ci-agent-sa`.
+   The dependent disk is defined inline in the VM's own `--storage-disks` at creation; the independent
+   one is created standalone and attached afterward. `mws compute vm update --storage-disks` **resends
+   the VM's whole disk list** (`docs/platform-reference.md`) — omitting an already-attached disk from
+   it detaches that disk, so the attach step must re-list the existing boot and dependent-data entries
+   alongside the new one, not just add it:
+   ```
+   mws compute disk create <independent-data-disk> \
+     --zone <zone> --disk-type compute/diskTypes/nbs-pl2 --size 20GB --iops 1000
+
+   mws compute vm update <test-vm> --service-account ci-agent-sa \
+     --storage-disks '<existing boot disk entry, unchanged>' \
+     --storage-disks '<existing dependent data disk entry, unchanged>' \
+     --storage-disks 'name: indep, boot: false, deviceName: <independent-device-name>, disk: {ref: "compute/projects/<project>/disks/<independent-data-disk>"}'
+   ```
    The VM's cloud-init must install `fio` and configure passwordless sudo for the CI SSH user —
    `DriveLoad` (e2e/scenario.go) runs fio under sudo because the guest user does not own the raw
    block device; provision.sh gives the full tier's ephemeral VMs the same user-data, so this step
-   mirrors it for the persistent one:
-   ```
-   mws compute vm update <test-vm> --service-account ci-agent-sa
-   ```
+   mirrors it for the persistent one.
 7. **Bake the CI SSH public key** into the persistent test VM's cloud-init at creation (see Guest access
    above); store the matching private key as a GitHub Actions encrypted secret.
 8. **Configure branch protection on `main`** requiring the `verify` (fast-checks) and `smoke`

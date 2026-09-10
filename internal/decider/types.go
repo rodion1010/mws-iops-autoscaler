@@ -29,7 +29,17 @@ const (
 // did.
 type VMState struct {
 	IOPSPool       int64   // 3000 × vCPU (Discover, M1) — not enforced by the platform
-	SiblingP95IOPS float64 // aggregate p95 IOPS of every other managed disk on this VM
+	SiblingP95IOPS float64 // aggregate p95 IOPS of every other disk sharing the VM's pool
+
+	// SiblingDemandUnknown is true when at least one other disk sharing the
+	// VM's IOPS pool could not be reliably measured this cycle (no sample
+	// yet, or the sample is stale) — that disk's real consumption is folded
+	// into SiblingP95IOPS as zero, understating it rather than reporting it
+	// as unknown. Decide must not approve a scale-up against headroom that
+	// might already be spent (issue #56) — blocked as ActionNoAction, not
+	// ActionVMCapReached: the gap is in measurement, not the VM's pool, and
+	// must not alias onto the vCPU-upgrade signal that action drives.
+	SiblingDemandUnknown bool
 }
 
 // EffectivePolicy is the narrow slice of the resolved policy Decide needs —

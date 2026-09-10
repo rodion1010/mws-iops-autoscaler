@@ -55,6 +55,46 @@ func TestDecide_vmCapReached(t *testing.T) {
 	}
 }
 
+// TestDecide_siblingDemandUnknownBlocksScaleUp is issue #56's regression
+// test: a sibling with no reliable sample folds its real consumption into
+// SiblingP95IOPS as zero rather than reporting it as unknown, so ceiling
+// alone can never distinguish "siblings measured idle" from "siblings not
+// measured at all." Even with ample nominal headroom, an unmeasured sibling
+// must block scale-up rather than let it through on an understated ceiling.
+// ActionNoAction, not ActionVMCapReached, is the load-bearing half of this
+// assertion: the latter drives iops_autoscaler_vm_cap_reached, documented as
+// "actionable — add vCPU" (design.md §7.3), which a measurement gap must
+// never alias onto.
+func TestDecide_siblingDemandUnknownBlocksScaleUp(t *testing.T) {
+	d := NewPolicyDecider(true)
+	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 10, QueueGrowthRateValid: true, ServedIOPS: 900}
+	vm := VMState{IOPSPool: 100000, SiblingP95IOPS: 0, SiblingDemandUnknown: true}
+	got := d.Decide("disk1", 1000, a, vm, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionNoAction {
+		t.Errorf("Action = %v, want ActionNoAction (not ActionVMCapReached — this is a measurement gap, not a real VM cap)", got.Action)
+	}
+	if got.Reason != "sibling_demand_unmeasurable" {
+		t.Errorf("Reason = %q, want sibling_demand_unmeasurable", got.Reason)
+	}
+	if got.Target != got.Current {
+		t.Errorf("Target = %d, want == Current (%d) for a blocked decision", got.Target, got.Current)
+	}
+}
+
+// TestDecide_siblingDemandUnknownDoesNotBlockScaleDown documents the
+// intentional scope of issue #56's fix: reducing this disk's own IOPS never
+// consumes more of the shared pool, so an unmeasured sibling has nothing to
+// fail closed against on the scale-down path.
+func TestDecide_siblingDemandUnknownDoesNotBlockScaleDown(t *testing.T) {
+	d := NewPolicyDecider(true)
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
+	vm := VMState{IOPSPool: 100000, SiblingP95IOPS: 0, SiblingDemandUnknown: true}
+	got := d.Decide("disk1", 2000, a, vm, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionScaleDown {
+		t.Errorf("Action = %v, want ActionScaleDown (unmeasured sibling must not block scale-down)", got.Action)
+	}
+}
+
 func TestDecide_cooldownScaleUpBlocks(t *testing.T) {
 	d := NewPolicyDecider(true)
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 10, ServedIOPS: 900}

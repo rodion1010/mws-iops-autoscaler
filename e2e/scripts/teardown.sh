@@ -7,6 +7,8 @@ set -uo pipefail
 VM_NAME="e2e-full-${E2E_RUN_ID}"
 BOOT_DISK="${VM_NAME}-boot"
 DATA_DISK="${VM_NAME}-data"
+NONAME_DISK="${VM_NAME}-noname"
+CHURN_DISK="${VM_NAME}-churn"
 
 # Attempt every deletion and report an aggregate status.
 status=0
@@ -18,6 +20,19 @@ mws compute virtual-machine delete "compute/projects/${MWS_PROJECT}/virtualMachi
 
 mws compute disk delete "compute/projects/${MWS_PROJECT}/disks/${DATA_DISK}" --purge || {
   echo "teardown: failed to delete disk ${DATA_DISK}" >&2
+  status=1
+}
+
+mws compute disk delete "compute/projects/${MWS_PROJECT}/disks/${NONAME_DISK}" --purge || {
+  echo "teardown: failed to delete disk ${NONAME_DISK}" >&2
+  status=1
+}
+
+# CHURN_DISK may or may not be attached depending on which scenarios ran
+# (AttachChurnDisk/DetachChurnDisk toggle it live); --purge deletes it either
+# way once the VM itself is gone.
+mws compute disk delete "compute/projects/${MWS_PROJECT}/disks/${CHURN_DISK}" --purge || {
+  echo "teardown: failed to delete disk ${CHURN_DISK}" >&2
   status=1
 }
 

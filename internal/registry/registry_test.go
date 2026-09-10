@@ -1,7 +1,6 @@
 package registry
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/rodion1010/mws-iops-autoscaler/internal/compute"
@@ -30,12 +29,12 @@ func testResolved() *config.ResolvedConfig {
 
 func TestSelect_autoDiscoveryReturnsEverythingNotExcluded(t *testing.T) {
 	spec := config.DisksSpec{Mode: "auto-discovery", Exclude: []string{"bootdisk"}}
-	managed, missing, err := Select(testVM(), spec, testResolved())
+	managed, degraded, err := Select(testVM(), spec, testResolved())
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
-	if len(missing) != 0 {
-		t.Errorf("missing = %v, want none", missing)
+	if len(degraded) != 0 {
+		t.Errorf("degraded = %v, want none", degraded)
 	}
 	if len(managed) != 2 {
 		t.Fatalf("managed = %+v, want 2 disks (bootdisk excluded)", managed)
@@ -63,79 +62,96 @@ func TestSelect_autoDiscoveryNoExcludeReturnsAll(t *testing.T) {
 	}
 }
 
+func TestSelect_autoDiscoveryExcludeTargetNotFoundIsDegradedNotFatal(t *testing.T) {
+	// A typo in exclude must not be indistinguishable from the harmless
+	// "nothing to exclude" case (docs/configuration.md §4.2) — but it also
+	// must not block the rest of the managed set from being built.
+	spec := config.DisksSpec{Mode: "auto-discovery", Exclude: []string{"bootdisk", "no-such-disk"}}
+	managed, degraded, err := Select(testVM(), spec, testResolved())
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if len(managed) != 2 {
+		t.Fatalf("managed = %+v, want 2 disks (only bootdisk actually excluded)", managed)
+	}
+	if len(degraded) != 1 || degraded[0].DeviceName != "no-such-disk" || degraded[0].Reason != ReasonExcludeTargetNotFound {
+		t.Errorf("degraded = %+v, want exactly [{no-such-disk %s}]", degraded, ReasonExcludeTargetNotFound)
+	}
+}
+
 func TestSelect_selectedReturnsOnlyNamedDisks(t *testing.T) {
 	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "datadisk"},
 		{DeviceName: "logdisk"},
 	}}
-	managed, missing, err := Select(testVM(), spec, testResolved())
+	managed, degraded, err := Select(testVM(), spec, testResolved())
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
-	if len(missing) != 0 {
-		t.Errorf("missing = %v, want none", missing)
+	if len(degraded) != 0 {
+		t.Errorf("degraded = %v, want none", degraded)
 	}
 	if len(managed) != 2 {
 		t.Fatalf("managed = %+v, want exactly the 2 selected disks", managed)
 	}
 }
 
-func TestSelect_selectedOneMissingIsFatal(t *testing.T) {
-	// selected is exhaustive operator intent, not a best-effort filter.
+func TestSelect_selectedOneMissingIsReportedAsDegradedButNotFatal(t *testing.T) {
+	// Select itself never decides fatal-vs-degraded (see its doc comment) —
+	// that needs discovery history only the caller has. It always reports
+	// what it could resolve, plus what it couldn't.
 	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "datadisk"},
 		{DeviceName: "no-such-disk"},
 	}}
-	managed, missing, err := Select(testVM(), spec, testResolved())
-	if err == nil {
-		t.Fatal("Select succeeded despite an unmatched disks.selected device_name")
+	managed, degraded, err := Select(testVM(), spec, testResolved())
+	if err != nil {
+		t.Fatalf("Select: %v", err)
 	}
-	if managed != nil {
-		t.Errorf("managed = %+v, want nil — no partial set on a fatal mismatch", managed)
+	if len(managed) != 1 || managed[0].Disk.DeviceName != "datadisk" {
+		t.Errorf("managed = %+v, want exactly [datadisk] — the one name that did resolve", managed)
 	}
-	if len(missing) != 1 || missing[0] != "no-such-disk" {
-		t.Errorf("missing = %v, want [no-such-disk] (still reported alongside err, for the caller to log)", missing)
-	}
-	if !strings.Contains(err.Error(), "no-such-disk") {
-		t.Errorf("err = %v, want it to name the unmatched device_name", err)
+	if len(degraded) != 1 || degraded[0].DeviceName != "no-such-disk" || degraded[0].Reason != ReasonSelectedNotFound {
+		t.Errorf("degraded = %+v, want exactly [{no-such-disk %s}]", degraded, ReasonSelectedNotFound)
 	}
 }
 
-func TestSelect_selectedAllMissingIsFatal(t *testing.T) {
+func TestSelect_selectedAllMissingReturnsEmptyManagedAndEveryNameDegraded(t *testing.T) {
 	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "no-such-disk-1"},
 		{DeviceName: "no-such-disk-2"},
 	}}
-	managed, missing, err := Select(testVM(), spec, testResolved())
-	if err == nil {
-		t.Fatal("Select succeeded despite every disks.selected device_name being unmatched")
+	managed, degraded, err := Select(testVM(), spec, testResolved())
+	if err != nil {
+		t.Fatalf("Select: %v", err)
 	}
-	if managed != nil {
-		t.Errorf("managed = %+v, want nil", managed)
+	if len(managed) != 0 {
+		t.Errorf("managed = %+v, want none", managed)
 	}
-	if len(missing) != 2 {
-		t.Errorf("missing = %v, want both names", missing)
+	if len(degraded) != 2 {
+		t.Errorf("degraded = %v, want both names", degraded)
 	}
 }
 
 func TestSelect_selectedRecoversOnceVMInventoryIsConsistent(t *testing.T) {
-	// The same selection succeeds once the missing disk appears in a later snapshot.
+	// The same selection resolves fully once the missing disk appears in a
+	// later snapshot — degraded goes back to empty, not just non-fatal.
 	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
 		{DeviceName: "datadisk"},
 		{DeviceName: "not-yet-attached"},
 	}}
-	if _, _, err := Select(testVM(), spec, testResolved()); err == nil {
-		t.Fatal("test setup: expected the first Select to fail")
+	if _, degraded, err := Select(testVM(), spec, testResolved()); err != nil || len(degraded) != 1 {
+		t.Fatalf("test setup: first Select: degraded = %v, err = %v, want exactly one degraded name and no error", degraded, err)
 	}
 
 	recoveredVM := testVM()
 	recoveredVM.Disks = append(recoveredVM.Disks, compute.StorageDisk{Alias: "new", DeviceName: "not-yet-attached"})
-	managed, missing, err := Select(recoveredVM, spec, testResolved())
+	managed, degraded, err := Select(recoveredVM, spec, testResolved())
 	if err != nil {
 		t.Fatalf("Select after recovery: %v", err)
 	}
-	if len(missing) != 0 {
-		t.Errorf("missing = %v, want none", missing)
+	if len(degraded) != 0 {
+		t.Errorf("degraded = %v, want none", degraded)
 	}
 	if len(managed) != 2 {
 		t.Errorf("managed = %+v, want both selected disks now that the VM inventory is consistent", managed)

@@ -4,11 +4,14 @@ package e2e
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rodion1010/mws-iops-autoscaler/internal/compute"
+	"github.com/rodion1010/mws-iops-autoscaler/internal/config"
 )
 
 // scriptedClient models stale reads, a racing writer, and delayed scale-up.
@@ -136,7 +139,7 @@ func fastResetTiming() resetTiming {
 	}
 }
 
-func TestRegression_ResetConfirmsBaselineAcrossStaleReads(t *testing.T) {
+func TestRegression_Preflight_ResetConfirmsBaselineAcrossStaleReads(t *testing.T) {
 	for _, class := range []compute.DiskClass{compute.ClassDependent, compute.ClassIndependent} {
 		t.Run(string(class), func(t *testing.T) {
 			f := &scriptedClient{
@@ -156,7 +159,7 @@ func TestRegression_ResetConfirmsBaselineAcrossStaleReads(t *testing.T) {
 	}
 }
 
-func TestRegression_ResetFailsWhenOrphanRaces(t *testing.T) {
+func TestRegression_Preflight_ResetFailsWhenOrphanRaces(t *testing.T) {
 	for _, class := range []compute.DiskClass{compute.ClassDependent, compute.ClassIndependent} {
 		t.Run(string(class), func(t *testing.T) {
 			f := &scriptedClient{
@@ -177,7 +180,7 @@ func TestRegression_ResetFailsWhenOrphanRaces(t *testing.T) {
 	}
 }
 
-func TestRegression_WaitForScaleUpRejectsAlreadyElevated(t *testing.T) {
+func TestRegression_WaitForScaleUp_RejectsAlreadyElevated(t *testing.T) {
 	f := &scriptedClient{
 		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
 		class:    compute.ClassDependent,
@@ -193,7 +196,7 @@ func TestRegression_WaitForScaleUpRejectsAlreadyElevated(t *testing.T) {
 	}
 }
 
-func TestRegression_WaitForScaleUpRejectsEarlyElevation(t *testing.T) {
+func TestRegression_WaitForScaleUp_RejectsEarlyElevation(t *testing.T) {
 	f := &scriptedClient{
 		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
 		class:            compute.ClassDependent,
@@ -212,7 +215,7 @@ func TestRegression_WaitForScaleUpRejectsEarlyElevation(t *testing.T) {
 	}
 }
 
-func TestRegression_WaitForScaleUpAcceptsObservedBaselineThenRise(t *testing.T) {
+func TestRegression_WaitForScaleUp_AcceptsObservedBaselineThenRise(t *testing.T) {
 	f := &scriptedClient{
 		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
 		class:            compute.ClassDependent,
@@ -231,7 +234,7 @@ func TestRegression_WaitForScaleUpAcceptsObservedBaselineThenRise(t *testing.T) 
 	}
 }
 
-func TestRegression_WaitForScaleUpTimesOutAtBaseline(t *testing.T) {
+func TestRegression_WaitForScaleUp_TimesOutAtBaseline(t *testing.T) {
 	f := &scriptedClient{
 		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
 		class:    compute.ClassDependent,
@@ -281,7 +284,7 @@ func fastAgentStopTiming() agentStopTiming {
 	return agentStopTiming{termAttempts: 2, killAttempts: 2, interval: time.Millisecond}
 }
 
-func TestRegression_StopStaleAgentVerifiesAbsence(t *testing.T) {
+func TestRegression_Preflight_StopStaleAgentVerifiesAbsence(t *testing.T) {
 	f := &fakeRunner{absentAnswers: []string{sshWarning + agentPresentMarker}}
 	timing := fastAgentStopTiming()
 	ctx := context.Background()
@@ -301,7 +304,7 @@ func TestRegression_StopStaleAgentVerifiesAbsence(t *testing.T) {
 	}
 }
 
-func TestRegression_StopStaleAgentSucceedsOnConvergedAbsence(t *testing.T) {
+func TestRegression_Preflight_StopStaleAgentSucceedsOnConvergedAbsence(t *testing.T) {
 	f := &fakeRunner{absentAnswers: []string{
 		sshWarning + agentPresentMarker,
 		sshWarning + agentAbsentMarker,
@@ -315,7 +318,7 @@ func TestRegression_StopStaleAgentSucceedsOnConvergedAbsence(t *testing.T) {
 	}
 }
 
-func TestRegression_StopStaleAgentEscalatesToKill(t *testing.T) {
+func TestRegression_Preflight_StopStaleAgentEscalatesToKill(t *testing.T) {
 	f := &fakeRunner{absentAnswers: []string{
 		sshWarning + agentPresentMarker,
 		sshWarning + agentPresentMarker,
@@ -336,7 +339,7 @@ func TestRegression_StopStaleAgentEscalatesToKill(t *testing.T) {
 	}
 }
 
-func TestRegression_StopStaleAgentFailsClosedOnBrokenAbsenceCheck(t *testing.T) {
+func TestRegression_Preflight_StopStaleAgentFailsClosedOnBrokenAbsenceCheck(t *testing.T) {
 	for name, output := range map[string]string{
 		"pgrep error":  sshWarning + agentPgrepErrorPrefix + "2\n",
 		"unrecognized": sshWarning + "something else entirely\n",
@@ -351,6 +354,93 @@ func TestRegression_StopStaleAgentFailsClosedOnBrokenAbsenceCheck(t *testing.T) 
 			}
 			if !strings.Contains(err.Error(), "verify absence") {
 				t.Fatalf("failure should come from the absence check, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestRegression_Config_SelectedDisksRendersEveryDeviceName guards the
+// disks: selected block InstallAgent's default path relies on — a
+// regression here would silently change what every existing scenario's
+// agent manages.
+func TestRegression_Config_SelectedDisksRendersEveryDeviceName(t *testing.T) {
+	got := disksBlockYAML(SelectedDisksSpec("boot", "data"))
+	want := "disks:\n  mode: selected\n  selected:\n    - device_name: boot\n    - device_name: data\n"
+	if got != want {
+		t.Fatalf("disksBlockYAML(selected) =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestRegression_Config_AutoDiscoveryOmitsExcludeWhenEmpty checks that
+// mode: auto-discovery with no excluded names renders no exclude: key at
+// all, rather than an empty list — internal/config's YAML decoder treats an
+// absent key and an empty list the same way, but an empty-list rendering
+// would be easy to mistake for a real (if unlikely) exclude-list-of-nothing.
+func TestRegression_Config_AutoDiscoveryOmitsExcludeWhenEmpty(t *testing.T) {
+	got := disksBlockYAML(AutoDiscoveryDisksSpec())
+	want := "disks:\n  mode: auto-discovery\n"
+	if got != want {
+		t.Fatalf("disksBlockYAML(auto-discovery, no exclude) =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestRegression_Config_AutoDiscoveryRendersExcludedNames guards the
+// exclude: list shape — internal/config.DisksSpec.Exclude is []string, a
+// bare name per line, not a device_name: key like Selected.
+func TestRegression_Config_AutoDiscoveryRendersExcludedNames(t *testing.T) {
+	got := disksBlockYAML(AutoDiscoveryDisksSpec("noname"))
+	want := "disks:\n  mode: auto-discovery\n  exclude:\n    - noname\n"
+	if got != want {
+		t.Fatalf("disksBlockYAML(auto-discovery, exclude) =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestRegression_Config_DefaultDiscoveryIntervalUnchangedByDisksSpec pins
+// agentConfigYAML's discovery_interval at defaultDiscoveryInterval — the
+// value main.go's maxDiscoveryAge is derived from for every existing
+// scenario. See discoveryScenarioInterval's comment for why a scenario
+// needing faster rediscovery must opt in via agentConfigYAMLWithDisks
+// instead of this constant changing.
+func TestRegression_Config_DefaultDiscoveryIntervalUnchangedByDisksSpec(t *testing.T) {
+	target := Target{DeviceName: "data"}
+	rendered := agentConfigYAML(target)
+	want := "discovery_interval: " + defaultDiscoveryInterval.String()
+	if !strings.Contains(rendered, want) {
+		t.Fatalf("agentConfigYAML must render %q, got:\n%s", want, rendered)
+	}
+	if defaultDiscoveryInterval != 5*time.Minute {
+		t.Fatalf("defaultDiscoveryInterval = %s, want unchanged at 5m — every existing scenario's maxDiscoveryAge margin depends on this value", defaultDiscoveryInterval)
+	}
+}
+
+// TestRegression_Config_GeneratedYAMLPassesLoadAndValidate runs every
+// DisksSpec shape a scenario in this package actually renders through the
+// real internal/config.LoadAndValidate — the same call the agent itself
+// makes at startup (cmd/mws-iops-autoscaler/main.go). A config rejected
+// there exits before the process ever reaches discovery, which would fail a
+// scenario relying on it for a reason unrelated to what it's testing —
+// discovery_test.go's disks.exclude cases in particular have never gone
+// through the real validator before this test existed.
+func TestRegression_Config_GeneratedYAMLPassesLoadAndValidate(t *testing.T) {
+	cases := map[string]struct {
+		disks             DisksSpec
+		discoveryInterval time.Duration
+	}{
+		// InstallAgent's actual default: agentConfigYAML at
+		// defaultDiscoveryInterval, the config every existing scenario
+		// ships — not a stand-in built from the *WithDisks primitives.
+		"selected (InstallAgent's default)":              {SelectedDisksSpec("data"), defaultDiscoveryInterval},
+		"auto-discovery, no exclude (A1's shape)":        {AutoDiscoveryDisksSpec(), discoveryScenarioInterval},
+		"auto-discovery, unresolved exclude name (E6's)": {AutoDiscoveryDisksSpec("e2e-exclude-ghost"), discoveryScenarioInterval},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(agentConfigYAMLWithDisks(tc.disks, tc.discoveryInterval)), 0o600); err != nil {
+				t.Fatalf("write generated config: %v", err)
+			}
+			if _, err := config.LoadAndValidate(path); err != nil {
+				t.Fatalf("generated config failed LoadAndValidate: %v", err)
 			}
 		})
 	}

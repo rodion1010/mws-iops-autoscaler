@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,8 +54,14 @@ type Agent struct {
 	journal   *journal.Writer
 	readiness *health.Readiness
 
-	mu                   sync.Mutex
-	managed              []registry.ManagedDisk
+	mu       sync.Mutex
+	managed  []registry.ManagedDisk
+	degraded []registry.Degradation
+	// unmanaged is every other disk discovered on the VM this cycle — never
+	// decided or actuated on, sampled and analyzed in reconcile() purely so
+	// its measured consumption folds into siblingP95 (design.md §4.6: VM
+	// headroom is "other disks", not "other managed disks" — US-009).
+	unmanaged            []compute.StorageDisk
 	iopsPool             int64
 	lastDiscoverySuccess time.Time
 
@@ -109,7 +116,22 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 // discover refreshes managed disks and invalidates the snapshot on fatal discovery errors.
+//
+// An unresolved disks.selected/disks.exclude name (registry.Degradation) is
+// fatal only on the very first discovery attempt of this process's life —
+// managing a silently partial set with no prior successful discovery to
+// fall back to would diverge from operator intent with nothing to show for
+// it (docs/design.md §4.1). Once at least one discovery has already
+// succeeded, the same mismatch degrades only the unresolved name: the rest
+// of the managed set keeps being managed, reported via
+// health.Readiness.SetDegradedDisks and the
+// iops_autoscaler_disk_configured_unmanaged gauge, neither of which flips
+// /readyz's binary verdict (docs/configuration.md §4.2).
 func (a *Agent) discover(ctx context.Context) error {
+	a.mu.Lock()
+	coldStart := a.lastDiscoverySuccess.IsZero()
+	a.mu.Unlock()
+
 	vm, skipped, err := compute.Discover(ctx, a.client, a.vmName)
 	if err != nil {
 		a.readiness.SetDiscoverySucceeded(false)
@@ -121,11 +143,17 @@ func (a *Agent) discover(ctx context.Context) error {
 		a.telemetry.RecordDiscoverySkipped(s.Alias, s.Category)
 	}
 
-	managed, _, err := registry.Select(vm, a.cfg.Disks, a.resolved)
+	managed, degraded, err := registry.Select(vm, a.cfg.Disks, a.resolved)
 	if err != nil {
 		a.readiness.SetDiscoverySucceeded(false)
 		a.invalidateManaged()
 		return err
+	}
+	if len(degraded) > 0 && coldStart {
+		a.readiness.SetDiscoverySucceeded(false)
+		a.invalidateManaged()
+		return fmt.Errorf("disks.%s: unresolved device_name(s) on the first discovery attempt: %s — refusing to manage a partial set before any discovery has succeeded (docs/design.md §4.1)",
+			a.cfg.Disks.Mode, joinDegraded(degraded))
 	}
 
 	// Exclude disks whose guest path cannot produce metrics.
@@ -146,10 +174,29 @@ func (a *Agent) discover(ctx context.Context) error {
 	for i, m := range managed {
 		disks[i] = a.diskRef(m)
 	}
+
+	// Every disk this cycle found on the VM but did not select into managed
+	// still shares the same aggregate IOPS pool — sampled and analyzed
+	// alongside the managed set (reconcile) so its consumption is not
+	// silently treated as zero when computing another disk's headroom.
+	managedNames := make(map[string]bool, len(managed))
+	for _, m := range managed {
+		managedNames[m.Disk.DiskName] = true
+	}
+	var unmanaged []compute.StorageDisk
+	for _, d := range vm.Disks {
+		if !managedNames[d.DiskName] {
+			unmanaged = append(unmanaged, d)
+			disks = append(disks, a.diskRefForDisk(d))
+		}
+	}
 	a.sampler.SetDisks(disks)
 
 	a.mu.Lock()
 	a.managed = managed
+	a.unmanaged = unmanaged
+	previouslyDegraded := a.degraded
+	a.degraded = degraded
 	a.iopsPool = compute.VMIOPSPool(vm)
 	a.lastDiscoverySuccess = time.Now()
 	a.managedValid = true
@@ -158,6 +205,7 @@ func (a *Agent) discover(ctx context.Context) error {
 
 	a.readiness.SetDiscoverySucceeded(true)
 	// Compute API and metric-source reachability are independent readiness signals.
+	a.reportDegraded(degraded, previouslyDegraded)
 
 	// Compact opportunistically; failure leaves the in-memory budget intact.
 	if err := a.tracker.Compact(time.Now()); err != nil {
@@ -165,6 +213,52 @@ func (a *Agent) discover(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// joinDegraded formats a degraded set for the cold-start fatal error and
+// the runtime WARN log alike, one entry per unresolved name.
+func joinDegraded(degraded []registry.Degradation) string {
+	parts := make([]string, len(degraded))
+	for i, d := range degraded {
+		parts[i] = fmt.Sprintf("%s (%s)", d.DeviceName, d.Reason)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// reportDegraded publishes this cycle's degraded set to /readyz and the
+// gauge every cycle — including empty, which is what lets a disk that
+// resolves again disappear from both instead of leaving a stale entry
+// behind — and logs a WARN only when the set actually changed, not on
+// every cycle it stays the same.
+func (a *Agent) reportDegraded(current, previous []registry.Degradation) {
+	healthDegraded := make([]health.DegradedDisk, len(current))
+	metricDegraded := make(map[string]string, len(current))
+	for i, d := range current {
+		healthDegraded[i] = health.DegradedDisk{DeviceName: d.DeviceName, Reason: d.Reason}
+		metricDegraded[d.DeviceName] = d.Reason
+	}
+	a.readiness.SetDegradedDisks(healthDegraded)
+	a.telemetry.SyncDiskConfiguredUnmanaged(metricDegraded)
+
+	if !degradedEqual(current, previous) {
+		if len(current) > 0 {
+			log.Printf("discover: degraded (managing the rest of the set): %s", joinDegraded(current))
+		} else {
+			log.Printf("discover: previously degraded disk(s) resolved, no longer degraded")
+		}
+	}
+}
+
+func degradedEqual(a, b []registry.Degradation) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // journalDiscoveryStale emits one no-action record per disk without fabricating analysis inputs.
@@ -185,11 +279,17 @@ func (a *Agent) journalDiscoveryStale(managed []registry.ManagedDisk, now time.T
 }
 
 func (a *Agent) diskRef(m registry.ManagedDisk) metrics.DiskRef {
+	return a.diskRefForDisk(m.Disk)
+}
+
+// diskRefForDisk is diskRef's non-managed counterpart, for sampling an
+// unmanaged sibling purely toward VM headroom (never toward a Decision).
+func (a *Agent) diskRefForDisk(d compute.StorageDisk) metrics.DiskRef {
 	return metrics.DiskRef{
-		DiskID:        m.Disk.DiskName,
+		DiskID:        d.DiskName,
 		VMName:        a.vmName,
-		DeviceName:    m.Disk.DeviceName,
-		IncarnationID: m.Disk.IncarnationID,
+		DeviceName:    d.DeviceName,
+		IncarnationID: d.IncarnationID,
 	}
 }
 
@@ -213,6 +313,7 @@ func (a *Agent) hasManagedDisks() bool {
 func (a *Agent) reconcile(ctx context.Context) {
 	a.mu.Lock()
 	managed := append([]registry.ManagedDisk(nil), a.managed...)
+	unmanaged := append([]compute.StorageDisk(nil), a.unmanaged...)
 	iopsPool := a.iopsPool
 	lastDiscovery := a.lastDiscoverySuccess
 	managedValid := a.managedValid
@@ -238,7 +339,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 		return
 	}
 
-	analyses := make(map[string]analyzer.Analysis, len(managed))
+	analyses := make(map[string]analyzer.Analysis, len(managed)+len(unmanaged))
 	for _, m := range managed {
 		diskID := m.Disk.DiskName
 		samples := a.sampler.Samples(a.diskRef(m))
@@ -254,6 +355,24 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 	}
 
+	// Unmanaged siblings are analyzed too, but only ever feed the headroom
+	// sum below — never decided, actuated, journaled, or published to
+	// per-disk staleness. registry.Select never resolves a per-disk policy
+	// override for a disk outside the managed set, so the VM-wide default
+	// stands in for every one of them. Guarded on a non-empty slice so a
+	// caller with no unmanaged siblings this cycle never has to carry a
+	// resolved config just to reach this line.
+	if len(unmanaged) > 0 {
+		unmanagedEP := toEvaluationPolicy(a.resolved.VMPolicy.Advanced, a.maxSampleAge, a.maxSampleGap)
+		for _, d := range unmanaged {
+			diskID := d.DiskName
+			samples := a.sampler.Samples(a.diskRefForDisk(d))
+			an := a.analyzer.Analyze(d.IdentityKey(), samples, unmanagedEP, d.IOPS, now)
+			an.DiskID = diskID
+			analyses[diskID] = an
+		}
+	}
+
 	// Aggregate the VM-wide gauge once to avoid last-disk-wins.
 	anyVMCapReached := false
 
@@ -261,14 +380,25 @@ func (a *Agent) reconcile(ctx context.Context) {
 		diskID := m.Disk.DiskName
 		an := analyses[diskID]
 
-		// Sum sibling p95s; correlated bursts remain a documented approximation.
+		// Sum sibling p95s over every disk on the VM, managed or not
+		// (docs/design.md §4.6: "other disks", not "other managed disks" —
+		// US-009); correlated bursts remain a documented approximation.
+		// A sibling with no fresh sample yet contributes IOPSP95Down's zero
+		// value to the sum rather than its real, unknown consumption
+		// (issue #56) — siblingDemandUnknown flags that gap so Decide can
+		// fail closed instead of approving scale-up against headroom that
+		// might already be spent.
 		var siblingP95 float64
+		siblingDemandUnknown := false
 		for otherID, otherAn := range analyses {
 			if otherID != diskID {
 				siblingP95 += otherAn.IOPSP95Down
+				if !otherAn.HasData || !otherAn.Fresh {
+					siblingDemandUnknown = true
+				}
 			}
 		}
-		vm := decider.VMState{IOPSPool: iopsPool, SiblingP95IOPS: siblingP95}
+		vm := decider.VMState{IOPSPool: iopsPool, SiblingP95IOPS: siblingP95, SiblingDemandUnknown: siblingDemandUnknown}
 
 		ep := toEffectivePolicy(m.Policy)
 		// Cooldown and budget state must not survive disk replacement.

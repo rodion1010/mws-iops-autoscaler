@@ -51,7 +51,23 @@ func SkipOrFail(t *testing.T, err error) {
 	t.Skipf("e2e: skipping, environment not configured: %v", err)
 }
 
-// SmokeTarget builds the persistent PR-tier target from the environment.
+// parseBaselineIOPS reads an optional baseline-IOPS override from envVar,
+// defaulting to 1000 — this harness's convention for a freshly reset disk —
+// when unset.
+func parseBaselineIOPS(envVar string) (int64, error) {
+	raw := os.Getenv(envVar)
+	if raw == "" {
+		return 1000, nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("e2e: %s: %w", envVar, err)
+	}
+	return v, nil
+}
+
+// SmokeTarget builds the persistent PR-tier target for the dependent disk
+// from the environment.
 func SmokeTarget() (Target, error) {
 	env, err := requiredEnv(
 		"E2E_VM_NAME",
@@ -63,19 +79,47 @@ func SmokeTarget() (Target, error) {
 	if err != nil {
 		return Target{}, err
 	}
-	baseline := int64(1000)
-	if raw := os.Getenv("E2E_BASELINE_IOPS"); raw != "" {
-		v, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			return Target{}, fmt.Errorf("e2e: E2E_BASELINE_IOPS: %w", err)
-		}
-		baseline = v
+	baseline, err := parseBaselineIOPS("E2E_BASELINE_IOPS")
+	if err != nil {
+		return Target{}, err
 	}
 	return Target{
 		VMName:        env["E2E_VM_NAME"],
 		DeviceName:    env["E2E_DEVICE_NAME"],
 		BaselineIOPS:  baseline,
 		ExpectedClass: compute.ClassDependent,
+		SSHHost:       env["E2E_SSH_HOST"],
+		SSHUser:       env["E2E_SSH_USER"],
+		SSHKeyPath:    env["E2E_SSH_KEY_PATH"],
+	}, nil
+}
+
+// SmokeIndependentTarget builds the persistent PR-tier target for the
+// independent disk permanently attached to the same VM as SmokeTarget — it
+// is what lets the PR tier exercise the independent write path
+// (docs/design.md §4.7, §8.3) instead of only the full tier's ephemeral
+// disk. SSH access is shared with SmokeTarget since both point at the same
+// VM; only the disk differs.
+func SmokeIndependentTarget() (Target, error) {
+	env, err := requiredEnv(
+		"E2E_VM_NAME",
+		"E2E_SMOKE_INDEPENDENT_DEVICE_NAME",
+		"E2E_SSH_HOST",
+		"E2E_SSH_USER",
+		"E2E_SSH_KEY_PATH",
+	)
+	if err != nil {
+		return Target{}, err
+	}
+	baseline, err := parseBaselineIOPS("E2E_SMOKE_INDEPENDENT_BASELINE_IOPS")
+	if err != nil {
+		return Target{}, err
+	}
+	return Target{
+		VMName:        env["E2E_VM_NAME"],
+		DeviceName:    env["E2E_SMOKE_INDEPENDENT_DEVICE_NAME"],
+		BaselineIOPS:  baseline,
+		ExpectedClass: compute.ClassIndependent,
 		SSHHost:       env["E2E_SSH_HOST"],
 		SSHUser:       env["E2E_SSH_USER"],
 		SSHKeyPath:    env["E2E_SSH_KEY_PATH"],

@@ -1,6 +1,8 @@
 // Package health implements design.md §7.3's two HTTP endpoints:
 // /healthz (process alive) and /readyz (config valid, discovery succeeded,
-// ≥1 metric source reachable).
+// ≥1 metric source reachable, budget healthy). /readyz's body also reports
+// any degraded disks (DegradedDisk) alongside that binary verdict, but
+// never folds them into it — see SetDegradedDisks.
 package health
 
 import (
@@ -8,6 +10,17 @@ import (
 	"net/http"
 	"sync"
 )
+
+// DegradedDisk names one configured disk (disks.selected or disks.exclude)
+// that could not be resolved against the VM's live disks this cycle, but
+// did not block the rest of the managed set (docs/design.md §4.1's
+// cold-start/runtime distinction; docs/configuration.md §4.2). DeviceName
+// is whatever the operator's config named — it does not necessarily
+// correspond to any live disk.
+type DegradedDisk struct {
+	DeviceName string `json:"device_name"`
+	Reason     string `json:"reason"`
+}
 
 // Readiness is the mutable state /readyz reports on — set by the caller as
 // each condition becomes true or false across the process's life. Zero
@@ -28,6 +41,12 @@ type Readiness struct {
 	// field) stays framed positively like every other field here; only
 	// the internal storage is inverted.
 	budgetUnhealthy bool
+
+	// degraded is reported alongside the binary verdict below, never folded
+	// into it (docs/design.md §4.1) — a disk named in disks.selected or
+	// disks.exclude that didn't resolve degrades only that disk, once at
+	// least one discovery has already succeeded; it never flips /readyz.
+	degraded []DegradedDisk
 }
 
 func (r *Readiness) SetConfigValid(v bool) {
@@ -61,6 +80,17 @@ func (r *Readiness) SetBudgetHealthy(v bool) {
 	r.budgetUnhealthy = !v
 }
 
+// SetDegradedDisks replaces the full current set of configured-but-
+// unresolved disks reported alongside /readyz's binary verdict. The caller
+// (Agent.discover) passes the complete set every cycle, including empty —
+// that's what lets a disk that resolves again disappear from the body
+// instead of leaving a stale entry behind.
+func (r *Readiness) SetDegradedDisks(degraded []DegradedDisk) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.degraded = degraded
+}
+
 // Ready reports whether every condition design.md §7.3 requires currently
 // holds.
 func (r *Readiness) Ready() bool {
@@ -75,6 +105,11 @@ type readyzBody struct {
 	DiscoverySucceeded bool `json:"discovery_succeeded"`
 	SourceReachable    bool `json:"source_reachable"`
 	BudgetHealthy      bool `json:"budget_healthy"`
+
+	// ConfiguredDisksUnmanaged is omitted entirely when empty, so the
+	// healthy-state response stays byte-for-byte what it was before this
+	// field existed.
+	ConfiguredDisksUnmanaged []DegradedDisk `json:"configured_disks_unmanaged,omitempty"`
 }
 
 // ReadyzHandler returns 200 with a breakdown when every condition holds,
@@ -85,11 +120,12 @@ func (r *Readiness) ReadyzHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		r.mu.RLock()
 		body := readyzBody{
-			Ready:              r.configValid && r.discoverySucceeded && r.sourceReachable && !r.budgetUnhealthy,
-			ConfigValid:        r.configValid,
-			DiscoverySucceeded: r.discoverySucceeded,
-			SourceReachable:    r.sourceReachable,
-			BudgetHealthy:      !r.budgetUnhealthy,
+			Ready:                    r.configValid && r.discoverySucceeded && r.sourceReachable && !r.budgetUnhealthy,
+			ConfigValid:              r.configValid,
+			DiscoverySucceeded:       r.discoverySucceeded,
+			SourceReachable:          r.sourceReachable,
+			BudgetHealthy:            !r.budgetUnhealthy,
+			ConfiguredDisksUnmanaged: r.degraded,
 		}
 		r.mu.RUnlock()
 
