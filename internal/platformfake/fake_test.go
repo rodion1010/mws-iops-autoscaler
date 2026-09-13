@@ -52,9 +52,9 @@ func TestFake_GetVirtualMachine_translatesBothDiskClasses(t *testing.T) {
 	for _, d := range vm.Disks {
 		byDevice[d.DeviceName] = d
 	}
-	boot, ok := byDevice["bootdisk"]
+	boot, ok := byDevice["mws-bootdisk"]
 	if !ok {
-		t.Fatalf("no disk with device_name bootdisk; got %v", byDevice)
+		t.Fatalf("no disk with device_name mws-bootdisk; got %v", byDevice)
 	}
 	if boot.Class != compute.ClassDependent {
 		t.Errorf("bootdisk class = %q, want dependent (inline spec)", boot.Class)
@@ -62,9 +62,9 @@ func TestFake_GetVirtualMachine_translatesBothDiskClasses(t *testing.T) {
 	if boot.DiskName != platformfake.DependentDisk {
 		t.Errorf("bootdisk DiskName = %q, want %q", boot.DiskName, platformfake.DependentDisk)
 	}
-	data, ok := byDevice["datadisk"]
+	data, ok := byDevice["mws-datadisk"]
 	if !ok {
-		t.Fatalf("no disk with device_name datadisk; got %v", byDevice)
+		t.Fatalf("no disk with device_name mws-datadisk; got %v", byDevice)
 	}
 	if data.Class != compute.ClassIndependent {
 		t.Errorf("datadisk class = %q, want independent (ref)", data.Class)
@@ -194,7 +194,7 @@ func TestFake_UpdateDependentDisk_resolvesAliasToResourceName(t *testing.T) {
 	var boot compute.StorageDisk
 	var foundBoot bool
 	for _, d := range got.Disks {
-		if d.DeviceName == "bootdisk" {
+		if d.DeviceName == "mws-bootdisk" {
 			boot, foundBoot = d, true
 		}
 	}

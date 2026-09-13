@@ -106,8 +106,9 @@ type DisksSpec struct {
 	Selected []SelectedDiskSpec `yaml:"selected"`
 }
 
-// SelectedDiskSpec names one disk by device_name (docs/design.md §4.1 — unprefixed, never
-// a kernel device path) with an optional per-disk policy override.
+// SelectedDiskSpec names one disk by device_name — the exact value VM
+// status reports, never a kernel device path (docs/design.md §4.1) — with
+// an optional per-disk policy override.
 type SelectedDiskSpec struct {
 	DeviceName string      `yaml:"device_name"`
 	Policy     *PolicySpec `yaml:"policy"`

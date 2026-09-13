@@ -293,7 +293,11 @@ func validateDiskSelection(d *DisksSpec) []error {
 	return errs
 }
 
-// validateDeviceName rejects kernel paths and reserved mws- names.
+// validateDeviceName rejects a kernel device path and anything that is not
+// the exact device_name VM status reports — the same identifier used
+// inside Linux (docs/configuration.md §4.1). Only resolution against a
+// VM's discovered disks (internal/registry) can catch a value that merely
+// looks plausible but names no live disk.
 func validateDeviceName(name string) error {
 	if name == "" {
 		return fmt.Errorf("device_name must not be empty")
@@ -301,8 +305,10 @@ func validateDeviceName(name string) error {
 	if strings.HasPrefix(name, "/dev/") {
 		return fmt.Errorf("device_name %q is a kernel device path — use the disk's device_name instead", name)
 	}
-	if strings.HasPrefix(name, "mws-") {
-		return fmt.Errorf("device_name %q carries the mws- prefix — write it unprefixed, as it was set at attach time", name)
+	if !strings.HasPrefix(name, "mws-") {
+		return fmt.Errorf(
+			"device_name %q is not the exact value VM status reports — copy it from status.storage.disks[].deviceName, the device_name metric label, or /dev/disk/by-id/",
+			name)
 	}
 	return nil
 }

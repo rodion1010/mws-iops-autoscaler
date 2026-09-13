@@ -14,6 +14,11 @@ import (
 
 // Target describes one VM and disk under test and its SSH endpoint.
 type Target struct {
+	// DeviceName must be the exact value VM status reports — the same
+	// value compute.StorageDisk.GuestPath() and MetricLabel() expect
+	// verbatim. The repository variables this is sourced from
+	// (E2E_DEVICE_NAME, E2E_SMOKE_INDEPENDENT_DEVICE_NAME) must hold that
+	// value directly.
 	VMName        string
 	DeviceName    string
 	BaselineIOPS  int64

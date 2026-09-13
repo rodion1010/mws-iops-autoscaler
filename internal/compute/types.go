@@ -13,9 +13,14 @@ const (
 
 // StorageDisk is a VM attachment returned raw by GetVirtualMachine or enriched by Discover.
 type StorageDisk struct {
-	Alias      string // spec.storage.disks[].name — alias unique within the VM, not globally
-	Boot       bool
-	DeviceName string // unprefixed (docs/design.md §4.1); empty if the platform has not assigned one
+	Alias string // spec.storage.disks[].name — alias unique within the VM, not globally
+	Boot  bool
+	// DeviceName is the exact value VM status reports —
+	// status.storage.disks[].deviceName — the same identifier used to
+	// address the device inside Linux (docs/design.md §4.1); empty if the
+	// platform has not assigned one. Config selectors must match this
+	// value exactly.
+	DeviceName string
 	Class      DiskClass
 	DiskName   string // status.storage.disks[].ref — cloud resource name; GetDisk/UpdateDisk target
 
@@ -35,12 +40,12 @@ type StorageDisk struct {
 
 // GuestPath is the local-mode device path.
 func (d StorageDisk) GuestPath() string {
-	return "/dev/disk/by-id/mws-" + d.DeviceName
+	return "/dev/disk/by-id/" + d.DeviceName
 }
 
 // MetricLabel is the exported device_name label.
 func (d StorageDisk) MetricLabel() string {
-	return "mws-" + d.DeviceName
+	return d.DeviceName
 }
 
 // IdentityKey is the incarnation-aware key for samples, cooldowns, and change budget.

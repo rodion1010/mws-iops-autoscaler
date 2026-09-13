@@ -8,13 +8,13 @@ policy:
 disks:
   mode: selected
   selected:
-    - device_name: datadisk
+    - device_name: mws-datadisk
 
-    - device_name: logdisk
+    - device_name: mws-logdisk
       policy:
         limits: {min_iops: 3000, max_iops: 10000}
 
-    - device_name: backupdisk
+    - device_name: mws-backupdisk
       policy:
         limits: {min_iops: 1000, max_iops: 6000}
         advanced:

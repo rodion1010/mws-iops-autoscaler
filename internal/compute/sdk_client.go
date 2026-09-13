@@ -3,7 +3,6 @@ package compute
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"go.mws.cloud/go-sdk/mws"
 	mwserrors "go.mws.cloud/go-sdk/mws/errors"
@@ -98,8 +97,11 @@ func translateVMResponse(name string, resp *model.VirtualMachineOptionalResponse
 		}
 
 		// Status is authoritative for server-defaulted DeviceName and disk Ref.
+		// DeviceName is kept exactly as VM status reports it
+		// (docs/configuration.md §4.1) — the same identifier used to address
+		// the device inside Linux.
 		if status, ok := statusByAlias[specEntry.Name]; ok {
-			disk.DeviceName = strings.TrimPrefix(status.DeviceName, "mws-")
+			disk.DeviceName = status.DeviceName
 			disk.DiskName = status.Ref.GetDisk()
 		}
 

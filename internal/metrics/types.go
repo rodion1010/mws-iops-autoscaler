@@ -31,7 +31,7 @@ type QueueDepth struct {
 type DiskRef struct {
 	DiskID     string // cloud resource name — used for API writes, never written in config
 	VMName     string // (VMName, DeviceName) is the fleet-mode key
-	DeviceName string // unprefixed: "datadisk"
+	DeviceName string // the exact value VM status reports: "mws-datadisk"
 
 	// IncarnationID prevents a replacement disk from inheriting the previous ring buffer.
 	IncarnationID string
@@ -39,12 +39,12 @@ type DiskRef struct {
 
 // GuestPath is the local-mode device path.
 func (d DiskRef) GuestPath() string {
-	return "/dev/disk/by-id/mws-" + d.DeviceName
+	return "/dev/disk/by-id/" + d.DeviceName
 }
 
 // MetricLabel is the exported device_name label.
 func (d DiskRef) MetricLabel() string {
-	return "mws-" + d.DeviceName
+	return d.DeviceName
 }
 
 // IdentityKey is the incarnation-aware sampler key.

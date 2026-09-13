@@ -71,9 +71,8 @@ itself so that I do not have to enumerate them.
       `/dev/disk/by-id/mws-{deviceName}` (falling back to `mws-{name}` when `deviceName` is absent)
 - [ ] Verifies the resolved path exists before managing the disk
 - [ ] Disks whose path does not resolve are skipped with a warning, not a crash
-- [ ] Config entries are matched to discovered disks by `device_name` in the unprefixed form
-      (`datadisk`, not `mws-datadisk`); the agent applies the `mws-` prefix itself when resolving
-      the guest path and when matching the metric label (design.md §4.1)
+- [ ] Config entries are matched to discovered disks by `device_name`, the exact value VM status
+      reports (matching the guest path and the metric label verbatim, design.md §4.1)
 - [ ] Typecheck/lint passes
 
 ### US-003: Disk discovery — fleet mode
@@ -124,12 +123,13 @@ opt in broadly or narrowly.
 - [ ] `explicit` — only the named disks
 - [ ] **Disks are named by `device_name` in both modes, never by kernel device path** (`/dev/vdb` is
       assigned in discovery order and is not stable across reboots or re-attachment — a policy would
-      silently land on the wrong disk). Written unprefixed; `(instance, device_name)` is the key in
-      fleet mode, where selectors nest under their instance. See design.md §4.1
-- [ ] `--validate-config` rejects a kernel device path, a prefixed `mws-` name, a duplicate
-      `device_name` within one VM's list, a `device_name` matching no discovered disk, an unrecognized
-      strategy name, and the exclusion/selection list belonging to the wrong strategy (e.g. `explicit`
-      with an `all_except`-style exclusion list set)
+      silently land on the wrong disk). Written as the exact value VM status reports;
+      `(instance, device_name)` is the key in fleet mode, where selectors nest under their instance.
+      See design.md §4.1
+- [ ] `--validate-config` rejects a kernel device path, a `device_name` that cannot be the exact
+      value VM status reports, a duplicate `device_name` within one VM's list, a `device_name`
+      matching no discovered disk, an unrecognized strategy name, and the exclusion/selection list
+      belonging to the wrong strategy (e.g. `explicit` with an `all_except`-style exclusion list set)
 - [ ] Strategy is settable globally and overridable per VM
 - [ ] Continuous rediscovery interval is configurable; new disks enter management without restart
 - [ ] Typecheck/lint passes
@@ -730,8 +730,8 @@ little money briefly. Up is fast and decisive; down is slow and leaves headroom.
   a required field; the guest path is `/dev/disk/by-id/mws-{deviceName}`, or `mws-{name}` when
   `deviceName` was not set at attach time. No serial-number probing, no heuristics. This removes the
   blocker that previously held back `local` mode. `deviceName` is therefore also the identifier the
-  operator writes in config — unprefixed — since it is the one value shared by config, guest path and
-  metric label (design.md §4.1).
+  operator writes in config — the exact value, since it is the one identifier shared verbatim by
+  config, guest path and metric label (design.md §4.1).
 - **Only `iops` and `size` are mutable on a disk.** Every other field in `DiskSpecRequest` is
   create-only and, per the spec, "may only be resent with its current value" on update. The agent
   therefore touches `spec.iops` and nothing else.

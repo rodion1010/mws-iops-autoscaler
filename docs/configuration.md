@@ -123,20 +123,22 @@ were never valid: `cooldown.scale_up: 3m` against `scale_up_window: 2m` violates
 
 ### 4.1 How a disk is named
 
-**Disks are addressed by `device_name`, in both modes.** This is the disk's `deviceName` as set when
-it was attached to the VM — the same value the platform reports in
-`status.storage.disks[].deviceName` and puts on the `device_name` label of every exported metric.
-
-**Write it without the `mws-` prefix**, exactly as it was given at attach time:
+**Disks are addressed by `device_name`, in both modes.** Write the exact platform-visible value: what
+the platform reports in `status.storage.disks[].deviceName`, puts on the `device_name` label of every
+exported metric, and uses for the guest path — copy it from any of those three:
 
 ```yaml
-device_name: datadisk         # correct
-device_name: mws-datadisk     # rejected by --validate-config
+device_name: mws-datadisk     # correct — the platform-visible form
 ```
 
-The platform adds the prefix on the way out — `status` returns `mws-datadisk`, the metric label reads
-`device_name="mws-datadisk"`, and the guest path is `/dev/disk/by-id/mws-datadisk`. The agent applies
-that prefix itself when resolving either. The config stays in the form the operator actually chose.
+`mws-datadisk` here comes from an attach-time `deviceName: datadisk`; the platform always adds the
+`mws-` prefix on the way out (`status.storage.disks[].deviceName`, the `device_name` metric label, and
+the guest path `/dev/disk/by-id/mws-datadisk` all carry it). If the attach-time `deviceName` itself
+already started with `mws-` (the platform's schema permits this), its platform-visible form doubles
+the prefix — `deviceName: mws-data` is visible as `mws-mws-data`, and that is the value to write here.
+
+The unprefixed form (`device_name: datadisk`) is rejected by `--validate-config`: it cannot be the
+exact value VM status reports, since the platform always adds `mws-` on the way out.
 
 **Kernel device names (`/dev/vdb`, `/dev/sdb`) must never be used.** They are assigned in discovery
 order, which is not stable across reboots or attach/detach cycles: `/dev/vdb` today can be `/dev/vdc`
@@ -160,15 +162,15 @@ disks:
 disks:
   mode: auto-discovery          # everything except these
   exclude:
-    - bootdisk
+    - mws-bootdisk
 ```
 
 ```yaml
 disks:
   mode: selected                # only these, each with an optional policy
   selected:
-    - device_name: datadisk
-    - device_name: logdisk
+    - device_name: mws-datadisk
+    - device_name: mws-logdisk
       policy:
         limits: {min_iops: 3000, max_iops: 10000}
 ```
@@ -244,7 +246,7 @@ policy:
 disks:
   mode: auto-discovery
   exclude:
-    - bootdisk
+    - mws-bootdisk
 
 runtime:
   metrics:
@@ -268,13 +270,13 @@ policy:
 disks:
   mode: selected
   selected:
-    - device_name: datadisk
+    - device_name: mws-datadisk
 
-    - device_name: logdisk
+    - device_name: mws-logdisk
       policy:
         limits: {min_iops: 3000, max_iops: 10000}
 
-    - device_name: backupdisk
+    - device_name: mws-backupdisk
       policy:
         limits: {min_iops: 1000, max_iops: 6000}
         advanced:
@@ -307,15 +309,15 @@ project:
         disks:
           mode: selected
           selected:
-            - device_name: db-data
-            - device_name: db-wal
+            - device_name: mws-db-data
+            - device_name: mws-db-wal
               policy:
                 limits: {min_iops: 5000, max_iops: 10000}
 
       - instance: worker-01
         disks:
           mode: auto-discovery
-          exclude: [bootdisk]
+          exclude: [mws-bootdisk]
 
       - instance: batch-01
         policy:
@@ -366,7 +368,7 @@ value, and maintenance windows.
 - unknown keys anywhere (typos must fail loudly, not be ignored) — this is what rejects the
   superseded `device:` and `disk_id:` selectors
 - a disk identified by a kernel device path (`/dev/vdb`, `/dev/sdb`) instead of `device_name`
-- a `device_name` written with the `mws-` prefix (§4.1 — the config carries the unprefixed form)
+- a `device_name` that cannot be the exact value VM status reports (§4.1)
 - the same `device_name` listed twice within one VM's `selected` or `exclude` list
 - `advanced` fields set while `advanced.enabled: false`
 - `mode: local` with `metrics.source: platform` but no API key configured

@@ -32,11 +32,11 @@ func TestLoad_perDiskPolicies(t *testing.T) {
 	if len(cfg.Disks.Selected) != 3 {
 		t.Fatalf("len(Disks.Selected) = %d, want 3", len(cfg.Disks.Selected))
 	}
-	if cfg.Disks.Selected[0].DeviceName != "datadisk" || cfg.Disks.Selected[0].Policy != nil {
-		t.Errorf("Selected[0] = %+v, want device_name=datadisk with no override", cfg.Disks.Selected[0])
+	if cfg.Disks.Selected[0].DeviceName != "mws-datadisk" || cfg.Disks.Selected[0].Policy != nil {
+		t.Errorf("Selected[0] = %+v, want device_name=mws-datadisk with no override", cfg.Disks.Selected[0])
 	}
 	logdisk := cfg.Disks.Selected[1]
-	if logdisk.DeviceName != "logdisk" || logdisk.Policy == nil || logdisk.Policy.Limits == nil || *logdisk.Policy.Limits.MinIOPS != 3000 {
+	if logdisk.DeviceName != "mws-logdisk" || logdisk.Policy == nil || logdisk.Policy.Limits == nil || *logdisk.Policy.Limits.MinIOPS != 3000 {
 		t.Errorf("Selected[1] = %+v, want logdisk overriding limits.min_iops to 3000", logdisk)
 	}
 }

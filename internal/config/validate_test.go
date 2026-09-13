@@ -17,7 +17,7 @@ func validConfig() *Config {
 		},
 		Disks: DisksSpec{
 			Mode:    "auto-discovery",
-			Exclude: []string{"bootdisk"},
+			Exclude: []string{"mws-bootdisk"},
 		},
 		Runtime: RuntimeSpec{
 			Metrics: MetricsSpec{Source: "guest"},
@@ -29,6 +29,49 @@ func TestValidate_valid(t *testing.T) {
 	if err := Validate(validConfig()); err != nil {
 		t.Fatalf("Validate(valid config) = %v, want nil", err)
 	}
+}
+
+// TestValidateDeviceNameAcceptsPlatformVisibleName confirms a device_name
+// written exactly as VM status reports it must validate, not be rejected
+// as if it were a config mistake.
+func TestValidateDeviceNameAcceptsPlatformVisibleName(t *testing.T) {
+	c := validConfig()
+	c.Disks.Mode = "selected"
+	c.Disks.Exclude = nil
+	c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "mws-datadisk"}}
+
+	if err := Validate(c); err != nil {
+		t.Fatalf("Validate(platform-visible device_name) = %v, want nil", err)
+	}
+}
+
+// TestValidateDeviceNameRejectsNonPlatformVisibleForm confirms a
+// device_name that cannot be the exact value VM status reports is caught
+// at --validate-config time, with an actionable diagnostic, in both
+// selected and exclude — rather than passing validation and only failing
+// later during discovery with a generic "not found".
+func TestValidateDeviceNameRejectsNonPlatformVisibleForm(t *testing.T) {
+	t.Run("selected", func(t *testing.T) {
+		c := validConfig()
+		c.Disks.Mode = "selected"
+		c.Disks.Exclude = nil
+		c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}}
+
+		err := Validate(c)
+		if err == nil || !strings.Contains(err.Error(), "is not the exact value VM status reports") {
+			t.Fatalf("Validate() = %v, want an error naming the missing mws- prefix", err)
+		}
+	})
+
+	t.Run("exclude", func(t *testing.T) {
+		c := validConfig()
+		c.Disks.Exclude = []string{"datadisk"}
+
+		err := Validate(c)
+		if err == nil || !strings.Contains(err.Error(), "is not the exact value VM status reports") {
+			t.Fatalf("Validate() = %v, want an error naming the missing mws- prefix", err)
+		}
+	})
 }
 
 func TestValidate_rules(t *testing.T) {
@@ -101,27 +144,27 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "kernel device path",
 		},
 		{
-			name: "device_name with the mws- prefix",
+			name: "device_name matching the exact value VM status reports is accepted",
 			mutate: func(c *Config) {
 				c.Disks.Mode = "selected"
 				c.Disks.Exclude = nil
 				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "mws-datadisk"}}
 			},
-			wantSub: "mws- prefix",
+			wantSub: "",
 		},
 		{
 			name: "duplicate device_name within selected",
 			mutate: func(c *Config) {
 				c.Disks.Mode = "selected"
 				c.Disks.Exclude = nil
-				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}, {DeviceName: "datadisk"}}
+				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "mws-datadisk"}, {DeviceName: "mws-datadisk"}}
 			},
 			wantSub: "listed more than once",
 		},
 		{
 			name: "duplicate device_name within exclude",
 			mutate: func(c *Config) {
-				c.Disks.Exclude = []string{"bootdisk", "bootdisk"}
+				c.Disks.Exclude = []string{"mws-bootdisk", "mws-bootdisk"}
 			},
 			wantSub: "listed more than once",
 		},
@@ -500,7 +543,7 @@ func TestValidate_perDiskAdvancedGate(t *testing.T) {
 	cfg.Disks.Exclude = nil
 	cfg.Disks.Selected = []SelectedDiskSpec{
 		{
-			DeviceName: "datadisk",
+			DeviceName: "mws-datadisk",
 			Policy: &PolicySpec{
 				Advanced: &AdvancedSpec{Step: &StepSpec{MinChangeIOPS: intPtr(500)}},
 			},

@@ -429,9 +429,9 @@ func TestRegression_Config_GeneratedYAMLPassesLoadAndValidate(t *testing.T) {
 		// InstallAgent's actual default: agentConfigYAML at
 		// defaultDiscoveryInterval, the config every existing scenario
 		// ships — not a stand-in built from the *WithDisks primitives.
-		"selected (InstallAgent's default)":              {SelectedDisksSpec("data"), defaultDiscoveryInterval},
+		"selected (InstallAgent's default)":              {SelectedDisksSpec("mws-data"), defaultDiscoveryInterval},
 		"auto-discovery, no exclude (A1's shape)":        {AutoDiscoveryDisksSpec(), discoveryScenarioInterval},
-		"auto-discovery, unresolved exclude name (E6's)": {AutoDiscoveryDisksSpec("e2e-exclude-ghost"), discoveryScenarioInterval},
+		"auto-discovery, unresolved exclude name (E6's)": {AutoDiscoveryDisksSpec("mws-e2e-exclude-ghost"), discoveryScenarioInterval},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

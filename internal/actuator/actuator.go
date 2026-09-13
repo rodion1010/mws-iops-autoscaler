@@ -20,7 +20,7 @@ import (
 // that produced current/vm.
 type Target struct {
 	VMName     string
-	DeviceName string // unprefixed (docs/design.md §4.1) — dependent-path target
+	DeviceName string // the exact value VM status reports (docs/design.md §4.1) — dependent-path target
 	DiskName   string // cloud resource name — independent-path target (GetDisk/UpdateDisk)
 	Class      compute.DiskClass
 

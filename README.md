@@ -113,9 +113,9 @@ the VM.
 
 ### 4. Create a configuration
 
-Save the following as `config.yaml`. This example assumes the boot disk is named `bootdisk`;
-change that value only if you assigned it a different device name. Every other supported disk attached
-to the VM is managed automatically:
+Save the following as `config.yaml`. This example assumes the boot disk's device_name (as VM status
+reports it) is `mws-bootdisk`; change that value to match your own VM. Every other supported disk
+attached to the VM is managed automatically:
 
 ```yaml
 apiVersion: autoscaling.mws.cloud/v1alpha1
@@ -130,7 +130,7 @@ policy:
 disks:
   mode: auto-discovery
   exclude:
-    - bootdisk
+    - mws-bootdisk
 
 runtime:
   metrics:
@@ -147,7 +147,7 @@ To manage only named disks, use explicit selection instead:
 disks:
   mode: selected
   selected:
-    - device_name: datadisk
+    - device_name: mws-datadisk
 ```
 
 See the [configuration reference](docs/configuration.md) for validation rules, per-disk limits and the
@@ -239,7 +239,8 @@ own process supervisor:
   IOPS in steps of 100.
 - `disks.mode: auto-discovery` manages discovered supported disks except entries under `exclude`.
 - `disks.mode: selected` manages only entries under `selected`.
-- Disk names are MWS `device_name` values without the `mws-` prefix, not Linux `/dev` paths.
+- Disk names are the platform-visible MWS `device_name` values (the `mws-` prefix included), not
+  Linux `/dev` paths.
 - Disk attachment class is detected automatically; users do not configure the write path.
 - `runtime.metrics.source` must currently be `guest`. `platform` is rejected because that source is not
   implemented yet.

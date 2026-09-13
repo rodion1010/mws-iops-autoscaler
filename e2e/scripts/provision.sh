@@ -106,10 +106,9 @@ if [ -z "$NONAME_DEVICE_NAME" ] || [ "$NONAME_DEVICE_NAME" = "null" ]; then
   echo "provision.sh: could not resolve the server-assigned deviceName for ${VM_NAME}'s ${NONAME_ALIAS} disk" >&2
   exit 1
 fi
-# Target.DeviceName is unprefixed (docs/design.md §4.1); the status form
-# carries the mws- prefix (internal/compute/sdk_client.go trims it the same
-# way for the production discovery path).
-NONAME_DEVICE_NAME="${NONAME_DEVICE_NAME#mws-}"
+# Target.DeviceName is the exact status.storage.disks[].deviceName value
+# already queried above (docs/design.md §4.1), kept as-is rather than
+# transformed.
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes -i "${E2E_SSH_KEY_PATH:?}")
 
@@ -155,9 +154,12 @@ if [ "$fio_ready" != true ]; then
 fi
 
 echo "vm_name=${VM_NAME}"
-echo "device_name=${DEVICE_NAME}"
+# device_name and churn_device_name are emitted as VM status reports them,
+# to match noname_device_name, which already carries that exact value as
+# queried from the live VM status above.
+echo "device_name=mws-${DEVICE_NAME}"
 echo "noname_device_name=${NONAME_DEVICE_NAME}"
-echo "churn_device_name=${CHURN_DEVICE_NAME}"
+echo "churn_device_name=mws-${CHURN_DEVICE_NAME}"
 echo "ssh_host=${EXTERNAL_IP}"
 echo "storage_disk_boot=${BOOT_ENTRY}"
 echo "storage_disk_data=${DATA_ENTRY}"

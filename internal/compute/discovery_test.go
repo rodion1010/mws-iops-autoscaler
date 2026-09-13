@@ -12,8 +12,8 @@ func TestDiscover_classifiesAndResolvesGuestPath(t *testing.T) {
 		Etag:   "etag-1",
 		VMType: "base-2-8",
 		Disks: []StorageDisk{
-			{Alias: "bootdisk", DeviceName: "bootdisk", Class: ClassDependent, DiskName: "iops-test-vm-boot"},
-			{Alias: "datadisk", DeviceName: "datadisk", Class: ClassIndependent, DiskName: "iops-test-vm-data"},
+			{Alias: "bootdisk", DeviceName: "mws-bootdisk", Class: ClassDependent, DiskName: "iops-test-vm-boot"},
+			{Alias: "datadisk", DeviceName: "mws-datadisk", Class: ClassIndependent, DiskName: "iops-test-vm-data"},
 		},
 	}
 	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
@@ -66,6 +66,32 @@ func TestDiscover_classifiesAndResolvesGuestPath(t *testing.T) {
 	}
 	if boot.IdentityKey() == data.IdentityKey() {
 		t.Errorf("bootdisk and datadisk produced the same IdentityKey() (%q) despite different DiskName and IncarnationID", boot.IdentityKey())
+	}
+}
+
+// TestDiscoverPreservesPlatformVisibleDeviceName confirms Discover never
+// transforms DeviceName: it must stay exactly the value VM status reports.
+func TestDiscoverPreservesPlatformVisibleDeviceName(t *testing.T) {
+	c := newFakeClient()
+	c.vms["iops-test-vm"] = &VirtualMachine{
+		Name:   "iops-test-vm",
+		VMType: "base-2-8",
+		Disks: []StorageDisk{
+			{Alias: "data", DeviceName: "mws-data", Class: ClassIndependent, DiskName: "res-data"},
+		},
+	}
+	c.vmTypes["base-2-8"] = &VmType{Name: "base-2-8", VCPUCount: 2}
+	c.disks["res-data"] = &Disk{Name: "res-data", SpecIOPS: 1000}
+
+	vm, skipped, err := Discover(context.Background(), c, "iops-test-vm")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %+v, want none", skipped)
+	}
+	if len(vm.Disks) != 1 || vm.Disks[0].DeviceName != "mws-data" {
+		t.Fatalf("Disks = %+v, want exactly one disk with DeviceName %q", vm.Disks, "mws-data")
 	}
 }
 

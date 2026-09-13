@@ -176,6 +176,85 @@ func TestSelect_selectedDuplicateLiveDeviceNameNeverSilentlyOverwrites(t *testin
 	}
 }
 
+// vmWithDisks builds a VM whose disks carry the exact device_name VM
+// status reports, the same value config selectors must match.
+func vmWithDisks() *compute.VirtualMachine {
+	return &compute.VirtualMachine{
+		Name: "vm-1",
+		Disks: []compute.StorageDisk{
+			{Alias: "boot", DeviceName: "mws-bootdisk", DiskName: "res-boot"},
+			{Alias: "data", DeviceName: "mws-datadisk", DiskName: "res-data"},
+		},
+	}
+}
+
+func TestResolveSelectedByDeviceName(t *testing.T) {
+	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "mws-datadisk"}}}
+	managed, degraded, err := Select(vmWithDisks(), spec, testResolved())
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if len(degraded) != 0 {
+		t.Errorf("degraded = %v, want none", degraded)
+	}
+	if len(managed) != 1 || managed[0].Disk.DeviceName != "mws-datadisk" {
+		t.Fatalf("managed = %+v, want exactly [mws-datadisk]", managed)
+	}
+}
+
+func TestResolveExcludeByDeviceName(t *testing.T) {
+	spec := config.DisksSpec{Mode: "auto-discovery", Exclude: []string{"mws-bootdisk"}}
+	managed, degraded, err := Select(vmWithDisks(), spec, testResolved())
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if len(degraded) != 0 {
+		t.Errorf("degraded = %v, want none", degraded)
+	}
+	if len(managed) != 1 || managed[0].Disk.DeviceName != "mws-datadisk" {
+		t.Fatalf("managed = %+v, want exactly [mws-datadisk] (mws-bootdisk excluded)", managed)
+	}
+}
+
+// TestResolveRawDeviceNameWithMWSPrefix covers a disk whose attach-time
+// deviceName itself started with "mws-": VM status then doubles the
+// prefix, and that doubled value is what config must name.
+func TestResolveRawDeviceNameWithMWSPrefix(t *testing.T) {
+	vm := &compute.VirtualMachine{
+		Name:  "vm-1",
+		Disks: []compute.StorageDisk{{Alias: "data", DeviceName: "mws-mws-data", DiskName: "res-data"}},
+	}
+	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "mws-mws-data"}}}
+	managed, degraded, err := Select(vm, spec, testResolved())
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if len(degraded) != 0 {
+		t.Errorf("degraded = %v, want none", degraded)
+	}
+	if len(managed) != 1 || managed[0].Disk.DiskName != "res-data" {
+		t.Fatalf("managed = %+v, want the disk whose attach-time deviceName was itself \"mws-data\"", managed)
+	}
+}
+
+// TestResolveDeviceNameRequiresExactMatch confirms a config value that
+// differs from the live device_name in any way — not just a missing
+// prefix — is an unresolved name like any other typo, not specially
+// handled.
+func TestResolveDeviceNameRequiresExactMatch(t *testing.T) {
+	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "datadisk"}}}
+	managed, degraded, err := Select(vmWithDisks(), spec, testResolved())
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if len(managed) != 0 {
+		t.Fatalf("managed = %+v, want none — \"datadisk\" is not the exact device_name VM status reports", managed)
+	}
+	if len(degraded) != 1 || degraded[0].DeviceName != "datadisk" || degraded[0].Reason != ReasonSelectedNotFound {
+		t.Fatalf("degraded = %+v, want exactly [{datadisk %s}]", degraded, ReasonSelectedNotFound)
+	}
+}
+
 func TestSelect_policyFallsBackToVMPolicy(t *testing.T) {
 	spec := config.DisksSpec{Mode: "auto-discovery"}
 	managed, _, err := Select(testVM(), spec, testResolved())

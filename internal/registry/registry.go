@@ -37,12 +37,12 @@ const (
 	ReasonExcludeTargetNotFound = "exclude_target_not_found"
 )
 
-// Select applies spec against vm's discovered disks, matching by
-// unprefixed device_name (docs/design.md §4.1), and resolves each one's
-// policy from resolved.DiskPolicies, falling back to resolved.VMPolicy —
-// the inheritance chain docs/configuration.md §5 describes, already
-// computed by config.Resolve; this function only decides which disks it
-// applies to.
+// Select applies spec against vm's discovered disks, matching by the exact
+// device_name VM status reports (docs/design.md §4.1), and resolves each
+// one's policy from resolved.DiskPolicies, falling back to
+// resolved.VMPolicy — the inheritance chain docs/configuration.md §5
+// describes, already computed by config.Resolve; this function only
+// decides which disks it applies to.
 //
 // degraded names every disks.selected or disks.exclude entry that could not
 // be resolved this cycle — Select always returns the managed set it could
@@ -94,9 +94,7 @@ func Select(vm *compute.VirtualMachine, spec config.DisksSpec, resolved *config.
 		// has already had any duplicate device_name attachment excluded
 		// entirely by compute.Discover (issue #4) — so this map can never
 		// silently let a second live disk overwrite a first one under the
-		// same key. That was the other remaining half of this issue's
-		// acceptance criteria ("reject ambiguous duplicate live matches");
-		// it is closed at the source, not re-checked here.
+		// same key.
 		byName := make(map[string]compute.StorageDisk, len(vm.Disks))
 		for _, d := range vm.Disks {
 			byName[d.DeviceName] = d

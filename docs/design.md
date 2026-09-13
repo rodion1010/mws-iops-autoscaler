@@ -144,7 +144,7 @@ contain the complete contracts, edge cases and failure behaviour.
 | Scaling evidence | Utilization only gates evaluation. Scaling requires sustained saturation, and the resource gate checks both IOPS and bandwidth. | §4.4 |
 | Latency and queue signals | Latency values retain their derivation; a baseline may be established while saturated but is then frozen; queue values enter IOPS math only when their unit is compatible. | §4.4, §5.2 |
 | Scale-down demand | Each aligned sample uses the larger of observed IOPS and bandwidth-equivalent IOPS before the percentile is calculated. | §4.5 |
-| Disk identity | `device_name` is the stable user-facing selector; long-lived state also includes the platform incarnation ID. | §4.1, §5.2 |
+| Disk identity | `device_name` — the exact value VM status reports — is the stable user-facing selector; long-lived state also includes the platform incarnation ID. | §4.1, §5.2 |
 | Mutation paths | Independent and dependent disks use class-specific APIs; writes are minimal partial updates and are conditional on fresh IOPS and incarnation state. | §4.7 |
 | Dry run | Independent-disk validation is server-confirmed; dependent-disk validation is explicitly computed-only because the VM API has no validation-only operation. | §4.7 |
 | Time model | Sampling has one process-wide cadence; window readiness and gaps are evaluated from timestamps. | §4.2, §4.4 |
@@ -165,8 +165,8 @@ contain the complete contracts, edge cases and failure behaviour.
    │    disk.spec present → DEPENDENT   (write via VM path)
    │    disk.ref  present → INDEPENDENT (write via disk path)
    │    neither/both resolved → ambiguous class, excluded (issue #4)
-   ├─ read status.storage.disks[].deviceName → "mws-<name>"
-   │    strip the "mws-" prefix → the config identifier (§4.1)
+   ├─ read status.storage.disks[].deviceName
+   │    kept verbatim → the config identifier (§4.1)
    ├─ reject a duplicate disk resource identity or device_name shared by two attachments —
    │    both excluded, neither guessed at as "the real one" (issue #4)
    ├─ reject an empty or duplicate alias — the dependent write path's own join key
@@ -187,8 +187,9 @@ contain the complete contracts, edge cases and failure behaviour.
    (cmd/mws-iops-autoscaler/agent.go's guestPathVerifier — issue #4) — otherwise excluded
 
  apply selection strategy → managed set
-   match config selectors against DeviceName (unprefixed) — never a kernel device path,
-   which is assigned in discovery order and not stable across reboots (§4.1)
+   match config selectors against DeviceName (the exact value VM status reports) —
+   never a kernel device path, which is assigned in discovery order and not stable
+   across reboots (§4.1)
    fleet: the key is (instance, device_name); deviceName is unique per VM, not globally
  resolve EffectivePolicy per disk
 ```
@@ -242,8 +243,9 @@ for.
 
 `fleet` sampling is per-project, not per-disk: one HTTP call yields every disk in the project. Polling
 faster than the platform's 30 s publication interval yields duplicates — the sampler deduplicates on
-`metric_ts` rather than wall clock. The `device_name` label carries the `mws-` prefix, so indexing
-uses `DiskRef.MetricLabel()` rather than the config form.
+`metric_ts` rather than wall clock. Indexing uses `DiskRef.MetricLabel()` — `DeviceName` itself,
+already exactly the value the exported `device_name` label uses, so no translation is needed between
+the two.
 
 The collection interval is process-wide — one Sampler, one source, one tick — set once by
 `runtime.metrics.collection_interval`. There is no per-policy or per-disk override: a single call
@@ -659,12 +661,13 @@ returns `503` masking the real `403`.
 
 ```go
 // DiskRef is the identity of a managed disk, resolved once at discovery.
-// DeviceName is the single identifier shared by config, guest and metrics (§4.1):
-// it is stored unprefixed, and the "mws-" prefix is applied when reading either side.
+// DeviceName is the single identifier shared by config, guest and metrics
+// (§4.1): it is the exact value status.storage.disks[].deviceName reports,
+// and the exact value config selectors must match.
 type DiskRef struct {
     DiskID     string // cloud resource name — used for API writes, never written in config
     VMName     string // (VMName, DeviceName) is the fleet-mode key
-    DeviceName string // unprefixed: "datadisk"
+    DeviceName string // the exact value VM status reports: "mws-datadisk"
 
     // IncarnationID is compute.StorageDisk.IncarnationID (the platform's
     // own metadata.id, docs/platform-reference.md "Disk resource identity"), carried here
@@ -673,9 +676,9 @@ type DiskRef struct {
     IncarnationID string
 }
 
-// GuestPath returns /dev/disk/by-id/mws-<DeviceName>.
+// GuestPath returns /dev/disk/by-id/<DeviceName>.
 func (d DiskRef) GuestPath() string
-// MetricLabel returns the device_name label value: "mws-<DeviceName>".
+// MetricLabel returns the device_name label value: DeviceName itself.
 func (d DiskRef) MetricLabel() string
 // IdentityKey returns DiskID + IncarnationID, combined — the Sampler's
 // own ring-buffer key, and (via compute.StorageDisk's identical method)

@@ -78,7 +78,7 @@ func integrationPolicy() config.ResolvedPolicy {
 func dependentManaged() registry.ManagedDisk {
 	return registry.ManagedDisk{
 		Disk: compute.StorageDisk{
-			Alias: "bootdisk", DeviceName: "bootdisk",
+			Alias: "bootdisk", DeviceName: "mws-bootdisk",
 			Class: compute.ClassDependent, DiskName: platformfake.DependentDisk,
 			IOPS: 1000,
 		},
@@ -89,7 +89,7 @@ func dependentManaged() registry.ManagedDisk {
 func independentManaged() registry.ManagedDisk {
 	return registry.ManagedDisk{
 		Disk: compute.StorageDisk{
-			Alias: "datadisk", DeviceName: "datadisk",
+			Alias: "datadisk", DeviceName: "mws-datadisk",
 			Class: compute.ClassIndependent, DiskName: platformfake.IndependentDisk,
 			IOPS: 1000,
 		},

@@ -38,7 +38,7 @@ func TestGuestSource_coldStartYieldsNoSample(t *testing.T) {
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)
 
-	disks := []DiskRef{{DiskID: "disk-1", DeviceName: "datadisk"}}
+	disks := []DiskRef{{DiskID: "disk-1", DeviceName: "mws-datadisk"}}
 	samples, err := g.Sample(context.Background(), disks)
 	if err != nil {
 		t.Fatalf("Sample: %v", err)
@@ -53,7 +53,7 @@ func TestGuestSource_secondCallYieldsDelta(t *testing.T) {
 	path := writeDiskstats(t, dir, "   8      16 sdb 1000 12 8000 500 2000 34 16000 1000 0 1500 3000\n")
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)
-	disks := []DiskRef{{DiskID: "disk-1", DeviceName: "datadisk"}}
+	disks := []DiskRef{{DiskID: "disk-1", DeviceName: "mws-datadisk"}}
 
 	if _, err := g.Sample(context.Background(), disks); err != nil {
 		t.Fatalf("first Sample: %v", err)
@@ -84,7 +84,7 @@ func TestGuestSource_unresolvableDiskSkipped(t *testing.T) {
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)
 
-	disks := []DiskRef{{DiskID: "disk-2", DeviceName: "ghost-disk"}}
+	disks := []DiskRef{{DiskID: "disk-2", DeviceName: "mws-ghost-disk"}}
 	samples, err := g.Sample(context.Background(), disks)
 	if err != nil {
 		t.Fatalf("Sample: %v", err)
@@ -101,7 +101,7 @@ func TestGuestSource_deviceMissingFromDiskstatsSkipped(t *testing.T) {
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)
 
-	disks := []DiskRef{{DiskID: "disk-1", DeviceName: "datadisk"}}
+	disks := []DiskRef{{DiskID: "disk-1", DeviceName: "mws-datadisk"}}
 	samples, err := g.Sample(context.Background(), disks)
 	if err != nil {
 		t.Fatalf("Sample: %v", err)
@@ -123,7 +123,7 @@ func TestVerifyPath_success(t *testing.T) {
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)
 
-	if err := g.VerifyPath(DiskRef{DiskID: "disk-1", DeviceName: "datadisk"}); err != nil {
+	if err := g.VerifyPath(DiskRef{DiskID: "disk-1", DeviceName: "mws-datadisk"}); err != nil {
 		t.Errorf("VerifyPath: %v", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestVerifyPath_unresolvableSymlink(t *testing.T) {
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)
 
-	err := g.VerifyPath(DiskRef{DiskID: "disk-2", DeviceName: "ghost-disk"})
+	err := g.VerifyPath(DiskRef{DiskID: "disk-2", DeviceName: "mws-ghost-disk"})
 	if err == nil {
 		t.Fatal("VerifyPath succeeded for a device with no resolvable symlink (issue #4)")
 	}
@@ -147,7 +147,7 @@ func TestVerifyPath_deviceMissingFromDiskstats(t *testing.T) {
 	clock := time.Unix(0, 0)
 	g := newTestGuestSource(t, path, &clock)
 
-	err := g.VerifyPath(DiskRef{DiskID: "disk-1", DeviceName: "datadisk"})
+	err := g.VerifyPath(DiskRef{DiskID: "disk-1", DeviceName: "mws-datadisk"})
 	if err == nil {
 		t.Fatal("VerifyPath succeeded for a kernel device missing from /proc/diskstats (issue #4)")
 	}
