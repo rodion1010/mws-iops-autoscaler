@@ -126,11 +126,6 @@ func SmokeIndependentTarget() (Target, error) {
 	}, nil
 }
 
-// Zone returns the scope forwarded to the remote agent.
-func Zone() string {
-	return os.Getenv("MWS_ZONE")
-}
-
 // Project returns the project used by the production credential chain.
 func Project() (string, error) {
 	env, err := requiredEnv("MWS_PROJECT")

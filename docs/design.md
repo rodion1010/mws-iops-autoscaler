@@ -1310,10 +1310,14 @@ not this binary's own job):
 | `-journal <path>` | Decision-journal (§7.2) output file. Default stdout. |
 | `-listen <addr>` | `/metrics`, `/healthz`, `/readyz` (§7.1/§7.3). Default `:9435`. |
 
-Project comes from `MWS_PROJECT` (the SDK's own env var, `go.mws.cloud/go-sdk`'s table above) — not a
-flag, since it's a credential-adjacent value, not a run-mode choice. `runtime.metrics.source: platform`
-in the config is rejected with a clear "not implemented yet" rather than silently falling back to
-guest — `PlatformSource` is M7.
+Project, zone and VM name are resolved from the instance metadata service before `mws.Load`
+(`compute.ResolveSelfIdentity`) — not flags, since they are credential-adjacent values
+tied to the VM the process is actually running on, not a run-mode choice. `MWS_PROJECT`/`MWS_ZONE`
+(the SDK's own env vars, `go.mws.cloud/go-sdk`'s table above) are not read by this binary at all:
+local mode always runs inside the target VM, so there is no scenario in which pointing it at a
+different project or zone than the one it is actually running in would be correct, and no override
+path exists to do so. `runtime.metrics.source: platform` in the config is rejected with a clear "not
+implemented yet" rather than silently falling back to guest — `PlatformSource` is M7.
 
 ### 9.1 Milestones
 

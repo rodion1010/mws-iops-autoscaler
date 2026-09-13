@@ -229,6 +229,18 @@ billed portion. `status.throughput` at 1000 IOPS reads `33554432 Bps` = 32 MiB/s
 
 ---
 
+## VM identity metadata keys [V]
+
+`https://mws.ru/docs/cloud-platform/compute/general/vm-metadata-overview.html#ключи-метаданных`
+
+Used by `compute.ResolveSelfIdentity` to derive local mode's own project, zone and VM name.
+
+| Key | Documented value | Verification |
+|---|---|---|
+| `instance/name` | the VM's own name | **[V]** — the exact key `go.mws.cloud/go-sdk` itself reads internally (`mws/credentials/vm_service_account.go`, `nameKey`) to detect whether it is running on a Compute VM at all |
+| `instance/id` | `projects/{project}/virtualMachines/{vm}` | **[V]** — confirmed against a live VM via the full e2e smoke workflow, which starts the real binary and only reaches its HTTP listener after `ResolveSelfIdentity` has read and parsed this key |
+| `instance/zone` | a bare zone value, e.g. `ru-central1-a` | **[V]** — confirmed the same way; the value is a bare zone, not a qualified path |
+
 ## VM service-account token [V]
 
 `https://mws.ru/docs/cloud-platform/compute/general/vm-link-sa.html`

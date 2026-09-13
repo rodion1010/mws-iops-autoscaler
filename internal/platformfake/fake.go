@@ -14,6 +14,7 @@ import (
 // Disk constants are resource names, not VM attachment aliases.
 const (
 	Project         = "iops-test-project"
+	Zone            = "ru-central1-a"
 	VMName          = "iops-test-vm"
 	DependentDisk   = "iops-test-vm-boot"
 	IndependentDisk = "iops-test-data"
@@ -87,6 +88,8 @@ func New(t *testing.T) *Fake {
 
 	metadataMux := http.NewServeMux()
 	metadataMux.HandleFunc("GET /computeMetadata/v1/instance/name", f.handleMetadataName)
+	metadataMux.HandleFunc("GET /computeMetadata/v1/instance/id", f.handleMetadataID)
+	metadataMux.HandleFunc("GET /computeMetadata/v1/instance/zone", f.handleMetadataZone)
 	f.metadataServer = httptest.NewServer(metadataMux)
 
 	t.Cleanup(func() {
@@ -440,6 +443,19 @@ func (f *Fake) AbortNext(method, path string) {
 func (f *Fake) handleMetadataName(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	_, _ = w.Write([]byte(VMName))
+}
+
+// handleMetadataID serves the documented "projects/{project}/virtualMachines/{vm}"
+// resource ID shape (docs/platform-reference.md).
+func (f *Fake) handleMetadataID(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = w.Write([]byte("projects/" + Project + "/virtualMachines/" + VMName))
+}
+
+// handleMetadataZone serves the fake VM's bare zone.
+func (f *Fake) handleMetadataZone(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = w.Write([]byte(Zone))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

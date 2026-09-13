@@ -196,7 +196,7 @@ func TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart(t *testing.T) {
 	if err := InstallAgentWithDisks(ctx, target, binPath, disks, discoveryScenarioInterval); err != nil {
 		t.Fatalf("install agent: %v", err)
 	}
-	if err := StartAgent(ctx, target, project, false); err != nil {
+	if err := StartAgent(ctx, target, false); err != nil {
 		t.Fatalf("start agent: %v", err)
 	}
 	defer func() {

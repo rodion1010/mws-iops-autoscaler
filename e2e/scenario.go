@@ -299,18 +299,18 @@ func InstallAgentWithDisks(ctx context.Context, t Target, localBinaryPath string
 // whole process almost immediately (docs/design.md §4.1).
 const agentLogPath = remoteWorkDir + "/agent.log"
 
-// StartAgent forwards SDK scope explicitly and confines mutable state to the
-// disposable remote work directory. dryRun appends US-013's -dry-run flag,
-// so the process discovers, samples and decides but applies no change.
-func StartAgent(ctx context.Context, t Target, project string, dryRun bool) error {
-	// env works when RunBackgroundToLog places the command directly after nohup.
-	envAssign := "MWS_PROJECT=" + project
-	if zone := Zone(); zone != "" {
-		envAssign += " MWS_ZONE=" + zone
-	}
+// StartAgent confines mutable state to the disposable remote work
+// directory and appends US-013's -dry-run flag when dryRun is set, so the
+// process discovers, samples and decides but applies no change.
+//
+// Neither MWS_PROJECT nor MWS_ZONE is forwarded: local mode resolves its
+// own project and zone from the VM's instance metadata, and it no longer
+// reads either variable at all, so forwarding one would only pass an
+// environment override the agent doesn't act on.
+func StartAgent(ctx context.Context, t Target, dryRun bool) error {
 	cmd := fmt.Sprintf(
-		"env %s %s/mws-iops-autoscaler -config %s/config.yaml -state-dir %s/state -journal %s/journal.jsonl -listen :9435",
-		envAssign, remoteWorkDir, remoteWorkDir, remoteWorkDir, remoteWorkDir,
+		"%s/mws-iops-autoscaler -config %s/config.yaml -state-dir %s/state -journal %s/journal.jsonl -listen :9435",
+		remoteWorkDir, remoteWorkDir, remoteWorkDir, remoteWorkDir,
 	)
 	if dryRun {
 		cmd += " -dry-run"
@@ -570,7 +570,7 @@ func runAgentScenarioWithDisksErr(ctx context.Context, target Target, project st
 	if err := InstallAgentWithDisks(ctx, target, binPath, disks, discoveryInterval); err != nil {
 		return fmt.Errorf("install agent: %w", err)
 	}
-	if err := StartAgent(ctx, target, project, dryRun); err != nil {
+	if err := StartAgent(ctx, target, dryRun); err != nil {
 		return fmt.Errorf("start agent: %w", err)
 	}
 	agentStarted := time.Now()

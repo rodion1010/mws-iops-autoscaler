@@ -45,9 +45,9 @@ Both MWS attachment models are supported. An **independent** disk is updated thr
 
 Before starting the agent, prepare the following:
 
-- An **MWS Cloud project** with the Compute service enabled, and the availability zone containing the
-  target VM. Set both as `MWS_PROJECT` and `MWS_ZONE`; without `MWS_ZONE`, the MWS SDK defaults to
-  `ru-central1-a`.
+- An **MWS Cloud project** with the Compute service enabled. Local mode derives the project, zone and
+  VM name from the VM's own instance metadata — no environment variable names them, since the agent
+  always runs inside the target VM and there is no scenario where a different value would be correct.
 - A Linux MWS VM with at least one attached **NBS-PL2** disk. The guest must expose each managed disk
   as `/dev/disk/by-id/mws-<device_name>` and expose `/proc/diskstats`.
 - An MWS service account attached to that VM. Grant it `compute.editor` in the project so the agent can
@@ -167,11 +167,10 @@ status 1 and reports every detected violation.
 
 ### 6. Start in dry-run mode
 
-Set the project name used by the MWS SDK, create a local state directory and start the agent:
+Create a local state directory and start the agent — no project or zone environment variable is
+needed inside the VM:
 
 ```bash
-export MWS_PROJECT='<project-name>'
-export MWS_ZONE='<vm-zone>'
 mkdir -p ./var
 
 ./bin/mws-iops-autoscaler \
@@ -215,9 +214,6 @@ After the dry-run decisions match your expectations, stop the process and start 
 `-dry-run`:
 
 ```bash
-export MWS_PROJECT='<project-name>'
-export MWS_ZONE='<vm-zone>'
-
 ./bin/mws-iops-autoscaler \
   -config ./config.yaml \
   -state-dir /var/lib/mws-iops-autoscaler \
@@ -231,7 +227,6 @@ restarts: `budget.jsonl` is the durable record that enforces the trailing 24-hou
 The repository does not currently ship a package or service unit. When placing the binary under your
 own process supervisor:
 
-- pass `MWS_PROJECT` and `MWS_ZONE` explicitly;
 - run exactly one agent for a target VM;
 - restart on failure and stop with `SIGTERM`;
 - preserve the state directory;
@@ -263,10 +258,13 @@ own process supervisor:
 | `-journal <path>` | JSON Lines decision journal; stdout when omitted | stdout |
 | `-listen <addr>` | Address serving `/metrics`, `/healthz` and `/readyz` | `:9435` |
 
-`MWS_PROJECT` and `MWS_ZONE` select the project and availability zone of the target VM. Set both
-explicitly at runtime; if `MWS_ZONE` is omitted, the SDK defaults to `ru-central1-a`. They are
-intentionally environment variables rather than command-line flags. The MWS Go SDK obtains
-credentials from the service account attached to the VM through the instance metadata service.
+Local mode resolves its own project, zone and VM name from the VM's instance metadata service before
+starting. The MWS Go SDK separately obtains credentials from the service account attached to the VM,
+also through the instance metadata service.
+
+`MWS_PROJECT` and `MWS_ZONE` — the MWS Go SDK's own environment variables — are not read by this
+agent at all: local mode always runs inside the target VM, so there is no scenario where pointing it
+at a different project or zone than the one it is actually running in would be correct.
 
 ## Observability
 
@@ -291,8 +289,6 @@ policy are not defined yet; this is tracked in [issue #59](https://github.com/ro
 
 | Symptom | What to check |
 |---|---|
-| `MWS_PROJECT must be set` | Export the exact MWS project name in the agent process environment. |
-| VM cannot be found during initial discovery | Verify that `MWS_ZONE` exactly matches the target VM's availability zone. |
 | Cannot resolve VM identity or credentials | Run inside the target MWS VM; verify its attached service account and metadata access with the command above. |
 | Compute API returns 403 | Verify that Compute is enabled and the service account has `compute.editor`. For a dependent disk, also check the upstream IAM workaround in Prerequisites. |
 | `/readyz` reports `discovery_succeeded: false` | Check API connectivity, permissions and that at least one supported attached disk matches the selection. |

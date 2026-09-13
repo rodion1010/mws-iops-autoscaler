@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -28,6 +29,25 @@ func freePort(t *testing.T) string {
 	return l.Addr().String()
 }
 
+// withoutEnv drops the named variables from env — used so this test proves
+// the binary derives its identity from instance metadata regardless of
+// what the parent process happens to have set, not merely because nothing
+// filled MWS_PROJECT/MWS_ZONE this time.
+func withoutEnv(env []string, names ...string) []string {
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	filtered := env[:0:0]
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if !drop[key] {
+			filtered = append(filtered, kv)
+		}
+	}
+	return filtered
+}
+
 func TestSmoke_BinaryStartsServesHealthAndShutsDownCleanly(t *testing.T) {
 	f := platformfake.New(t)
 
@@ -45,11 +65,13 @@ func TestSmoke_BinaryStartsServesHealthAndShutsDownCleanly(t *testing.T) {
 		"-journal", filepath.Join(dir, "journal.jsonl"),
 		"-listen", addr,
 	)
-	cmd.Env = append(os.Environ(),
+	// MWS_PROJECT and MWS_ZONE are deliberately excluded, even if the
+	// parent process happens to have them set: local mode must derive both
+	// from the fake VM's own instance metadata.
+	cmd.Env = append(withoutEnv(os.Environ(), "MWS_PROJECT", "MWS_ZONE"),
 		"MWS_BASE_ENDPOINT="+f.BaseURL(),
 		"MWS_COMPUTE_METADATA_HOST="+f.MetadataURL(),
 		"MWS_TOKEN=smoke-token",
-		"MWS_PROJECT="+platformfake.Project,
 	)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr

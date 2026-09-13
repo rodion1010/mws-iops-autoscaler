@@ -87,25 +87,21 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	}
 	resolved := config.Resolve(cfg)
 
-	project := os.Getenv("MWS_PROJECT")
-	if project == "" {
-		return fmt.Errorf("MWS_PROJECT must be set (go.mws.cloud/go-sdk's own project env var)")
+	identity, err := compute.ResolveSelfIdentity(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve own VM identity (US-002): %w", err)
 	}
+	vmName := identity.VMName
 
 	// NFR-8: at least 30s, never the SDK's 5s default — endpoint discovery
 	// alone was measured at 15s.
-	sdk, err := mws.Load(ctx, mws.WithDefaultProject(project), mws.WithTimeout(30*time.Second))
+	sdk, err := mws.Load(ctx, mws.WithDefaultProject(identity.Project), mws.WithDefaultZone(identity.Zone), mws.WithTimeout(30*time.Second))
 	if err != nil {
 		return fmt.Errorf("load MWS SDK credentials: %w", err)
 	}
-	client, err := compute.NewSDKClient(ctx, sdk, project)
+	client, err := compute.NewSDKClient(ctx, sdk, identity.Project)
 	if err != nil {
 		return fmt.Errorf("build Compute API client: %w", err)
-	}
-
-	vmName, err := compute.SelfVMName(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve own VM identity (US-002): %w", err)
 	}
 
 	source := metrics.NewGuestSource()
