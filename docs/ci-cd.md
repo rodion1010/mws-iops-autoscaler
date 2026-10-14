@@ -112,7 +112,7 @@ backstop teardown step — rather than by the job-level kill.
 
 | Workflow | `go test -timeout` | Worst-case test budget | `timeout-minutes` |
 |---|---|---|---|
-| `e2e-pr.yml` (smoke) | 40m | ~36m (seven `TestSmoke_*` scenarios, 5–6m each) | 45 |
+| `e2e-pr.yml` (smoke) | 55m | ~49m (nine `TestSmoke_*` scenarios, 5–7m each) | 60 |
 | `e2e-full.yml` (full) | 78m | ~77m (shared fixture's 15m provisioning context, paid once, + each `TestFull_*` test's own context + teardown's `recoveryContext`) | 90 |
 
 Recompute the relevant worst-case sum before shrinking either `timeout-minutes` value, and again

@@ -229,6 +229,14 @@ disk.policy → vm.policy → platform default
 
 An object inherits the whole policy, then overrides only the fields it sets explicitly.
 
+**`limits.min_iops` is always a per-disk floor, never a VM- or project-aggregate minimum.** The
+platform bills and enforces the 1000-IOPS minimum per disk, not as a pool shared across a VM's disks —
+inheritance gives each disk its own resolved `min_iops` (disk override, else `vm.policy`, else platform
+default), the same number a `fleet`-mode VM- or project-level override would also resolve to for any
+disk that doesn't set its own. There is no mechanism, and none is planned, for a VM- or project-level
+`min_iops` to mean "at least this much, summed across the VM's disks" — an aggregate reading would just
+need dividing among disks somehow, which reduces to the per-disk override this schema already has.
+
 ---
 
 ## 6. Examples
@@ -382,6 +390,10 @@ value, and maintenance windows.
   unknown key like any other superseded field
 - `saturation.utilization_threshold`, `target.scale_up_utilization`, or `target.scale_down_utilization`
   outside `(0, 1]`, or non-finite (`NaN`/`Inf` — see below)
+- `target.scale_down_utilization` not strictly below `target.scale_up_utilization` — this gap is the
+  hysteresis margin a downscale leaves before the next cycle could re-trigger an upscale; closing or
+  inverting it invites flapping, the same reasoning as the `scale_down_window`/`scale_up_window` rule
+  above
 - `saturation.queue_depth_threshold` ≤ 0 (strictly positive, not merely non-negative: at exactly 0 the
   queue-depth gate degenerates to always-true given a non-negative queue depth, and
   `utilization_threshold` alone would decide saturation — issue #6), or non-finite

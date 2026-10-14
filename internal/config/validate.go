@@ -128,6 +128,13 @@ func validateResolvedPolicy(path string, rp ResolvedPolicy) []error {
 			"%s.advanced.evaluation: scale_down_window (%s) is shorter than scale_up_window (%s) — invites flapping",
 			path, rp.Advanced.ScaleDownWindow, rp.Advanced.ScaleUpWindow))
 	}
+	if rp.Advanced.ScaleDownUtilization >= rp.Advanced.ScaleUpUtilization {
+		errs = append(errs, fmt.Errorf(
+			"%s.advanced.target: scale_down_utilization (%v) is not below scale_up_utilization (%v) — "+
+				"the gap between them is the hysteresis margin a downscale leaves before the next upscale threshold; "+
+				"closing or inverting it invites flapping",
+			path, rp.Advanced.ScaleDownUtilization, rp.Advanced.ScaleUpUtilization))
+	}
 	if rp.Advanced.CooldownScaleUp > rp.Advanced.ScaleUpWindow {
 		errs = append(errs, fmt.Errorf(
 			"%s.advanced.cooldown.scale_up: %s is longer than scale_up_window (%s) — the agent could never act",

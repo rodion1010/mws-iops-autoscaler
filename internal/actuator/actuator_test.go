@@ -102,6 +102,30 @@ func TestApply_independentDiskWritesAndVerifies(t *testing.T) {
 	}
 }
 
+func TestApply_independentDiskScaleDownWritesAndVerifies(t *testing.T) {
+	// Every other independent-disk test here exercises ActionScaleUp; Apply's own
+	// action check (line ~67) accepts ActionScaleDown identically, but nothing had
+	// exercised that path through this package before.
+	c := &fakeClient{disks: map[string]*compute.Disk{
+		"datadisk-res": {Name: "datadisk-res", SpecIOPS: 3000, Etag: "etag-1"},
+	}}
+	a := NewComputeActuator(c)
+
+	d := decider.Decision{DiskID: "datadisk", Action: decider.ActionScaleDown, Current: 3000, Target: 1000}
+	target := Target{DiskName: "datadisk-res", Class: compute.ClassIndependent}
+
+	got, err := a.Apply(context.Background(), d, target, false, "idem-1")
+	if err != nil {
+		t.Fatalf("Apply (scale down): %v", err)
+	}
+	if got.IOPS != 1000 {
+		t.Errorf("Applied.IOPS = %d, want 1000", got.IOPS)
+	}
+	if c.disks["datadisk-res"].SpecIOPS != 1000 {
+		t.Errorf("fake disk SpecIOPS = %d, want 1000", c.disks["datadisk-res"].SpecIOPS)
+	}
+}
+
 func TestApply_independentDryRunDoesNotMutate(t *testing.T) {
 	c := &fakeClient{disks: map[string]*compute.Disk{
 		"datadisk-res": {Name: "datadisk-res", SpecIOPS: 1000, Etag: "etag-1"},
@@ -143,6 +167,29 @@ func TestApply_dependentDiskWrites(t *testing.T) {
 	}
 	if got.IOPS != 2000 {
 		t.Errorf("Applied.IOPS = %d, want 2000", got.IOPS)
+	}
+}
+
+func TestApply_dependentDiskScaleDownWrites(t *testing.T) {
+	c := &fakeClient{vms: map[string]*compute.VirtualMachine{
+		"vm-1": {
+			Name: "vm-1", Etag: "etag-1",
+			Disks: []compute.StorageDisk{
+				{Alias: "bootdisk", DeviceName: "bootdisk", Class: compute.ClassDependent, IOPS: 3000},
+			},
+		},
+	}}
+	a := NewComputeActuator(c)
+
+	d := decider.Decision{DiskID: "bootdisk", Action: decider.ActionScaleDown, Current: 3000, Target: 1000}
+	target := Target{VMName: "vm-1", DeviceName: "bootdisk", Class: compute.ClassDependent}
+
+	got, err := a.Apply(context.Background(), d, target, false, "idem-1")
+	if err != nil {
+		t.Fatalf("Apply (scale down): %v", err)
+	}
+	if got.IOPS != 1000 {
+		t.Errorf("Applied.IOPS = %d, want 1000", got.IOPS)
 	}
 }
 

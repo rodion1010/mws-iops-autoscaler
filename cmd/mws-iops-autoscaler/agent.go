@@ -373,8 +373,13 @@ func (a *Agent) reconcile(ctx context.Context) {
 		}
 	}
 
-	// Aggregate the VM-wide gauge once to avoid last-disk-wins.
+	// Aggregate the VM-wide gauges once to avoid last-disk-wins.
 	anyVMCapReached := false
+	// minIOPSSum is a static-configuration check, unrelated to anyVMCapReached's
+	// dynamic demand signal: it can be non-zero even on a VM with zero load,
+	// whenever the operator's own per-disk min_iops floors already add up to
+	// more than this VM's real pool.
+	var minIOPSSum int64
 
 	for _, m := range managed {
 		diskID := m.Disk.DiskName
@@ -401,6 +406,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 		vm := decider.VMState{IOPSPool: iopsPool, SiblingP95IOPS: siblingP95, SiblingDemandUnknown: siblingDemandUnknown}
 
 		ep := toEffectivePolicy(m.Policy)
+		minIOPSSum += ep.MinIOPS
 		// Cooldown and budget state must not survive disk replacement.
 		gState := a.tracker.State(m.Disk.IdentityKey(), now)
 
@@ -433,6 +439,14 @@ func (a *Agent) reconcile(ctx context.Context) {
 	}
 
 	a.telemetry.RecordVMCapReached(a.vmName, anyVMCapReached)
+
+	if len(managed) > 0 {
+		floorExceedsPool := minIOPSSum > iopsPool
+		if floorExceedsPool {
+			log.Printf("reconcile: this VM's managed disks' configured min_iops floors sum to %d, which exceeds its real IOPS pool of %d — these floors cannot all be honored simultaneously regardless of load", minIOPSSum, iopsPool)
+		}
+		a.telemetry.RecordVMMinIOPSFloorExceedsPool(a.vmName, floorExceedsPool)
+	}
 }
 
 func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.Decision, now time.Time) {

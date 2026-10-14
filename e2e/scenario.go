@@ -28,6 +28,12 @@ func recoveryContext() (context.Context, context.CancelFunc) {
 // e2eScaleUpWindow drives both agent configuration and result validation.
 const e2eScaleUpWindow = 30 * time.Second
 
+// e2eScaleDownWindow mirrors e2eScaleUpWindow for the down direction. It
+// must stay >= e2eScaleUpWindow (internal/config/validate.go's
+// scale_down_window < scale_up_window rule) — 60s against 30s leaves that
+// margin without materially slowing the scale-down scenarios down.
+const e2eScaleDownWindow = 60 * time.Second
+
 // defaultDiscoveryInterval is agentConfigYAML's discovery_interval, unchanged
 // since before DisksSpec existed. Every existing scenario relies on it.
 const defaultDiscoveryInterval = 5 * time.Minute
@@ -103,7 +109,7 @@ policy:
   limits: {min_iops: 1000, max_iops: 10000}
   advanced:
     enabled: true
-    evaluation: {scale_up_window: %s, scale_down_window: 60s}
+    evaluation: {scale_up_window: %s, scale_down_window: %s}
     saturation: {utilization_threshold: 0.90, queue_depth_threshold: 0.5}
     cooldown: {scale_up: 10s, scale_down: 20s}
 
@@ -111,7 +117,7 @@ policy:
 runtime:
   metrics: {source: guest, collection_interval: 5s}
   controller: {reconcile_interval: 10s, discovery_interval: %s}
-`, e2eScaleUpWindow, disksBlockYAML(disks), discoveryInterval)
+`, e2eScaleUpWindow, e2eScaleDownWindow, disksBlockYAML(disks), discoveryInterval)
 }
 
 // Bracketed patterns prevent pkill from matching its own command line.
@@ -412,6 +418,50 @@ func waitForScaleUp(ctx context.Context, client compute.Client, t Target, timeou
 	}
 }
 
+// WaitForScaleDown is WaitForScaleUp's mirror: it requires an observed
+// baseline and rejects a drop that occurs before the agent's scale-down
+// window could have produced it. t.BaselineIOPS here is the elevated
+// starting point a "scale-down after quiet" scenario drives the disk to
+// before stopping its load, not the disk's original resting value — the
+// same way WaitForScaleUp's baseline is whatever value was live when the
+// agent started, not a platform-wide constant.
+func WaitForScaleDown(ctx context.Context, client compute.Client, t Target, timeout time.Duration, agentStarted time.Time) (int64, error) {
+	return waitForScaleDown(ctx, client, t, timeout, e2eScaleDownWindow, 5*time.Second, agentStarted)
+}
+
+// waitForScaleDown exposes timing for deterministic regression tests, mirroring waitForScaleUp.
+func waitForScaleDown(ctx context.Context, client compute.Client, t Target, timeout, minScaleDown, pollInterval time.Duration, agentStarted time.Time) (int64, error) {
+	deadline := time.Now().Add(timeout)
+	observedBaseline := false
+	for {
+		current, err := CurrentIOPS(ctx, client, t)
+		if err != nil {
+			return 0, fmt.Errorf("e2e: wait for scale-down: %w", err)
+		}
+		if !observedBaseline {
+			if current != t.BaselineIOPS {
+				return 0, fmt.Errorf("e2e: wait for scale-down: precondition: first observation is %d, want baseline %d — the disk is already off baseline (leftover elevation from a prior run or a stale read); refusing to credit it as scale-down",
+					current, t.BaselineIOPS)
+			}
+			observedBaseline = true
+		} else if current < t.BaselineIOPS {
+			if elapsed := time.Since(agentStarted); elapsed < minScaleDown {
+				return 0, fmt.Errorf("e2e: wait for scale-down: observed %d below baseline %d after %s — before the %s scale-down window could elapse since the agent started, so this cannot be this scenario's own scale-down (leftover reduction or a racing writer); failing closed",
+					current, t.BaselineIOPS, elapsed, minScaleDown)
+			}
+			return current, nil
+		}
+		if time.Now().After(deadline) {
+			return current, fmt.Errorf("e2e: wait for scale-down: still at %d after %s (baseline %d)", current, timeout, t.BaselineIOPS)
+		}
+		select {
+		case <-ctx.Done():
+			return current, ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
 // FetchJournal returns diagnostic output; it does not determine success.
 func FetchJournal(ctx context.Context, t Target) string {
 	out, err := t.Run(ctx, "cat "+remoteWorkDir+"/journal.jsonl 2>/dev/null || true")
@@ -523,6 +573,49 @@ func AssertNoIOPSChange(ctx context.Context, client compute.Client, t Target, du
 	}
 }
 
+// countActuatingTransitions walks recs in the journal's own file-append
+// order (journalRecords does not reorder them) and counts how many times an
+// actuating record's Action differs from the previous actuating record's —
+// "scale_up" followed later by "scale_down", or vice versa. Intervening
+// no_action/vm_cap_reached records are skipped: they never actuate, so they
+// cannot contribute to flapping (design.md §8.3's "no flapping" scenario is
+// about alternating real IOPS changes, not alternating decision reasons).
+// A scenario with zero or one actuating record returns 0 — there is nothing
+// to alternate between yet.
+func countActuatingTransitions(recs []journalRecord) int {
+	transitions := 0
+	last := ""
+	for _, rec := range recs {
+		if rec.Action != "scale_up" && rec.Action != "scale_down" {
+			continue
+		}
+		if last != "" && rec.Action != last {
+			transitions++
+		}
+		last = rec.Action
+	}
+	return transitions
+}
+
+// AssertBoundedFlapping fetches the current journal and fails if the number
+// of alternating scale_up/scale_down actuations exceeds maxTransitions —
+// design.md §8.3's "no flapping" scenario: "alternating bursts around the
+// threshold → changes <= expected given hysteresis and cooldown." It is a
+// point-in-time check, not a wait: a scenario calls it after driving its
+// load pattern and letting enough cycles elapse for the journal to reflect
+// it, the same way AssertNoIOPSChange is called after a duration has
+// already passed rather than polling for a condition to become true.
+func AssertBoundedFlapping(ctx context.Context, t Target, maxTransitions int) error {
+	recs, err := journalRecords(ctx, t)
+	if err != nil {
+		return fmt.Errorf("e2e: assert bounded flapping: %w", err)
+	}
+	if got := countActuatingTransitions(recs); got > maxTransitions {
+		return fmt.Errorf("e2e: assert bounded flapping: %d scale_up/scale_down alternations, want <= %d — hysteresis/cooldown should have suppressed this", got, maxTransitions)
+	}
+	return nil
+}
+
 // runAgentScenario builds, installs and starts the agent against target,
 // calls run once it is up, and stops it afterward — the sequence every
 // scenario test in this package repeats identically before diverging into
@@ -592,14 +685,73 @@ func runAgentScenarioWithDisksErr(ctx context.Context, target Target, project st
 	return nil
 }
 
+// runScaleDownAgentScenario is runAgentScenario for the two scale-down
+// scenarios only: it builds the e2e_scaledown-tagged binary
+// (allowScaleDown = true, cmd/mws-iops-autoscaler/allowscaledown_e2e.go)
+// instead of the production-default one every other scenario in this
+// package installs. Otherwise identical to runAgentScenarioWithDisksErr —
+// kept as a separate function rather than a parameter on the shared one so
+// no existing call site has to change, and so which binary a scenario uses
+// stays visible at its own call site rather than threaded through a shared
+// helper's signature.
+func runScaleDownAgentScenario(t *testing.T, ctx context.Context, target Target, project string, dryRun bool, run func(agentStarted time.Time) error) {
+	t.Helper()
+	if err := runScaleDownAgentScenarioErr(ctx, target, project, dryRun, SelectedDisksSpec(target.DeviceName), defaultDiscoveryInterval, run); err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+func runScaleDownAgentScenarioErr(ctx context.Context, target Target, project string, dryRun bool, disks DisksSpec, discoveryInterval time.Duration, run func(agentStarted time.Time) error) error {
+	binPath, err := BuildAgentBinaryWithTags(ctx, "..", "e2e_scaledown")
+	if err != nil {
+		return fmt.Errorf("build e2e_scaledown agent binary: %w", err)
+	}
+	defer os.Remove(binPath)
+
+	if err := InstallAgentWithDisks(ctx, target, binPath, disks, discoveryInterval); err != nil {
+		return fmt.Errorf("install agent: %w", err)
+	}
+	if err := StartAgent(ctx, target, dryRun); err != nil {
+		return fmt.Errorf("start agent: %w", err)
+	}
+	agentStarted := time.Now()
+	defer func() {
+		stopCtx, stopCancel := recoveryContext()
+		defer stopCancel()
+		_ = StopAgent(stopCtx, target)
+	}()
+
+	if err := run(agentStarted); err != nil {
+		diagnosticCtx, diagnosticCancel := recoveryContext()
+		journal := FetchJournal(diagnosticCtx, target)
+		diagnosticCancel()
+		return fmt.Errorf("%w\njournal:\n%s", err, journal)
+	}
+	return nil
+}
+
 // BuildAgentBinary cross-compiles the agent for the target's guest OS
 // (linux/amd64 — every MWS VM shape this project targets) into a temp file
 // and returns its path. The caller is responsible for removing it.
 func BuildAgentBinary(ctx context.Context, moduleDir string) (string, error) {
-	out := filepath.Join(os.TempDir(), "mws-iops-autoscaler-e2e")
-	cmd := buildCommand(ctx, moduleDir, out)
+	return BuildAgentBinaryWithTags(ctx, moduleDir)
+}
+
+// BuildAgentBinaryWithTags is BuildAgentBinary with extra build tags — used
+// exclusively to build the e2e_scaledown binary the scale-down scenarios
+// need (allowscaledown_e2e.go), so allowScaleDown stays a compile-time
+// decision baked into a separate binary rather than a runtime toggle any
+// scenario could flip (cmd/mws-iops-autoscaler/allowscaledown_prod.go).
+// Every other scenario keeps calling BuildAgentBinary and is unaffected.
+func BuildAgentBinaryWithTags(ctx context.Context, moduleDir string, tags ...string) (string, error) {
+	name := "mws-iops-autoscaler-e2e"
+	if len(tags) > 0 {
+		name += "-" + strings.Join(tags, "-")
+	}
+	out := filepath.Join(os.TempDir(), name)
+	cmd := buildCommand(ctx, moduleDir, out, tags...)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("e2e: build agent binary: %w: %s", err, output)
+		return "", fmt.Errorf("e2e: build agent binary (tags=%v): %w: %s", tags, err, output)
 	}
 	return out, nil
 }

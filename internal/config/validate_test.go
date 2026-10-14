@@ -189,6 +189,32 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "invites flapping",
 		},
 		{
+			name: "scale_down_utilization not below scale_up_utilization",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Target: &TargetSpec{
+						ScaleUpUtilization:   floatPtr(0.70),
+						ScaleDownUtilization: floatPtr(0.70),
+					},
+				}
+			},
+			wantSub: "invites flapping",
+		},
+		{
+			name: "scale_down_utilization above scale_up_utilization",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Target: &TargetSpec{
+						ScaleUpUtilization:   floatPtr(0.70),
+						ScaleDownUtilization: floatPtr(0.85),
+					},
+				}
+			},
+			wantSub: "invites flapping",
+		},
+		{
 			name: "cooldown.scale_up longer than scale_up_window",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{

@@ -1069,6 +1069,7 @@ iops_autoscaler_writes_total{path,outcome}                    counter   path=dis
 iops_autoscaler_write_duration_seconds{path}                  histogram
 iops_autoscaler_vm_headroom_iops{disk,vm}                     gauge
 iops_autoscaler_vm_cap_reached{vm}                            gauge 0|1
+iops_autoscaler_vm_min_iops_floor_exceeds_pool{vm}             gauge 0|1
 iops_autoscaler_metric_source{disk,source}                    gauge  guest|platform
 iops_autoscaler_metric_staleness_seconds{disk}                gauge
 iops_autoscaler_window_fill_ratio{disk,direction}             gauge
@@ -1101,6 +1102,15 @@ every managed disk on that VM has been decided, where `anyCapped` is the OR acro
 Previously `RecordDecision` set it per disk inside the loop, so whichever disk was decided last would
 silently overwrite an earlier disk's `ActionVMCapReached` — a VM where one disk capped and a
 later-processed disk did not could export `vm_cap_reached=0`.
+
+`vm_min_iops_floor_exceeds_pool` is `vm_cap_reached`'s static counterpart, not a duplicate of it: it
+sums each managed disk's own resolved `min_iops` (configuration.md §5 — disk > vm > platform default)
+across every disk sharing the VM and compares that sum against the VM's real pool (`VMIOPSPool`, §4.6),
+independent of any observed load. `vm_cap_reached` says demand is currently outrunning the pool;
+`vm_min_iops_floor_exceeds_pool` says the operator's own configured floors already cannot all be
+honored at once, even with every disk sitting idle — a configuration problem to fix in the config file,
+not a signal that the VM needs more vCPU. Set once per reconcile cycle the same way `vm_cap_reached` is,
+over managed disks only (an unmanaged sibling's `min_iops` is not this agent's to account for).
 
 `metric_source{disk,source}` sets **both** the guest and platform series on every call — the active
 source's to 1, the other to 0 — rather than only ever setting the active one to 1. A `GaugeVec` only

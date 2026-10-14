@@ -121,10 +121,10 @@ existed.
 
 ### Scenario coverage — what's actually implemented today
 
-`docs/design.md` §8.3 lists ten scenarios as the accepted end state. Today, **seven** of them are
+`docs/design.md` §8.3 lists ten scenarios as the accepted end state. Today, **nine** of them are
 covered — each disk's class asserted (`AssertDiskClass`) rather than trusted from a naming convention.
-The remaining three depend on features that don't exist yet. Recorded here honestly rather than as a
-coverage claim the code doesn't back up yet:
+The remaining one (VM cap detection) depends on a fix that doesn't exist yet. Recorded here honestly
+rather than as a coverage claim the code doesn't back up yet:
 
 | §8.3 scenario | Status |
 |---|---|
@@ -136,10 +136,19 @@ coverage claim the code doesn't back up yet:
 | Cold start | Implemented, smoke tier (`TestSmoke_Decisions_ScaleUpFromColdStart`) — load is already present when the agent starts, so its first samples show saturation with no established baseline yet |
 | VM cap detection | Not implemented — this row is §8.3's original scenario, loading *both managed* smoke-tier disks past the pool together; already correctly summed today without needing any fix. See "VM headroom coverage" below for the separate, narrower unmanaged-sibling gap (D4/US-009, E5) |
 | Bandwidth-bound case | Implemented, smoke tier (`TestSmoke_Decisions_ScaleUpOnBandwidthSaturation`) — a large-block, high-depth load that saturates bandwidth while ops stay under the IOPS-utilization threshold. Asserts saturation was *detected* via the journal reasons only reachable from `decider.go`'s saturated branch (the IOPS-utilization reading is logged, not asserted on — a single newest-sample value, not a window average) — not that a scale-up necessarily follows, since `demand()`'s ops-denominated estimate may legitimately fail to clear the scale-up ratio against a bandwidth-bound workload. A `target_not_above_current` outcome here is a real, reportable gap in the demand estimator, not a test bug |
-| Scale-down after quiet | Not implemented — the feature itself doesn't exist yet (`allowScaleDown = false`, Phase 1 scope) |
-| No flapping | Not implemented — depends on scale-down |
+| Scale-down after quiet | Implemented, smoke tier (`TestSmoke_Decisions_ScaleDownAfterQuiet`) — elevates the disk directly (`ResetDiskToBaseline` against a non-default value, the same production write path `Preflight`/`Cleanup` already use), then starts the agent against an idle disk and asserts the limit drops, never below `min_iops`. Scale-down's decision logic and write path are both complete and unit-tested (`internal/analyzer`, `internal/decider`, `internal/actuator`, `internal/compute`) — what this scenario proves is the full stack wired together live, which only needed exercising, not building |
+| No flapping | Implemented, smoke tier (`TestSmoke_Decisions_NoFlapping`) — drives two alternating above-threshold/quiet cycles and asserts the journal shows no more `scale_up`/`scale_down` alternations than that pattern could legitimately produce (`AssertBoundedFlapping`), not that a specific count occurs: cooldown, the demand estimator's own gaps, or the 24h budget may each legitimately suppress an individual actuation outright |
 
-See `docs/TODO.md` for VM cap detection and the scale-down-dependent rows.
+**Both of the above need `allowScaleDown = true`, which stays `false` in every production build** (PRD
+Phase 3, `cmd/mws-iops-autoscaler/main.go`'s `allowscaledown_prod.go`). They build and install a
+separate binary via `BuildAgentBinaryWithTags(ctx, moduleDir, "e2e_scaledown")`, which links
+`allowscaledown_e2e.go` instead — a compile-time-only substitution, never a runtime flag, so the
+capability stays exactly as non-configurable as design.md requires. Every other scenario in this
+package keeps installing the ordinary, production-default binary; `go test -tags e2e ./e2e/...` builds
+both binaries as needed without any extra flag on the outer command.
+
+See `docs/TODO.md` for VM cap detection and the remaining Phase 3 gate (soak/chaos, calibration, and
+the production flag flip itself).
 
 ### Discovery and scope coverage — what's actually implemented today
 

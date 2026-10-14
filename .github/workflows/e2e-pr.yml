@@ -18,7 +18,7 @@ jobs:
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     # Budget derivation is in docs/ci-cd.md's "Timeout budgets" — recompute
     # before shrinking this or adding a TestSmoke_* scenario.
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       # Pin third-party actions because this runner has cloud credentials.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,7 +50,7 @@ jobs:
         # The harness builds the agent dynamically, so cached test results are unsafe.
         # -timeout budget, and why there's no backstop teardown step here:
         # docs/ci-cd.md's "Timeout budgets".
-        run: go test -count=1 -timeout=40m -tags e2e ./e2e/... -run 'TestSmoke|TestRegression' -v
+        run: go test -count=1 -timeout=55m -tags e2e ./e2e/... -run 'TestSmoke|TestRegression' -v
 
       - name: Remove SSH key
         if: always()

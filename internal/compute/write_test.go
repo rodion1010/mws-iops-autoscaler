@@ -23,6 +23,26 @@ func TestUpdateIndependentDiskIOPS_success(t *testing.T) {
 	}
 }
 
+func TestUpdateIndependentDiskIOPS_decreaseSucceeds(t *testing.T) {
+	// Every other test in this file exercises an increase end-to-end; a decrease must
+	// clear the same re-read/etag/write/verify flow (design.md §4.7, issue #16's
+	// direction-agnostic guard is unit-tested in isolation by TestDirectionPreserved,
+	// but never previously exercised through the full path here).
+	c := newFakeClient()
+	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 3000, Etag: "etag-1"}
+
+	got, err := UpdateIndependentDiskIOPS(context.Background(), c, "datadisk", 3000, 1000, "", false, "idem-1")
+	if err != nil {
+		t.Fatalf("UpdateIndependentDiskIOPS (decrease): %v", err)
+	}
+	if got != 1000 {
+		t.Errorf("applied = %d, want 1000", got)
+	}
+	if c.disks["datadisk"].SpecIOPS != 1000 {
+		t.Errorf("fake disk SpecIOPS = %d, want 1000", c.disks["datadisk"].SpecIOPS)
+	}
+}
+
 func TestUpdateIndependentDiskIOPS_dryRunVerifiesButDoesNotMutate(t *testing.T) {
 	c := newFakeClient()
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 1000, Etag: "etag-1"}
@@ -129,6 +149,29 @@ func TestUpdateDependentDiskIOPS_success(t *testing.T) {
 	}
 
 	// Every non-target attachment must reach the client unchanged.
+	updated := c.vms["iops-test-vm"].Disks
+	for _, d := range updated {
+		if d.DeviceName == "datadisk" && d.Class != ClassIndependent {
+			t.Errorf("independent disk entry was mutated: %+v", d)
+		}
+	}
+}
+
+func TestUpdateDependentDiskIOPS_decreaseSucceeds(t *testing.T) {
+	c := newFakeClient()
+	vm := vmWithDependentDisk()
+	vm.Disks[0].IOPS = 3000 // bootdisk starts above the target this time
+	c.vms["iops-test-vm"] = vm
+
+	got, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "bootdisk", 3000, 1000, "", false, "idem-1")
+	if err != nil {
+		t.Fatalf("UpdateDependentDiskIOPS (decrease): %v", err)
+	}
+	if got != 1000 {
+		t.Errorf("applied = %d, want 1000", got)
+	}
+
+	// Every non-target attachment must still reach the client unchanged.
 	updated := c.vms["iops-test-vm"].Disks
 	for _, d := range updated {
 		if d.DeviceName == "datadisk" && d.Class != ClassIndependent {

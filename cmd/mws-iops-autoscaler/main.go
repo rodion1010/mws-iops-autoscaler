@@ -133,11 +133,9 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	readiness := &health.Readiness{}
 	readiness.SetConfigValid(true) // LoadAndValidate above already proved this
 
-	// Phase 1 (PRD §6) is local mode, scale-up only. This is the one place
-	// that capability gets decided (issue #14) — Phase 3 flips it here and
-	// nowhere else; both the Decider and the Agent's own defense-in-depth
-	// check read the same value, not two independently maintained copies.
-	const allowScaleDown = false
+	// allowScaleDown is a package-level, build-tag-selected identifier
+	// (allowscaledown_prod.go / allowscaledown_e2e.go), not a local const —
+	// see that file for why this stays a compile-time decision.
 
 	// Freshness bounds (issue #15), derived from the same collection/
 	// discovery cadence the pipeline already runs on rather than hardcoded

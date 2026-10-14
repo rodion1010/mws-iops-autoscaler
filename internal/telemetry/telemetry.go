@@ -17,23 +17,24 @@ import (
 type Registry struct {
 	reg *prometheus.Registry
 
-	provisionedIOPS         *prometheus.GaugeVec
-	proposedTargetIOPS      *prometheus.GaugeVec
-	observedIOPS            *prometheus.GaugeVec
-	utilizationRatio        *prometheus.GaugeVec
-	estimatedDemand         *prometheus.GaugeVec
-	latencyBaseline         *prometheus.GaugeVec
-	saturated               *prometheus.GaugeVec
-	decisionsTotal          *prometheus.CounterVec
-	vmHeadroom              *prometheus.GaugeVec
-	vmCapReached            *prometheus.GaugeVec
-	metricSource            *prometheus.GaugeVec
-	metricStaleness         *prometheus.GaugeVec
-	windowFillRatio         *prometheus.GaugeVec
-	changeBudgetRemaining   *prometheus.GaugeVec
-	discoverySkippedTotal   *prometheus.CounterVec
-	diskConfiguredUnmanaged *prometheus.GaugeVec
-	budgetHealthy           prometheus.Gauge
+	provisionedIOPS           *prometheus.GaugeVec
+	proposedTargetIOPS        *prometheus.GaugeVec
+	observedIOPS              *prometheus.GaugeVec
+	utilizationRatio          *prometheus.GaugeVec
+	estimatedDemand           *prometheus.GaugeVec
+	latencyBaseline           *prometheus.GaugeVec
+	saturated                 *prometheus.GaugeVec
+	decisionsTotal            *prometheus.CounterVec
+	vmHeadroom                *prometheus.GaugeVec
+	vmCapReached              *prometheus.GaugeVec
+	vmMinIOPSFloorExceedsPool *prometheus.GaugeVec
+	metricSource              *prometheus.GaugeVec
+	metricStaleness           *prometheus.GaugeVec
+	windowFillRatio           *prometheus.GaugeVec
+	changeBudgetRemaining     *prometheus.GaugeVec
+	discoverySkippedTotal     *prometheus.CounterVec
+	diskConfiguredUnmanaged   *prometheus.GaugeVec
+	budgetHealthy             prometheus.Gauge
 
 	// configuredUnmanagedMu guards configuredUnmanaged only — every other
 	// field above relies on the underlying prometheus types' own thread
@@ -58,6 +59,7 @@ func NewRegistry() *Registry {
 	r.decisionsTotal = r.counter("iops_autoscaler_decisions_total", "Reconcile decisions by action and reason.", "action", "reason")
 	r.vmHeadroom = r.gauge("iops_autoscaler_vm_headroom_iops", "IOPS pool headroom available to this specific disk: VM pool minus the p95 consumption of its siblings (design.md §4.6) — disk-relative, hence the disk label (issue #19).", "disk", "vm")
 	r.vmCapReached = r.gauge("iops_autoscaler_vm_cap_reached", "1 if any managed disk on this VM ended its cycle in VM_IOPS_CAP_REACHED, else 0 — set once per reconcile via RecordVMCapReached, never per-disk (issue #19: a per-disk Set here let disk iteration order silently clear this).", "vm")
+	r.vmMinIOPSFloorExceedsPool = r.gauge("iops_autoscaler_vm_min_iops_floor_exceeds_pool", "1 if the sum of configured min_iops across this VM's managed disks exceeds the VM's real IOPS pool (3000 x vCPU), else 0 — a static configuration problem distinct from vm_cap_reached's dynamic demand signal (docs/configuration.md Sec5): the operator's own floors already cannot all be honored simultaneously, independent of actual load.", "vm")
 	r.metricSource = r.gauge("iops_autoscaler_metric_source", "1 for the source (guest|platform) that produced this cycle's Analysis, 0 for the other — both series are always set together so a source switch cannot leave a stale active series behind (issue #19).", "disk", "source")
 	r.metricStaleness = r.gauge("iops_autoscaler_metric_staleness_seconds", "Age of the sample this decision was based on.", "disk")
 	r.windowFillRatio = r.gauge("iops_autoscaler_window_fill_ratio", "Fraction of the configured window currently buffered.", "disk", "direction")
@@ -125,6 +127,14 @@ func (r *Registry) RecordAppliedIOPS(diskID, vmName, class string, appliedIOPS i
 // RecordVMCapReached records the cycle-wide OR across all disks on a VM.
 func (r *Registry) RecordVMCapReached(vmName string, capped bool) {
 	r.vmCapReached.WithLabelValues(vmName).Set(boolFloat(capped))
+}
+
+// RecordVMMinIOPSFloorExceedsPool records whether this VM's managed disks'
+// configured min_iops floors already sum past its real IOPS pool — see
+// vmMinIOPSFloorExceedsPool's registration comment. Like RecordVMCapReached,
+// this is a once-per-reconcile cycle-wide gauge, not per-disk.
+func (r *Registry) RecordVMMinIOPSFloorExceedsPool(vmName string, exceeds bool) {
+	r.vmMinIOPSFloorExceedsPool.WithLabelValues(vmName).Set(boolFloat(exceeds))
 }
 
 // RecordStaleness reports sampling age even when no decision can be produced.
