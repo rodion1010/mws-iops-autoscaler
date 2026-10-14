@@ -191,9 +191,8 @@ func TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart(t *testing.T) {
 
 	// Never a real device on this VM (boot/data/noname/churn all use their
 	// own fixed names) — auto-discovery's exclude can never resolve it.
-	// Carries the mws- prefix so it clears validateDeviceName's format
-	// check (#64) and fails only on resolution, the same convention
-	// regression_test.go's own ghost fixture already uses.
+	// Use a syntactically valid platform-visible device name so the test
+	// reaches discovery and fails only on resolution.
 	const neverAttachedName = "mws-e2e-exclude-ghost"
 	disks := AutoDiscoveryDisksSpec(neverAttachedName)
 	if err := InstallAgentWithDisks(ctx, target, binPath, disks, discoveryScenarioInterval); err != nil {
