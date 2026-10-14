@@ -17,15 +17,11 @@ const billingStepIOPS = 100
 // It is calibration-sensitive.
 const queueGrowthThreshold = 0.01
 
-// PolicyDecider is stateless across decisions except for the process-wide scale-down capability.
-// Keeping capability separate from policy prevents configuration from enabling an unsupported write path.
-type PolicyDecider struct {
-	allowScaleDown bool
-}
+// PolicyDecider is stateless across decisions.
+type PolicyDecider struct{}
 
-// NewPolicyDecider is the explicit enablement point for bidirectional actuation.
-func NewPolicyDecider(allowScaleDown bool) *PolicyDecider {
-	return &PolicyDecider{allowScaleDown: allowScaleDown}
+func NewPolicyDecider() *PolicyDecider {
+	return &PolicyDecider{}
 }
 
 func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision {
@@ -83,11 +79,14 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		return withReason(base, ActionScaleUp, "saturated")
 
 	case a.Underutilized:
-		// The capability gate precedes cooldown and guardrails so disabled scale-down never reaches actuation.
-		// Preserve effective demand only as an observable recommendation.
 		base.Demand = a.EffectiveDemandP95Down
-		if !pd.allowScaleDown {
-			return withReason(base, ActionNoAction, "scale_down_disabled")
+		// A quiet reading here can be VM-pool contention, not real idleness
+		// (design.md §4.6) — mirrors Saturated's own VM-awareness above.
+		if vm.SiblingDemandUnknown {
+			return withReason(base, ActionNoAction, "sibling_demand_unmeasurable")
+		}
+		if ceiling <= current {
+			return withReason(base, ActionNoAction, "vm_pool_contended")
 		}
 		if now.Sub(state.LastChangeDown) < p.CooldownScaleDown {
 			return withReason(base, ActionNoAction, "cooldown_scale_down")

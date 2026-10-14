@@ -103,9 +103,7 @@ func TestApply_independentDiskWritesAndVerifies(t *testing.T) {
 }
 
 func TestApply_independentDiskScaleDownWritesAndVerifies(t *testing.T) {
-	// Every other independent-disk test here exercises ActionScaleUp; Apply's own
-	// action check (line ~67) accepts ActionScaleDown identically, but nothing had
-	// exercised that path through this package before.
+	// Every other independent-disk test here exercises ActionScaleUp only.
 	c := &fakeClient{disks: map[string]*compute.Disk{
 		"datadisk-res": {Name: "datadisk-res", SpecIOPS: 3000, Etag: "etag-1"},
 	}}

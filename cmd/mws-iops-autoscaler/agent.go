@@ -31,9 +31,6 @@ type Agent struct {
 	vmName   string
 	dryRun   bool
 
-	// Enforced again at actuation because Decider is replaceable.
-	allowScaleDown bool
-
 	// Maximum age of the last successful discovery before reconcile fails closed.
 	maxDiscoveryAge time.Duration
 
@@ -440,25 +437,20 @@ func (a *Agent) reconcile(ctx context.Context) {
 
 	a.telemetry.RecordVMCapReached(a.vmName, anyVMCapReached)
 
-	if len(managed) > 0 {
-		floorExceedsPool := minIOPSSum > iopsPool
-		if floorExceedsPool {
-			log.Printf("reconcile: this VM's managed disks' configured min_iops floors sum to %d, which exceeds its real IOPS pool of %d — these floors cannot all be honored simultaneously regardless of load", minIOPSSum, iopsPool)
-		}
-		a.telemetry.RecordVMMinIOPSFloorExceedsPool(a.vmName, floorExceedsPool)
+	// Unconditional, like RecordVMCapReached above: an empty managed set
+	// sums to 0, which is never > iopsPool, so this correctly clears a
+	// previously-set gauge back to false rather than leaving it stale.
+	floorExceedsPool := minIOPSSum > iopsPool
+	if floorExceedsPool {
+		log.Printf("reconcile: this VM's managed disks' configured min_iops floors sum to %d, which exceeds its real IOPS pool of %d — these floors cannot all be honored simultaneously regardless of load", minIOPSSum, iopsPool)
 	}
+	a.telemetry.RecordVMMinIOPSFloorExceedsPool(a.vmName, floorExceedsPool)
 }
 
 func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.Decision, now time.Time) {
 	diskID := m.Disk.DiskName
 	// Tracker state uses incarnation-aware identity; logs use the resource name.
 	identity := m.Disk.IdentityKey()
-
-	if d.Action == decider.ActionScaleDown && !a.allowScaleDown {
-		// A custom Decider cannot bypass the process capability gate.
-		log.Printf("actuate %s (%s): refusing ActionScaleDown — scale-down is disabled in this build (issue #14)", diskID, m.Disk.DeviceName)
-		return
-	}
 
 	if !a.tracker.Healthy() {
 		// Fail closed while durable budget state is unhealthy.

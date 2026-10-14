@@ -24,10 +24,8 @@ func TestUpdateIndependentDiskIOPS_success(t *testing.T) {
 }
 
 func TestUpdateIndependentDiskIOPS_decreaseSucceeds(t *testing.T) {
-	// Every other test in this file exercises an increase end-to-end; a decrease must
-	// clear the same re-read/etag/write/verify flow (design.md §4.7, issue #16's
-	// direction-agnostic guard is unit-tested in isolation by TestDirectionPreserved,
-	// but never previously exercised through the full path here).
+	// Every other test in this file exercises an increase; a decrease must
+	// clear the same re-read/etag/write/verify flow (design.md §4.7).
 	c := newFakeClient()
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 3000, Etag: "etag-1"}
 

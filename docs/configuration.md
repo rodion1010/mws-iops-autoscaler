@@ -390,10 +390,13 @@ value, and maintenance windows.
   unknown key like any other superseded field
 - `saturation.utilization_threshold`, `target.scale_up_utilization`, or `target.scale_down_utilization`
   outside `(0, 1]`, or non-finite (`NaN`/`Inf` — see below)
-- `target.scale_down_utilization` not strictly below `target.scale_up_utilization` — this gap is the
-  hysteresis margin a downscale leaves before the next cycle could re-trigger an upscale; closing or
-  inverting it invites flapping, the same reasoning as the `scale_down_window`/`scale_up_window` rule
-  above
+- `target.scale_up_utilization` or `target.scale_down_utilization` not strictly below
+  `saturation.utilization_threshold` — a completed scale-up or scale-down leaves utilization at exactly
+  its own target ratio, so either one at or above the saturation gate would immediately make that
+  disk a saturated candidate again, the change having bought no real headroom
+- `target.scale_down_utilization` not strictly below `target.scale_up_utilization` — this gap is a
+  secondary hysteresis margin between the two target ratios themselves; closing or inverting it invites
+  flapping, the same reasoning as the `scale_down_window`/`scale_up_window` rule above
 - `saturation.queue_depth_threshold` ≤ 0 (strictly positive, not merely non-negative: at exactly 0 the
   queue-depth gate degenerates to always-true given a non-negative queue depth, and
   `utilization_threshold` alone would decide saturation — issue #6), or non-finite

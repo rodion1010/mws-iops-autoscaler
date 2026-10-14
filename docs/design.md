@@ -533,8 +533,17 @@ sibling sharing the pool has no data or a stale sample this cycle, the controlle
 already be spent. This is deliberately **not** `VM_IOPS_CAP_REACHED` — that action drives
 `iops_autoscaler_vm_cap_reached`, alert-worthy as "actionable — add vCPU" (§7.3), and a measurement
 gap is a different remediation (fix that disk's metrics path) that must not alias onto the vCPU-upgrade
-signal. Scale-down is unaffected — reducing this disk's own IOPS never consumes more of the shared
-pool, so an unmeasured sibling has nothing to fail closed against on that path (issue #56).
+signal.
+
+**Scale-down fails closed on the same two conditions, for a different reason.** A quiet reading on
+this disk is indistinguishable from demand the shared pool is itself suppressing: a busy sibling can
+hold this disk's served IOPS well below what it would actually use, which reads as `Underutilized`
+even though cutting the limit now would leave it unable to serve its real peak once that sibling's
+load clears. So the `Underutilized` branch checks the same `SiblingDemandUnknown` flag
+(`sibling_demand_unmeasurable`, same reasoning as scale-up's) and the same `ceiling` computed above —
+if headroom has already fallen to or below this disk's own `current` limit (`vm_pool_contended`), its
+quiet reading cannot be trusted and no action is taken. Both checks are evaluated before cooldown and
+guardrails.
 
 ### 4.7 Actuation
 
@@ -913,19 +922,6 @@ type Decider interface {
     // clock (the same reason GuestSource takes an injectable now func).
     Decide(diskID string, current int64, a Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision
 }
-
-// PolicyDecider (the concrete implementation) also takes allowScaleDown, a
-// constructor-only capability, not a per-call argument: Phase 1 (PRD §6) is
-// scale-up only, and that must not depend on any user-tunable threshold
-// happening to never trigger scale-down (issue #14). With allowScaleDown
-// false, Underutilized still computes and surfaces a candidate Demand for
-// observability, but Action is always no_action/scale_down_disabled,
-// checked before cooldown or guardrails — never merely clamped by them.
-// The orchestrator applies the same capability a second time, independently,
-// before ever calling the Actuator (defense in depth: a Decider is an
-// interface, and the caller must not simply trust an implementation to have
-// gotten this right). Phase 3 flips this one constructor argument and
-// nothing else.
 
 // Decide's default (neither Saturated nor Underutilized) branch reports
 // four distinct NoAction reasons, not one generic "no_signal" (issue #15,

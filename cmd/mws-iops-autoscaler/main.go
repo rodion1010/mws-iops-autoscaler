@@ -1,5 +1,5 @@
-// Command mws-iops-autoscaler is the MWS IOPS Autoscaler agent (Phase 1: local
-// mode, scale-up — docs/prd-mws-iops-autoscaler.md §6).
+// Command mws-iops-autoscaler is the MWS IOPS Autoscaler agent (local mode,
+// bidirectional — docs/prd-mws-iops-autoscaler.md §6).
 package main
 
 import (
@@ -133,10 +133,6 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	readiness := &health.Readiness{}
 	readiness.SetConfigValid(true) // LoadAndValidate above already proved this
 
-	// allowScaleDown is a package-level, build-tag-selected identifier
-	// (allowscaledown_prod.go / allowscaledown_e2e.go), not a local const —
-	// see that file for why this stays a compile-time decision.
-
 	// Freshness bounds (issue #15), derived from the same collection/
 	// discovery cadence the pipeline already runs on rather than hardcoded
 	// or independently configured: a threshold that isn't a multiple of
@@ -155,7 +151,6 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 		resolved:          resolved,
 		vmName:            vmName,
 		dryRun:            dryRun,
-		allowScaleDown:    allowScaleDown,
 		maxDiscoveryAge:   maxDiscoveryAge,
 		maxSampleAge:      maxSampleAge,
 		maxSampleGap:      maxSampleGap,
@@ -163,7 +158,7 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 		client:            client,
 		sampler:           sampler,
 		analyzer:          analyzer.NewWindowAnalyzer(),
-		decider:           decider.NewPolicyDecider(allowScaleDown),
+		decider:           decider.NewPolicyDecider(),
 		actuator:          actuator.NewComputeActuator(client),
 		tracker:           tracker,
 		telemetry:         reg,

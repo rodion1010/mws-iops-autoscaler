@@ -128,7 +128,7 @@ func TestRegressionPendingReservationNeverResolvesAgainstReplacementDisk(t *test
 	m.Disk.IOPS = 1000
 	m.Disk.IncarnationID = "incarnation-a"
 
-	a, tracker := newTestAgent(t, true, &recordingActuator{})
+	a, tracker := newTestAgent(t, &recordingActuator{})
 	a.client = client
 	a.managed = []registry.ManagedDisk{m}
 	if err := tracker.ReserveChange(m.Disk.IdentityKey(), "reservation-a", 1000, 2000, time.Now()); err != nil {
@@ -172,7 +172,7 @@ func TestRegressionConflictRediscoveryFailureAbortsCycle(t *testing.T) {
 
 func TestRegressionPreWriteConflictDoesNotConsumeChangeBudget(t *testing.T) {
 	act := &erroringActuatorRecording{err: fmt.Errorf("pre-write refusal: %w", compute.ErrConcurrentModification)}
-	a, tracker := newTestAgent(t, true, act)
+	a, tracker := newTestAgent(t, act)
 	a.readiness = &health.Readiness{}
 	a.client = &stubClient{
 		getVMErr: errors.New("rediscovery unavailable"),

@@ -78,9 +78,7 @@ These were identified during design/review but explicitly deferred, not solved:
   label, or move to ephemeral per-job runners with per-run credentials so no long-lived credentialed
   machine executes untrusted code.
 - **One of `docs/design.md` §8.3's ten e2e scenarios is not implemented: VM cap detection.** See
-  `docs/testing.md`'s coverage table for the honest per-scenario status of the other nine — scale-down
-  after quiet and no-flapping now have real smoke-tier coverage, built against an `e2e_scaledown`-tagged
-  test binary (`allowScaleDown = true`) separate from the production build.
+  `docs/testing.md`'s coverage table for the honest per-scenario status of the other nine.
 
 ### Alerting: what the agent should page a human about, and how
 
@@ -134,28 +132,25 @@ Two independent moves, worth separating:
   once the PR-tier suite is large enough that queueing on a single VM is the actual bottleneck —
   decide after the real per-suite timing measurement from the growing e2e scenario set.
 
-### What's left to actually flip scale-down on in production
+### Validating scale-down's defaults against real traffic
 
-PRD Phase 3's exit criterion is "soak and chaos tests green with scale-down enabled, `local` mode"
-(design.md M9). The scale-down decision logic, write path, and now smoke-tier e2e coverage
-(`TestSmoke_Decisions_ScaleDownAfterQuiet`, `TestSmoke_Decisions_NoFlapping`) are all done — what
-remains is three separate things, none of them more code in the sense the scenarios above are:
+Scale-down is live (no capability gate — decided while the agent still has no real users, so there
+was nothing to protect by staging the rollout further). Its decision logic, write path, and
+smoke-tier e2e coverage (`TestSmoke_Decisions_ScaleDownAfterQuiet`, `TestSmoke_Decisions_NoFlapping`)
+are done. Two things from the original Phase 3 plan are still worth doing, now as ordinary hardening
+rather than a launch gate:
 
-- **Soak and chaos don't exist as a CI tier for any scenario today**, not just scale-down (design.md
-  §8.4: 24h diurnal-load soak, 20%-fault-injection chaos, both local-mode). A 24h job cannot fit either
-  existing workflow's timeout model (`docs/ci-cd.md`'s "Timeout budgets") and would occupy this
-  project's one self-hosted runner for its entire duration, blocking every PR/merge e2e run unless a
-  second runner exists first (the item above) or it is scheduled off-hours. Chaos additionally needs a
-  fault-injection layer nothing in `internal/platformfake` or `e2e/` has today. This almost certainly
-  needs its own decision (new runner vs. scheduled `workflow_dispatch` job vs. explicitly accepting the
-  gap for longer) before anyone builds it — a candidate for an ADR rather than a quiet bump.
+- **Soak and chaos don't exist as a CI tier for any scenario today** (design.md §8.4: 24h diurnal-load
+  soak, 20%-fault-injection chaos, both local-mode). A 24h job cannot fit either existing workflow's
+  timeout model (`docs/ci-cd.md`'s "Timeout budgets") and would occupy this project's one self-hosted
+  runner for its entire duration, blocking every PR/merge e2e run unless a second runner exists first
+  (the item above) or it is scheduled off-hours. Chaos additionally needs a fault-injection layer
+  nothing in `internal/platformfake` or `e2e/` has today. This needs its own decision (new runner vs.
+  scheduled `workflow_dispatch` job vs. accepting the gap) before anyone builds it — a candidate for an
+  ADR rather than a quiet bump.
 - **The calibration harness (design.md §8.5) is a manual process, not a tool.** It reuses `--dry-run`
   and the decision journal to build a corpus of (decision-that-would-have-fired, what-the-load-did-next)
-  pairs against real Phase 1–2 telemetry, then tunes the default thresholds against it. Nothing
-  automates the corpus collection or the tuning step; both need real production-like traffic to exist
-  against, which in turn needs scale-up (and, per Phase 2, platform-metrics comparison mode) to have
-  actually been running live for a while first.
-- **Flipping `cmd/mws-iops-autoscaler/allowscaledown_prod.go`'s `false` to `true` is the literal last
-  step**, deliberately kept to one file so Phase 3 really does "flip this one thing and nothing else"
-  — but it should only happen once the two items above have actually been satisfied, not as a
-  consequence of this file's own existence.
+  pairs against real traffic, then tunes the default thresholds against it. Nothing automates the
+  corpus collection or the tuning step. No default in `docs/configuration.md` should be treated as
+  validated until it has survived this — true for scale-down's defaults now exactly as it already was
+  for scale-up's.

@@ -1,17 +1,14 @@
 # MWS IOPS Autoscaler
 
 MWS IOPS Autoscaler is an external agent for **MWS Cloud Compute** that watches the real demand of
-attached NBS-PL2 disks and raises their provisioned IOPS when they are saturated. It is intended for
-workloads whose storage demand changes over time: instead of provisioning the peak IOPS limit from
-the start, you define a safe range and let the agent increase the limit when the workload needs it.
-The current scale-up-only release focuses on reducing throttling risk; it does not continuously
-optimize storage cost.
+attached NBS-PL2 disks and adjusts their provisioned IOPS to match it — raising the limit when a disk
+is saturated, lowering it after sustained quiet so you stop paying for unused headroom. It is intended
+for workloads whose storage demand changes over time: instead of provisioning the peak IOPS limit from
+the start, you define a safe range and let the agent track the workload's actual needs within it.
 
 > [!IMPORTANT]
-> The current release is **local mode, scale-up only**. Run one agent inside each target MWS virtual
-> machine. Once the agent raises a disk's IOPS, the new limit remains in effect when the workload
-> subsides and even if the agent stops. Lower it manually when appropriate. Automatic scale-down,
-> fleet mode and platform metrics are not implemented yet.
+> The current release is **local mode, bidirectional**. Run one agent inside each target MWS virtual
+> machine. Fleet mode and platform metrics are not implemented yet.
 
 ## What it does
 
