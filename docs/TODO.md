@@ -154,3 +154,11 @@ rather than a launch gate:
   corpus collection or the tuning step. No default in `docs/configuration.md` should be treated as
   validated until it has survived this — true for scale-down's defaults now exactly as it already was
   for scale-up's.
+- **The durable 24h change budget's own acceptance criterion (issue #51) has no live coverage.**
+  `TestSmoke_Decisions_NoFlapping` proves two real up/down cycles and bounds alternation count, but it
+  runs against a budget the smoke harness deliberately resets to empty every run (`docs/testing.md`
+  "Why preflight matters more than cleanup") — nothing live proves the budget actually suppresses the
+  next otherwise-valid change once exhausted, or that the suppression survives an agent restart.
+  Doesn't fit inside the smoke tier's shared-VM, reset-per-run model; needs its own full-tier scenario
+  that drives real actuations toward `max_changes_per_24h`, confirms `budget_exhausted`, restarts the
+  agent, and confirms the count (not just the state file) persisted.

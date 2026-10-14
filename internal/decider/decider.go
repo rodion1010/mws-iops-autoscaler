@@ -82,10 +82,14 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		base.Demand = a.EffectiveDemandP95Down
 		// A quiet reading here can be VM-pool contention, not real idleness
 		// (design.md §4.6) — mirrors Saturated's own VM-awareness above.
+		// Raw VM headroom, not the policy/platform-capped ceiling: a disk
+		// already sitting at its own max_iops has ceiling <= current too,
+		// with no VM contention at all — that must not look the same as a
+		// pool a busy sibling has actually exhausted.
 		if vm.SiblingDemandUnknown {
 			return withReason(base, ActionNoAction, "sibling_demand_unmeasurable")
 		}
-		if ceiling <= current {
+		if base.VMHeadroomIOPS <= current {
 			return withReason(base, ActionNoAction, "vm_pool_contended")
 		}
 		if now.Sub(state.LastChangeDown) < p.CooldownScaleDown {

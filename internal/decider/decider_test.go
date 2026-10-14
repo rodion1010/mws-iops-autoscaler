@@ -122,6 +122,34 @@ func TestDecide_vmPoolSlackAllowsScaleDown(t *testing.T) {
 	}
 }
 
+// TestDecide_atPolicyMaxWithAmplePoolStillScalesDown is the regression for
+// the vm_pool_contended check once wrongly using the policy/platform-capped
+// ceiling instead of raw VM headroom: a disk sitting at its own max_iops
+// has ceiling <= current regardless of VM load, which must never read as
+// contention when the VM pool itself has plenty of room.
+func TestDecide_atPolicyMaxWithAmplePoolStillScalesDown(t *testing.T) {
+	d := NewPolicyDecider()
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
+	got := d.Decide("disk1", testPolicy.MaxIOPS, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionScaleDown {
+		t.Errorf("got %+v, want ActionScaleDown — sitting at max_iops must not be mistaken for VM-pool contention", got)
+	}
+}
+
+// TestDecide_abovePolicyMaxWithAmplePoolStillScalesDown covers an operator
+// lowering max_iops below a disk's live current value: the policy cap must
+// not be misreported as VM contention either.
+func TestDecide_abovePolicyMaxWithAmplePoolStillScalesDown(t *testing.T) {
+	d := NewPolicyDecider()
+	lowered := testPolicy
+	lowered.MaxIOPS = 2000 // operator lowered the cap below current's 5000
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
+	got := d.Decide("disk1", 5000, a, plentyOfHeadroom, lowered, GuardrailState{}, epoch)
+	if got.Action != ActionScaleDown {
+		t.Errorf("got %+v, want ActionScaleDown — a lowered policy max must not be mistaken for VM-pool contention", got)
+	}
+}
+
 func TestDecide_cooldownScaleUpBlocks(t *testing.T) {
 	d := NewPolicyDecider()
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 10, ServedIOPS: 900}

@@ -540,10 +540,13 @@ this disk is indistinguishable from demand the shared pool is itself suppressing
 hold this disk's served IOPS well below what it would actually use, which reads as `Underutilized`
 even though cutting the limit now would leave it unable to serve its real peak once that sibling's
 load clears. So the `Underutilized` branch checks the same `SiblingDemandUnknown` flag
-(`sibling_demand_unmeasurable`, same reasoning as scale-up's) and the same `ceiling` computed above —
-if headroom has already fallen to or below this disk's own `current` limit (`vm_pool_contended`), its
-quiet reading cannot be trusted and no action is taken. Both checks are evaluated before cooldown and
-guardrails.
+(`sibling_demand_unmeasurable`, same reasoning as scale-up's) and `Decision.VMHeadroomIOPS` — the raw
+`vm_iops_limit − p95_aggregate_iops_of_other_disks`, **not** the policy/platform-capped `ceiling` the
+sizing math above uses. A disk already sitting at its own `max_iops` has `ceiling <= current` too,
+with no VM contention at all; using the capped ceiling here would permanently refuse to scale that
+disk back down once quiet, long after the load that justified the cap is gone. If raw headroom has
+fallen to or below this disk's own `current` limit (`vm_pool_contended`), its quiet reading cannot be
+trusted and no action is taken. Both checks are evaluated before cooldown and guardrails.
 
 ### 4.7 Actuation
 
@@ -1295,10 +1298,16 @@ controller sees 513/1000 and concludes there is headroom, while the disk is at 1
 
 Not a test but the mechanism that makes the defaults defensible: run `--dry-run` (US-013) against
 real workloads, record every decision that *would* have been made plus what the load did next, then
-tune thresholds against that corpus. This is the same validation step §9.2 folds into M6 before
-actuation is flipped on — a mechanism used once as a gate before GA, and again wherever recalibration
-is needed — not a separate observe-only release phase of its own (§9.2). **No default in
-`docs/configuration.md` should be treated as validated until it has survived this.**
+tune thresholds against that corpus — not a separate observe-only release phase of its own (§9.2).
+**No default in `docs/configuration.md` should be treated as validated until it has survived this.**
+
+This was originally planned as a gate on M6 (scale-up) and M9 (scale-down) actuation each shipping at
+all — §9.2 still describes that original sequencing as design rationale. For scale-down specifically,
+the Product Lead chose to ship the capability itself ahead of that gate (PRD Phase 3 — no production
+users yet, nothing to stage a rollout behind). That decision is about the *capability*, not this
+harness: the defaults remain unvalidated regardless of whether the capability is live, and running
+this corpus against real traffic stays tracked as ordinary hardening work (`docs/TODO.md`), not
+something already satisfied by shipping.
 
 ---
 
@@ -1370,9 +1379,12 @@ visible and reversible on the very next cycle. The estimators in §4.5 are still
 but the cost of that being wrong in the *up* direction is bounded in a way it is not in the *down*
 direction.
 
-**Scale-down (M9) waits until scale-up has run live.** Its failure mode is real, not just wasteful: a
-wrong scale-down throttles the workload. It also gets to reuse M6–M8 telemetry for calibration
-instead of guessing thresholds cold.
+**Scale-down (M9) was designed to wait until scale-up had run live.** Its failure mode is real, not
+just wasteful: a wrong scale-down throttles the workload. It was meant to reuse M6–M8 telemetry for
+calibration instead of guessing thresholds cold. In practice the capability shipped ahead of that
+telemetry existing (PRD Phase 3) — the sequencing above is why M9 was *planned* after M6–M8, not a
+claim that it waited for them in the end; §8.5 is the canonical statement of what calibrating the
+defaults still requires, independent of when the capability itself went live.
 
 **Platform metrics (M7) are built and exercised in `local` mode (M8, shadow/comparison against the
 trusted guest source) before `fleet` mode exists.** `fleet` has no guest fallback — if the platform
