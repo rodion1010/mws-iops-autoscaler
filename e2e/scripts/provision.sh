@@ -69,10 +69,17 @@ NONAME_ENTRY="{name: ${NONAME_ALIAS}, boot: false, disk: {ref: \"compute/project
 # starts out unattached.
 CHURN_ENTRY="{name: churn, boot: false, deviceName: ${CHURN_DEVICE_NAME}, disk: {ref: \"compute/projects/${MWS_PROJECT}/disks/${CHURN_DISK}\"}}"
 
+# --wait-timeout defaults to 5m; observed VM creation taking longer than
+# that against this zone (context deadline exceeded, 2026-10-15) while
+# every other call (list/get) stayed fast, so only this step's own wait
+# needs more room. The shared 15m provisioning context (lifecycle_test.go's
+# ensureFullFixture) still bounds the whole call — disk creation above
+# took seconds, leaving ample slack for a longer VM wait inside it.
 mws compute virtual-machine create "compute/projects/${MWS_PROJECT}/virtualMachines/${VM_NAME}" \
   --zone "${MWS_ZONE}" \
   --vm-type "${E2E_VM_TYPE}" \
   --service-account "${E2E_AGENT_SA}" \
+  --wait-timeout 10m \
   --os-metadata-attributes "user-data: |
 $(sed 's/^/  /' <<< "$USER_DATA")" \
   --network-interfaces "name: eth0, primary: true, addresses: [{address: {spec: {subnet: \"${E2E_SUBNET_ID}\"}}, oneToOneNat: {external: {address: {spec: {}}}}}]" \

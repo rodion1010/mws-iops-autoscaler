@@ -477,7 +477,10 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 	applied, err := a.actuator.Apply(ctx, d, target, a.dryRun, idempotencyKey)
 	a.tracker.EndResize(identity)
 	if err != nil {
-		if a.dryRun {
+		// A conflict proves the managed snapshot is stale in dry-run too: the write path
+		// runs its fresh-read preconditions there as well.
+		staleSnapshot := errors.Is(err, compute.ErrConcurrentModification) || errors.Is(err, compute.ErrIncarnationMismatch)
+		if a.dryRun && !staleSnapshot {
 			// Dry-run errors cannot hide a mutation, so the reservation is releasable.
 			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
 				log.Printf("actuate %s (%s): failed to release the dry-run budget reservation after an error: %v", diskID, m.Disk.DeviceName, rerr)
