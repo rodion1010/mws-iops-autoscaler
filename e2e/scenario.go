@@ -343,15 +343,15 @@ func StopAgent(ctx context.Context, t Target) error {
 // DriveLoad tags its root-owned fio process for scoped cleanup.
 func DriveLoad(ctx context.Context, t Target) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
-	return t.RunBackground(ctx, driveLoadCmd(guestPath))
+	return t.RunBackground(ctx, deepLoadCmd(guestPath, "4k"))
 }
 
-// driveLoadCmd names libaio explicitly: fio's default engine is synchronous and ignores
-// iodepth, so the load would run at depth 1 and hover at the saturation threshold.
-func driveLoadCmd(guestPath string) string {
+// deepLoadCmd names libaio explicitly: fio's default engine is synchronous and ignores
+// iodepth, so the load would run at depth 1 instead of saturating the disk.
+func deepLoadCmd(guestPath, blockSize string) string {
 	return fmt.Sprintf(
-		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --ioengine=libaio --iodepth=64 --direct=1 --time_based=1 --runtime=600",
-		guestPath,
+		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=%s --ioengine=libaio --iodepth=64 --direct=1 --time_based=1 --runtime=600",
+		guestPath, blockSize,
 	)
 }
 
@@ -377,11 +377,7 @@ func DriveRateLimitedLoad(ctx context.Context, t Target, rateIOPS int) error {
 // only difference: same job name, same guest path, a larger block size.
 func DriveBandwidthLoad(ctx context.Context, t Target) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
-	cmd := fmt.Sprintf(
-		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=64k --iodepth=64 --direct=1 --time_based=1 --runtime=600",
-		guestPath,
-	)
-	return t.RunBackground(ctx, cmd)
+	return t.RunBackground(ctx, deepLoadCmd(guestPath, "64k"))
 }
 
 // WaitForScaleUp requires an observed baseline and rejects changes that occur
