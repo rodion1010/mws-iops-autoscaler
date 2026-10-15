@@ -343,11 +343,16 @@ func StopAgent(ctx context.Context, t Target) error {
 // DriveLoad tags its root-owned fio process for scoped cleanup.
 func DriveLoad(ctx context.Context, t Target) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
-	cmd := fmt.Sprintf(
-		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --iodepth=64 --direct=1 --time_based=1 --runtime=600",
+	return t.RunBackground(ctx, driveLoadCmd(guestPath))
+}
+
+// driveLoadCmd names libaio explicitly: fio's default engine is synchronous and ignores
+// iodepth, so the load would run at depth 1 and hover at the saturation threshold.
+func driveLoadCmd(guestPath string) string {
+	return fmt.Sprintf(
+		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --ioengine=libaio --iodepth=64 --direct=1 --time_based=1 --runtime=600",
 		guestPath,
 	)
-	return t.RunBackground(ctx, cmd)
 }
 
 // DriveRateLimitedLoad caps ops well under the saturation gate (this

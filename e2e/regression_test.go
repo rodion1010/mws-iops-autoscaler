@@ -445,3 +445,10 @@ func TestRegression_Config_GeneratedYAMLPassesLoadAndValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestRegression_Load_UsesAsyncEngineSoIodepthTakesEffect(t *testing.T) {
+	cmd := driveLoadCmd("/dev/disk/by-id/mws-datadisk")
+	if !strings.Contains(cmd, "--ioengine=libaio") {
+		t.Fatalf("load command %q must select an async engine; fio's default ignores --iodepth", cmd)
+	}
+}
