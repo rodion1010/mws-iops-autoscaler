@@ -511,6 +511,15 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 			return
 		}
 
+		// Failures before the mutating request was sent prove no write; no rediscovery is implied.
+		if errors.Is(err, compute.ErrNoWriteSent) {
+			if rerr := a.tracker.ReleaseChange(idempotencyKey); rerr != nil {
+				log.Printf("actuate %s (%s): failed to release the reservation for a failure before any write was sent: %v", diskID, m.Disk.DeviceName, rerr)
+			}
+			log.Printf("actuate %s (%s): %v", diskID, m.Disk.DeviceName, err)
+			return
+		}
+
 		// An unclassified error may be post-write; resolve it from fresh state before releasing budget.
 		a.resolveReservationAfterWriteFailure(ctx, m, d, idempotencyKey, now)
 		log.Printf("actuate %s (%s): %v", diskID, m.Disk.DeviceName, err)

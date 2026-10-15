@@ -14,6 +14,20 @@ var ErrConcurrentModification = errors.New("concurrent modification — the targ
 // the decision or cannot be verified. Callers must rediscover and must not retry the stale target.
 var ErrIncarnationMismatch = errors.New("live disk incarnation differs from the decision's expected incarnation — the disk was replaced under the same name")
 
+// ErrNoWriteSent marks a failure that happened before any mutating request left
+// the process, so the write provably did not land. Callers can release the
+// change-budget reservation without reconciling live state.
+var ErrNoWriteSent = errors.New("no mutating request was sent")
+
+type noWriteSentError struct{ err error }
+
+func (e noWriteSentError) Error() string      { return e.err.Error() }
+func (e noWriteSentError) Unwrap() error      { return e.err }
+func (noWriteSentError) Is(target error) bool { return target == ErrNoWriteSent }
+
+// MarkNoWriteSent tags err as a pre-write failure for errors.Is(err, ErrNoWriteSent).
+func MarkNoWriteSent(err error) error { return noWriteSentError{err} }
+
 // incarnationMatches fails closed when an expected identity cannot be verified.
 // An empty expected ID degrades to IOPS-only concurrency; otherwise the live ID must
 // be present and equal.
@@ -30,10 +44,10 @@ func incarnationMatches(expected, live string) bool {
 func UpdateIndependentDiskIOPS(ctx context.Context, c Client, diskName string, expectedCurrent, target int64, expectedIncarnation string, validateOnly bool, idempotencyKey string) (int64, error) {
 	live, err := c.GetDisk(ctx, diskName)
 	if err != nil {
-		return 0, fmt.Errorf("update independent disk %q: re-read before write: %w", diskName, err)
+		return 0, MarkNoWriteSent(fmt.Errorf("update independent disk %q: re-read before write: %w", diskName, err))
 	}
 	if live.Etag == "" {
-		return 0, fmt.Errorf("update independent disk %q: no etag on re-read — refusing to write without optimistic concurrency", diskName)
+		return 0, MarkNoWriteSent(fmt.Errorf("update independent disk %q: no etag on re-read — refusing to write without optimistic concurrency", diskName))
 	}
 	// Check identity before IOPS because a replacement may have the same value.
 	if !incarnationMatches(expectedIncarnation, live.IncarnationID) {
@@ -114,17 +128,17 @@ func validateDependentWriteTarget(disks []StorageDisk, deviceName, vmName string
 func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName string, expectedCurrent, target int64, expectedIncarnation string, dryRun bool, idempotencyKey string) (int64, error) {
 	vm, err := c.GetVirtualMachine(ctx, vmName)
 	if err != nil {
-		return 0, fmt.Errorf("update dependent disk: re-read VM %q: %w", vmName, err)
+		return 0, MarkNoWriteSent(fmt.Errorf("update dependent disk: re-read VM %q: %w", vmName, err))
 	}
 	if vm.Etag == "" {
-		return 0, fmt.Errorf("update dependent disk: VM %q has no etag — refusing to write without optimistic concurrency", vmName)
+		return 0, MarkNoWriteSent(fmt.Errorf("update dependent disk: VM %q has no etag — refusing to write without optimistic concurrency", vmName))
 	}
 
 	// Upsert treats omitted attachments as deletes, so resend the complete validated alias list.
 	// Only the selected alias receives a new IOPS value.
 	targetAlias, liveCurrent, targetDiskName, err := validateDependentWriteTarget(vm.Disks, deviceName, vmName)
 	if err != nil {
-		return 0, err
+		return 0, MarkNoWriteSent(err)
 	}
 	aliases := make([]string, len(vm.Disks))
 	for i, d := range vm.Disks {
@@ -136,8 +150,8 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 	if expectedIncarnation != "" {
 		liveDisk, err := c.GetDisk(ctx, targetDiskName)
 		if err != nil {
-			return 0, fmt.Errorf("update dependent disk %q on VM %q: re-read disk %q for incarnation check: %w",
-				deviceName, vmName, targetDiskName, err)
+			return 0, MarkNoWriteSent(fmt.Errorf("update dependent disk %q on VM %q: re-read disk %q for incarnation check: %w",
+				deviceName, vmName, targetDiskName, err))
 		}
 		if !incarnationMatches(expectedIncarnation, liveDisk.IncarnationID) {
 			return 0, fmt.Errorf("update dependent disk %q on VM %q: %w (expected incarnation %q, live %q)",
