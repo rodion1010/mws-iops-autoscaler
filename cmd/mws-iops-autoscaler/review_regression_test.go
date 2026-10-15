@@ -226,6 +226,30 @@ func TestRegressionDependentReservationUsesIOPSFromTheVerifiedDiskRead(t *testin
 	}
 }
 
+func TestRegressionDependentReservationWithoutExpectedIncarnationStillReadsTheDisk(t *testing.T) {
+	// No expected incarnation skips the identity comparison, not the authoritative disk read:
+	// the VM attachment says 2000 (the reservation's target) but the disk resource says 5000.
+	client := &replacementClient{
+		disk: &compute.Disk{Name: "vm-1-boot", SpecIOPS: 5000},
+		vm: &compute.VirtualMachine{Name: "vm-1", Disks: []compute.StorageDisk{
+			{Alias: "bootdisk", DeviceName: "bootdisk", DiskName: "vm-1-boot", Class: compute.ClassDependent, IOPS: 2000},
+		}},
+	}
+	m := dependentDisk()
+	a, tracker := newTestAgent(t, &recordingActuator{})
+	a.client = client
+	a.managed = []registry.ManagedDisk{m}
+	if err := tracker.ReserveChange(m.Disk.IdentityKey(), "reservation-a", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if got := len(tracker.PendingChanges()); got != 1 {
+		t.Fatalf("pending reservations = %d, want 1: the disk's SpecIOPS (5000) matches neither before nor target", got)
+	}
+}
+
 func TestRegressionConflictRediscoveryFailureAbortsCycle(t *testing.T) {
 	client := &stubClient{
 		vm: vmWithTwoIndependentDisks(),

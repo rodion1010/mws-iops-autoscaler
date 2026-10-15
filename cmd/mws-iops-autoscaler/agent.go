@@ -654,11 +654,9 @@ func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (in
 		}
 		for _, d := range vm.Disks {
 			if d.DeviceName == m.Disk.DeviceName {
-				if m.Disk.IncarnationID == "" {
-					return d.IOPS, nil
-				}
 				// The VM response carries no disk incarnation, so read the attached disk and take
-				// both identity and value from that one response.
+				// both identity and value from that one response. An empty expected incarnation
+				// skips only the identity comparison, not this read.
 				disk, err := a.client.GetDisk(ctx, d.DiskName)
 				if err != nil {
 					return 0, err
