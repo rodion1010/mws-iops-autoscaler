@@ -142,6 +142,32 @@ func TestRegressionPendingReservationNeverResolvesAgainstReplacementDisk(t *test
 	}
 }
 
+func TestRegressionPendingDependentReservationNeverResolvesAgainstReplacementDisk(t *testing.T) {
+	// The VM response never carries a disk incarnation, so the replacement is only visible through GetDisk.
+	client := &replacementClient{
+		disk: &compute.Disk{Name: "vm-1-boot", SpecIOPS: 2000, IncarnationID: "incarnation-b"},
+		vm: &compute.VirtualMachine{Name: "vm-1", Disks: []compute.StorageDisk{
+			{Alias: "bootdisk", DeviceName: "bootdisk", DiskName: "vm-1-boot", Class: compute.ClassDependent, IOPS: 2000},
+		}},
+	}
+	m := dependentDisk()
+	m.Disk.IOPS = 1000
+	m.Disk.IncarnationID = "incarnation-a"
+
+	a, tracker := newTestAgent(t, &recordingActuator{})
+	a.client = client
+	a.managed = []registry.ManagedDisk{m}
+	if err := tracker.ReserveChange(m.Disk.IdentityKey(), "reservation-a", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if got := len(tracker.PendingChanges()); got != 1 {
+		t.Fatalf("pending reservations = %d, want 1: incarnation-b cannot prove whether incarnation-a's write landed", got)
+	}
+}
+
 func TestRegressionConflictRediscoveryFailureAbortsCycle(t *testing.T) {
 	client := &stubClient{
 		vm: vmWithTwoIndependentDisks(),

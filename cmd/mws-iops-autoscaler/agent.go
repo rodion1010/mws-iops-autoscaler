@@ -651,8 +651,15 @@ func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (in
 		}
 		for _, d := range vm.Disks {
 			if d.DeviceName == m.Disk.DeviceName {
-				if err := verifyLiveIncarnation(m.Disk.DiskName, m.Disk.IncarnationID, d.IncarnationID); err != nil {
-					return 0, err
+				// The VM response carries no disk incarnation, so read the attached disk itself.
+				if m.Disk.IncarnationID != "" {
+					disk, err := a.client.GetDisk(ctx, d.DiskName)
+					if err != nil {
+						return 0, err
+					}
+					if err := verifyLiveIncarnation(m.Disk.DiskName, m.Disk.IncarnationID, disk.IncarnationID); err != nil {
+						return 0, err
+					}
 				}
 				return d.IOPS, nil
 			}
