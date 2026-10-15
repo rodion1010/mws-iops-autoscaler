@@ -1,10 +1,12 @@
 name: E2E (smoke)
 
 # The smoke tier reuses one persistent target and runs PR code on a credentialed
-# runner, so it runs only for branches of this repository. Fork PRs are skipped
-# with an explicit notice (docs/ci-cd.md, "PR-tier trust model").
+# runner, so it runs only for branches of this repository. pull_request_target
+# loads this file from the base branch, so a PR cannot edit away the origin
+# guard below; fork PRs get a GitHub-hosted notice job and their code is never
+# checked out (docs/ci-cd.md, "PR-tier trust model").
 on:
-  pull_request:
+  pull_request_target:
 
 concurrency:
   # All smoke runs share one target and must execute serially.
@@ -31,6 +33,9 @@ jobs:
       # Pin third-party actions because this runner has cloud credentials.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # pull_request_target checks out the base branch by default; the guard on this job
+          # makes the PR head a branch of this repository.
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
