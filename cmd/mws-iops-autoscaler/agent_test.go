@@ -34,7 +34,7 @@ func (r *recordingActuator) Apply(_ context.Context, d decider.Decision, _ actua
 	return actuator.Applied{DiskID: d.DiskID, IOPS: d.Target}, nil
 }
 
-func newTestAgent(t *testing.T, allowScaleDown bool, act actuator.Actuator) (*Agent, *state.Tracker) {
+func newTestAgent(t *testing.T, act actuator.Actuator) (*Agent, *state.Tracker) {
 	t.Helper()
 	budget, err := state.LoadBudget(t.TempDir() + "/budget.jsonl")
 	if err != nil {
@@ -42,12 +42,11 @@ func newTestAgent(t *testing.T, allowScaleDown bool, act actuator.Actuator) (*Ag
 	}
 	tracker := state.NewTracker(budget)
 	return &Agent{
-		vmName:         "vm-1",
-		allowScaleDown: allowScaleDown,
-		actuator:       act,
-		tracker:        tracker,
-		telemetry:      telemetry.NewRegistry(),
-		journal:        journal.NewWriter(discard{}),
+		vmName:    "vm-1",
+		actuator:  act,
+		tracker:   tracker,
+		telemetry: telemetry.NewRegistry(),
+		journal:   journal.NewWriter(discard{}),
 	}, tracker
 }
 
@@ -104,46 +103,13 @@ func independentDisk() registry.ManagedDisk {
 	}
 }
 
-func TestActuate_refusesScaleDownWhenDisabled_dependent(t *testing.T) {
+func TestActuate_scaleDownReachesActuator(t *testing.T) {
 	act := &recordingActuator{}
-	a, _ := newTestAgent(t, false, act)
-	d := decider.Decision{DiskID: "vm-1-boot", Action: decider.ActionScaleDown, Current: 2000, Target: 1000}
-	a.actuate(context.Background(), dependentDisk(), d, time.Now())
-	if len(act.calls) != 0 {
-		t.Errorf("Actuator.Apply called %d times, want 0 — scale-down must be refused before reaching the Actuator", len(act.calls))
-	}
-}
-
-func TestActuate_refusesScaleDownWhenDisabled_independent(t *testing.T) {
-	act := &recordingActuator{}
-	a, _ := newTestAgent(t, false, act)
-	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleDown, Current: 2000, Target: 1000}
-	a.actuate(context.Background(), independentDisk(), d, time.Now())
-	if len(act.calls) != 0 {
-		t.Errorf("Actuator.Apply called %d times, want 0 — scale-down must be refused before reaching the Actuator", len(act.calls))
-	}
-}
-
-func TestActuate_scaleUpUnaffectedByGate(t *testing.T) {
-	act := &recordingActuator{}
-	a, tracker := newTestAgent(t, false, act)
-	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
-	a.actuate(context.Background(), independentDisk(), d, time.Now())
-	if len(act.calls) != 1 {
-		t.Fatalf("Actuator.Apply called %d times, want 1 for an allowed ScaleUp", len(act.calls))
-	}
-	if got := tracker.State(independentDisk().Disk.IdentityKey(), time.Now()).LastChangeUp; got.IsZero() {
-		t.Error("RecordChange was not called for a successful scale-up")
-	}
-}
-
-func TestActuate_allowScaleDownTrueReachesActuator(t *testing.T) {
-	act := &recordingActuator{}
-	a, _ := newTestAgent(t, true, act)
+	a, _ := newTestAgent(t, act)
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleDown, Current: 2000, Target: 1000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 	if len(act.calls) != 1 {
-		t.Errorf("Actuator.Apply called %d times, want 1 when scale-down is explicitly allowed", len(act.calls))
+		t.Errorf("Actuator.Apply called %d times, want 1", len(act.calls))
 	}
 }
 
@@ -196,24 +162,23 @@ func newDiscoverableTestAgent(t *testing.T, act actuator.Actuator, client comput
 		t.Fatalf("NewSampler: %v", err)
 	}
 	return &Agent{
-		vmName:         "vm-1",
-		allowScaleDown: true,
-		cfg:            &config.Config{Disks: config.DisksSpec{Mode: "auto-discovery"}},
-		resolved:       &config.ResolvedConfig{},
-		client:         client,
-		sampler:        sampler,
-		actuator:       act,
-		tracker:        state.NewTracker(budget),
-		telemetry:      telemetry.NewRegistry(),
-		journal:        journal.NewWriter(discard{}),
-		readiness:      &health.Readiness{},
+		vmName:    "vm-1",
+		cfg:       &config.Config{Disks: config.DisksSpec{Mode: "auto-discovery"}},
+		resolved:  &config.ResolvedConfig{},
+		client:    client,
+		sampler:   sampler,
+		actuator:  act,
+		tracker:   state.NewTracker(budget),
+		telemetry: telemetry.NewRegistry(),
+		journal:   journal.NewWriter(discard{}),
+		readiness: &health.Readiness{},
 	}
 }
 
 func TestActuate_successAdoptsAppliedValueImmediately(t *testing.T) {
 	// A successful write must immediately update the managed snapshot.
 	act := &recordingActuator{}
-	a, _ := newTestAgent(t, true, act)
+	a, _ := newTestAgent(t, act)
 	a.managed = []registry.ManagedDisk{independentDisk()}
 
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
@@ -226,7 +191,7 @@ func TestActuate_successAdoptsAppliedValueImmediately(t *testing.T) {
 
 func TestActuate_telemetry_successMovesProvisionedIOPS(t *testing.T) {
 	act := &recordingActuator{}
-	a, _ := newTestAgent(t, true, act)
+	a, _ := newTestAgent(t, act)
 	a.managed = []registry.ManagedDisk{independentDisk()}
 
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
@@ -241,7 +206,7 @@ func TestActuate_telemetry_successMovesProvisionedIOPS(t *testing.T) {
 
 func TestActuate_telemetry_dryRunNeverMovesProvisionedIOPS(t *testing.T) {
 	act := &recordingActuator{}
-	a, _ := newTestAgent(t, true, act)
+	a, _ := newTestAgent(t, act)
 	a.dryRun = true
 
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
@@ -259,7 +224,7 @@ func TestActuate_telemetry_dryRunNeverMovesProvisionedIOPS(t *testing.T) {
 
 func TestActuate_telemetry_failedWriteNeverMovesProvisionedIOPS(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
-	a, _ := newTestAgent(t, true, act)
+	a, _ := newTestAgent(t, act)
 	a.client = &stubClient{disks: map[string]*compute.Disk{
 		"vm-1-data": {Name: "vm-1-data", SpecIOPS: 1000}, // live still matches Current
 	}}
@@ -341,7 +306,6 @@ func newReconcileTestAgent(t *testing.T, lastDiscoverySuccess time.Time) (*Agent
 	var journalOut bytes.Buffer
 	return &Agent{
 		vmName:               "vm-1",
-		allowScaleDown:       true,
 		maxDiscoveryAge:      time.Minute,
 		lastDiscoverySuccess: lastDiscoverySuccess,
 		// Immediate invalidation and age-based staleness are independent guards.
@@ -708,7 +672,6 @@ func TestReconcile_vmCapReachedAggregatesRegardlessOfDiskOrder(t *testing.T) {
 			}
 			a := &Agent{
 				vmName:               "vm-1",
-				allowScaleDown:       true,
 				maxDiscoveryAge:      time.Minute,
 				lastDiscoverySuccess: time.Now(),
 				managedValid:         true,
@@ -828,7 +791,6 @@ func TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption(t *testing.T) {
 	var journalOut bytes.Buffer
 	a := &Agent{
 		vmName:               "vm-1",
-		allowScaleDown:       true,
 		maxDiscoveryAge:      time.Minute,
 		lastDiscoverySuccess: time.Now(),
 		managedValid:         true,
@@ -838,7 +800,7 @@ func TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption(t *testing.T) {
 		resolved:             &config.ResolvedConfig{VMPolicy: testResolvedPolicy()},
 		sampler:              sampler,
 		analyzer:             analyzer.NewWindowAnalyzer(),
-		decider:              decider.NewPolicyDecider(true),
+		decider:              decider.NewPolicyDecider(),
 		actuator:             &recordingActuator{},
 		tracker:              state.NewTracker(budget),
 		telemetry:            telemetry.NewRegistry(),
@@ -959,7 +921,6 @@ func TestReconcile_unmeasurableSiblingBlocksScaleUp(t *testing.T) {
 			var journalOut bytes.Buffer
 			a := &Agent{
 				vmName:               "vm-1",
-				allowScaleDown:       true,
 				maxDiscoveryAge:      time.Minute,
 				maxSampleAge:         time.Hour,
 				maxSampleGap:         10 * time.Minute,
@@ -971,7 +932,7 @@ func TestReconcile_unmeasurableSiblingBlocksScaleUp(t *testing.T) {
 				resolved:             &config.ResolvedConfig{VMPolicy: testResolvedPolicy()},
 				sampler:              sampler,
 				analyzer:             analyzer.NewWindowAnalyzer(),
-				decider:              decider.NewPolicyDecider(true),
+				decider:              decider.NewPolicyDecider(),
 				actuator:             &recordingActuator{},
 				tracker:              state.NewTracker(budget),
 				telemetry:            telemetry.NewRegistry(),
@@ -1030,7 +991,7 @@ func TestReconcile_unresolvedGuestPathSiblingBlocksScaleUp(t *testing.T) {
 	a.maxSampleAge = time.Hour
 	a.maxSampleGap = 10 * time.Minute
 	a.analyzer = analyzer.NewWindowAnalyzer()
-	a.decider = decider.NewPolicyDecider(true)
+	a.decider = decider.NewPolicyDecider()
 	a.guestPathVerifier = func(ref metrics.DiskRef) error {
 		if ref.DeviceName == "bad" {
 			return errors.New("simulated: unresolvable guest path")
@@ -1133,7 +1094,7 @@ func TestDiscover_allDisksFailingVerificationLeavesEmptyManagedSet(t *testing.T)
 }
 
 func TestHasManagedDisks(t *testing.T) {
-	a, _ := newTestAgent(t, true, &recordingActuator{})
+	a, _ := newTestAgent(t, &recordingActuator{})
 	if a.hasManagedDisks() {
 		t.Error("hasManagedDisks() = true on a freshly built Agent with no managed disks yet")
 	}
@@ -1207,7 +1168,7 @@ func TestDiscover_selectedSucceedsWhenEveryDeviceMatches(t *testing.T) {
 
 func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
 	act := &recordingActuator{}
-	a, tracker := newTestAgent(t, true, act)
+	a, tracker := newTestAgent(t, act)
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
 
@@ -1221,7 +1182,7 @@ func TestActuate_reservesBeforeWriteAndConfirmsAfterSuccess(t *testing.T) {
 
 func TestActuate_writeFailure_liveStillAtBefore_releases(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
-	a, tracker := newTestAgent(t, true, act)
+	a, tracker := newTestAgent(t, act)
 	a.client = &stubClient{disks: map[string]*compute.Disk{
 		"vm-1-data": {Name: "vm-1-data", SpecIOPS: 1000}, // live still matches Before
 	}}
@@ -1242,7 +1203,7 @@ func TestActuate_writeFailure_liveStillAtBefore_releases(t *testing.T) {
 func TestActuate_writeFailure_liveAtTarget_confirmsNotReleases(t *testing.T) {
 	// The platform may have applied the request despite the returned transport error.
 	act := &erroringActuatorRecording{err: errors.New("simulated: response lost after the request landed")}
-	a, tracker := newTestAgent(t, true, act)
+	a, tracker := newTestAgent(t, act)
 	a.managed = []registry.ManagedDisk{independentDisk()}
 	a.client = &stubClient{disks: map[string]*compute.Disk{
 		"vm-1-data": {Name: "vm-1-data", SpecIOPS: 2000}, // live already at Target
@@ -1267,7 +1228,7 @@ func TestActuate_writeFailure_liveAtTarget_confirmsNotReleases(t *testing.T) {
 
 func TestActuate_writeFailure_liveAmbiguous_staysPending(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
-	a, tracker := newTestAgent(t, true, act)
+	a, tracker := newTestAgent(t, act)
 	a.client = &stubClient{disks: map[string]*compute.Disk{
 		"vm-1-data": {Name: "vm-1-data", SpecIOPS: 5000}, // matches neither Before nor Target
 	}}
@@ -1284,7 +1245,7 @@ func TestActuate_writeFailure_liveAmbiguous_staysPending(t *testing.T) {
 
 func TestActuate_writeFailure_liveReadFails_staysPending(t *testing.T) {
 	act := &erroringActuatorRecording{err: errors.New("simulated write failure")}
-	a, tracker := newTestAgent(t, true, act)
+	a, tracker := newTestAgent(t, act)
 	a.client = &stubClient{disks: map[string]*compute.Disk{}} // GetDisk fails: "stub: unused"
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
@@ -1300,7 +1261,7 @@ func TestActuate_writeFailure_liveReadFails_staysPending(t *testing.T) {
 func TestActuate_dryRunErrorAlwaysReleases(t *testing.T) {
 	// Dry-run errors cannot hide a mutation, so the reservation is releasable.
 	act := &erroringActuatorRecording{err: errors.New("simulated dry-run validation failure")}
-	a, tracker := newTestAgent(t, true, act)
+	a, tracker := newTestAgent(t, act)
 	a.dryRun = true
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
@@ -1315,7 +1276,7 @@ func TestActuate_dryRunErrorAlwaysReleases(t *testing.T) {
 
 func TestActuate_releasesReservationOnDryRun(t *testing.T) {
 	act := &recordingActuator{}
-	a, tracker := newTestAgent(t, true, act)
+	a, tracker := newTestAgent(t, act)
 	a.dryRun = true
 	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
 	a.actuate(context.Background(), independentDisk(), d, time.Now())
@@ -1358,12 +1319,11 @@ func newTestAgentWithUnhealthyBudget(t *testing.T, act actuator.Actuator) *Agent
 		t.Fatal("test setup: expected the tracker to be unhealthy after a failed Reserve")
 	}
 	return &Agent{
-		vmName:         "vm-1",
-		allowScaleDown: true,
-		actuator:       act,
-		tracker:        tracker,
-		telemetry:      telemetry.NewRegistry(),
-		journal:        journal.NewWriter(discard{}),
+		vmName:    "vm-1",
+		actuator:  act,
+		tracker:   tracker,
+		telemetry: telemetry.NewRegistry(),
+		journal:   journal.NewWriter(discard{}),
 	}
 }
 

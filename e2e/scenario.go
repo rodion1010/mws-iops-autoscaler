@@ -28,6 +28,12 @@ func recoveryContext() (context.Context, context.CancelFunc) {
 // e2eScaleUpWindow drives both agent configuration and result validation.
 const e2eScaleUpWindow = 30 * time.Second
 
+// e2eScaleDownWindow mirrors e2eScaleUpWindow for the down direction. It
+// must stay >= e2eScaleUpWindow (internal/config/validate.go's
+// scale_down_window < scale_up_window rule) — 60s against 30s leaves that
+// margin without materially slowing the scale-down scenarios down.
+const e2eScaleDownWindow = 60 * time.Second
+
 // defaultDiscoveryInterval is agentConfigYAML's discovery_interval, unchanged
 // since before DisksSpec existed. Every existing scenario relies on it.
 const defaultDiscoveryInterval = 5 * time.Minute
@@ -103,7 +109,7 @@ policy:
   limits: {min_iops: 1000, max_iops: 10000}
   advanced:
     enabled: true
-    evaluation: {scale_up_window: %s, scale_down_window: 60s}
+    evaluation: {scale_up_window: %s, scale_down_window: %s}
     saturation: {utilization_threshold: 0.90, queue_depth_threshold: 0.5}
     cooldown: {scale_up: 10s, scale_down: 20s}
 
@@ -111,7 +117,7 @@ policy:
 runtime:
   metrics: {source: guest, collection_interval: 5s}
   controller: {reconcile_interval: 10s, discovery_interval: %s}
-`, e2eScaleUpWindow, disksBlockYAML(disks), discoveryInterval)
+`, e2eScaleUpWindow, e2eScaleDownWindow, disksBlockYAML(disks), discoveryInterval)
 }
 
 // Bracketed patterns prevent pkill from matching its own command line.
@@ -412,6 +418,46 @@ func waitForScaleUp(ctx context.Context, client compute.Client, t Target, timeou
 	}
 }
 
+// WaitForScaleDown is WaitForScaleUp's mirror: it requires an observed
+// baseline and rejects a drop that occurs before the agent's scale-down
+// window could have produced it.
+func WaitForScaleDown(ctx context.Context, client compute.Client, t Target, timeout time.Duration, agentStarted time.Time) (int64, error) {
+	return waitForScaleDown(ctx, client, t, timeout, e2eScaleDownWindow, 5*time.Second, agentStarted)
+}
+
+// waitForScaleDown exposes timing for deterministic regression tests, mirroring waitForScaleUp.
+func waitForScaleDown(ctx context.Context, client compute.Client, t Target, timeout, minScaleDown, pollInterval time.Duration, agentStarted time.Time) (int64, error) {
+	deadline := time.Now().Add(timeout)
+	observedBaseline := false
+	for {
+		current, err := CurrentIOPS(ctx, client, t)
+		if err != nil {
+			return 0, fmt.Errorf("e2e: wait for scale-down: %w", err)
+		}
+		if !observedBaseline {
+			if current != t.BaselineIOPS {
+				return 0, fmt.Errorf("e2e: wait for scale-down: precondition: first observation is %d, want baseline %d — the disk is already off baseline (leftover elevation from a prior run or a stale read); refusing to credit it as scale-down",
+					current, t.BaselineIOPS)
+			}
+			observedBaseline = true
+		} else if current < t.BaselineIOPS {
+			if elapsed := time.Since(agentStarted); elapsed < minScaleDown {
+				return 0, fmt.Errorf("e2e: wait for scale-down: observed %d below baseline %d after %s — before the %s scale-down window could elapse since the agent started, so this cannot be this scenario's own scale-down (leftover reduction or a racing writer); failing closed",
+					current, t.BaselineIOPS, elapsed, minScaleDown)
+			}
+			return current, nil
+		}
+		if time.Now().After(deadline) {
+			return current, fmt.Errorf("e2e: wait for scale-down: still at %d after %s (baseline %d)", current, timeout, t.BaselineIOPS)
+		}
+		select {
+		case <-ctx.Done():
+			return current, ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
 // FetchJournal returns diagnostic output; it does not determine success.
 func FetchJournal(ctx context.Context, t Target) string {
 	out, err := t.Run(ctx, "cat "+remoteWorkDir+"/journal.jsonl 2>/dev/null || true")
@@ -521,6 +567,39 @@ func AssertNoIOPSChange(ctx context.Context, client compute.Client, t Target, du
 		case <-time.After(pollInterval):
 		}
 	}
+}
+
+// countActuatingTransitions counts, in journal order, how many times an
+// actuating record's Action differs from the previous one — skipping
+// no_action/vm_cap_reached records, which never actuate.
+func countActuatingTransitions(recs []journalRecord) int {
+	transitions := 0
+	last := ""
+	for _, rec := range recs {
+		if rec.Action != "scale_up" && rec.Action != "scale_down" {
+			continue
+		}
+		if last != "" && rec.Action != last {
+			transitions++
+		}
+		last = rec.Action
+	}
+	return transitions
+}
+
+// AssertBoundedFlapping fetches the current journal and fails if the number
+// of alternating scale_up/scale_down actuations exceeds maxTransitions
+// (design.md §8.3's "no flapping" scenario). A point-in-time check, called
+// after a scenario's own load pattern has already run to completion.
+func AssertBoundedFlapping(ctx context.Context, t Target, maxTransitions int) error {
+	recs, err := journalRecords(ctx, t)
+	if err != nil {
+		return fmt.Errorf("e2e: assert bounded flapping: %w", err)
+	}
+	if got := countActuatingTransitions(recs); got > maxTransitions {
+		return fmt.Errorf("e2e: assert bounded flapping: %d scale_up/scale_down alternations, want <= %d — hysteresis/cooldown should have suppressed this", got, maxTransitions)
+	}
+	return nil
 }
 
 // runAgentScenario builds, installs and starts the agent against target,

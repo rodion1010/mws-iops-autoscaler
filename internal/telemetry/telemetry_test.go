@@ -139,6 +139,27 @@ func TestRecordVMCapReached_falseWhenNoDiskCapped(t *testing.T) {
 	}
 }
 
+func TestRecordVMMinIOPSFloorExceedsPool(t *testing.T) {
+	cases := []struct {
+		name    string
+		exceeds bool
+		want    string
+	}{
+		{"floors sum past the pool", true, `iops_autoscaler_vm_min_iops_floor_exceeds_pool{vm="vm-1"} 1`},
+		{"floors fit within the pool", false, `iops_autoscaler_vm_min_iops_floor_exceeds_pool{vm="vm-1"} 0`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry()
+			r.RecordVMMinIOPSFloorExceedsPool("vm-1", tc.exceeds)
+			body := scrape(t, r)
+			if !strings.Contains(body, tc.want) {
+				t.Errorf("body does not contain %q:\n%s", tc.want, body)
+			}
+		})
+	}
+}
+
 func diskName(i int) string {
 	if i == 0 {
 		return "d1"

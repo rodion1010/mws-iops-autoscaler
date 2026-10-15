@@ -189,6 +189,64 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "invites flapping",
 		},
 		{
+			name: "scale_down_utilization not below scale_up_utilization",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Target: &TargetSpec{
+						ScaleUpUtilization:   floatPtr(0.70),
+						ScaleDownUtilization: floatPtr(0.70),
+					},
+				}
+			},
+			wantSub: "invites flapping",
+		},
+		{
+			name: "scale_down_utilization above scale_up_utilization",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled: boolPtr(true),
+					Target: &TargetSpec{
+						ScaleUpUtilization:   floatPtr(0.70),
+						ScaleDownUtilization: floatPtr(0.85),
+					},
+				}
+			},
+			wantSub: "invites flapping",
+		},
+		{
+			// A completed downscale here lands at 0.80 utilization, above
+			// the 0.70 saturation gate — immediately a saturated candidate
+			// again, even though scale_down (0.80) is below scale_up
+			// (0.90) and the old check alone would have passed this.
+			name: "scale_down_utilization above the saturation gate despite being below scale_up_utilization",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(0.70)},
+					Target: &TargetSpec{
+						ScaleUpUtilization:   floatPtr(0.90),
+						ScaleDownUtilization: floatPtr(0.80),
+					},
+				}
+			},
+			wantSub: "scale_down_utilization: 0.8 is not below saturation.utilization_threshold",
+		},
+		{
+			name: "scale_up_utilization at or above the saturation gate",
+			mutate: func(c *Config) {
+				c.Policy.Advanced = &AdvancedSpec{
+					Enabled:    boolPtr(true),
+					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(0.90)},
+					Target: &TargetSpec{
+						ScaleUpUtilization:   floatPtr(0.90),
+						ScaleDownUtilization: floatPtr(0.70),
+					},
+				}
+			},
+			wantSub: "scale_up_utilization: 0.9 is not below saturation.utilization_threshold",
+		},
+		{
 			name: "cooldown.scale_up longer than scale_up_window",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{

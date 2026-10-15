@@ -29,7 +29,7 @@ func lat(ms int) analyzer.LatencyStat {
 }
 
 func TestDecide_resizeInProgressBlocksEitherDirection(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	a := analyzer.Analysis{Saturated: true}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{ResizeInProgress: true}, epoch)
 	if got.Action != ActionNoAction || got.Reason != "resize_in_progress" {
@@ -41,7 +41,7 @@ func TestDecide_resizeInProgressBlocksEitherDirection(t *testing.T) {
 }
 
 func TestDecide_vmCapReached(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	a := analyzer.Analysis{
 		Saturated: true, QueueGrowthRate: 10, ServedIOPS: 900,
 	}
@@ -66,7 +66,7 @@ func TestDecide_vmCapReached(t *testing.T) {
 // "actionable — add vCPU" (design.md §7.3), which a measurement gap must
 // never alias onto.
 func TestDecide_siblingDemandUnknownBlocksScaleUp(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 10, QueueGrowthRateValid: true, ServedIOPS: 900}
 	vm := VMState{IOPSPool: 100000, SiblingP95IOPS: 0, SiblingDemandUnknown: true}
 	got := d.Decide("disk1", 1000, a, vm, testPolicy, GuardrailState{}, epoch)
@@ -81,22 +81,77 @@ func TestDecide_siblingDemandUnknownBlocksScaleUp(t *testing.T) {
 	}
 }
 
-// TestDecide_siblingDemandUnknownDoesNotBlockScaleDown documents the
-// intentional scope of issue #56's fix: reducing this disk's own IOPS never
-// consumes more of the shared pool, so an unmeasured sibling has nothing to
-// fail closed against on the scale-down path.
-func TestDecide_siblingDemandUnknownDoesNotBlockScaleDown(t *testing.T) {
-	d := NewPolicyDecider(true)
+// TestDecide_siblingDemandUnknownBlocksScaleDown: a quiet reading on this
+// disk is indistinguishable from demand the shared VM pool is suppressing,
+// so an unmeasured sibling must fail closed on the scale-down path too —
+// the mirror of TestDecide_siblingDemandUnknownBlocksScaleUp above.
+func TestDecide_siblingDemandUnknownBlocksScaleDown(t *testing.T) {
+	d := NewPolicyDecider()
 	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
 	vm := VMState{IOPSPool: 100000, SiblingP95IOPS: 0, SiblingDemandUnknown: true}
 	got := d.Decide("disk1", 2000, a, vm, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionNoAction || got.Reason != "sibling_demand_unmeasurable" {
+		t.Errorf("got %+v, want ActionNoAction/sibling_demand_unmeasurable", got)
+	}
+}
+
+// TestDecide_vmPoolContendedBlocksScaleDown: the VM pool has no room left
+// even for this disk's own current limit (headroom <= current) — a busy
+// sibling could be suppressing what this disk would otherwise serve, so its
+// quiet reading cannot be trusted as real idleness.
+func TestDecide_vmPoolContendedBlocksScaleDown(t *testing.T) {
+	d := NewPolicyDecider()
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
+	vm := VMState{IOPSPool: 2000, SiblingP95IOPS: 1500} // headroom = 500 <= current (2000)
+	got := d.Decide("disk1", 2000, a, vm, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionNoAction || got.Reason != "vm_pool_contended" {
+		t.Errorf("got %+v, want ActionNoAction/vm_pool_contended", got)
+	}
+}
+
+// TestDecide_vmPoolSlackAllowsScaleDown confirms the new gate above doesn't
+// regress the ordinary case: ample headroom still lets a genuinely quiet
+// disk scale down.
+func TestDecide_vmPoolSlackAllowsScaleDown(t *testing.T) {
+	d := NewPolicyDecider()
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
+	vm := VMState{IOPSPool: 100000, SiblingP95IOPS: 0} // ample headroom
+	got := d.Decide("disk1", 2000, a, vm, testPolicy, GuardrailState{}, epoch)
 	if got.Action != ActionScaleDown {
-		t.Errorf("Action = %v, want ActionScaleDown (unmeasured sibling must not block scale-down)", got.Action)
+		t.Errorf("Action = %v, want ActionScaleDown (plenty of VM headroom must not block scale-down)", got.Action)
+	}
+}
+
+// TestDecide_atPolicyMaxWithAmplePoolStillScalesDown is the regression for
+// the vm_pool_contended check once wrongly using the policy/platform-capped
+// ceiling instead of raw VM headroom: a disk sitting at its own max_iops
+// has ceiling <= current regardless of VM load, which must never read as
+// contention when the VM pool itself has plenty of room.
+func TestDecide_atPolicyMaxWithAmplePoolStillScalesDown(t *testing.T) {
+	d := NewPolicyDecider()
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
+	got := d.Decide("disk1", testPolicy.MaxIOPS, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
+	if got.Action != ActionScaleDown {
+		t.Errorf("got %+v, want ActionScaleDown — sitting at max_iops must not be mistaken for VM-pool contention", got)
+	}
+}
+
+// TestDecide_abovePolicyMaxWithAmplePoolStillScalesDown covers an operator
+// lowering max_iops below a disk's live current value: the policy cap must
+// not be misreported as VM contention either.
+func TestDecide_abovePolicyMaxWithAmplePoolStillScalesDown(t *testing.T) {
+	d := NewPolicyDecider()
+	lowered := testPolicy
+	lowered.MaxIOPS = 2000 // operator lowered the cap below current's 5000
+	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
+	got := d.Decide("disk1", 5000, a, plentyOfHeadroom, lowered, GuardrailState{}, epoch)
+	if got.Action != ActionScaleDown {
+		t.Errorf("got %+v, want ActionScaleDown — a lowered policy max must not be mistaken for VM-pool contention", got)
 	}
 }
 
 func TestDecide_cooldownScaleUpBlocks(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 10, ServedIOPS: 900}
 	state := GuardrailState{LastChangeUp: epoch.Add(-1 * time.Minute)} // 1m ago, cooldown is 5m
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, state, epoch)
@@ -106,7 +161,7 @@ func TestDecide_cooldownScaleUpBlocks(t *testing.T) {
 }
 
 func TestDecide_cooldownScaleDownBlocks(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
 	state := GuardrailState{LastChangeDown: epoch.Add(-1 * time.Minute)} // cooldown is 30m
 	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, testPolicy, state, epoch)
@@ -116,7 +171,7 @@ func TestDecide_cooldownScaleDownBlocks(t *testing.T) {
 }
 
 func TestDecide_scaleUpOpenRegime(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// (900 served + 100 growth) / 0.85 rounds up to 1200 IOPS.
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, QueueGrowthRateValid: true, ServedIOPS: 900}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -132,7 +187,7 @@ func TestDecide_scaleUpOpenRegime(t *testing.T) {
 }
 
 func TestDecide_scaleUpClosedRegimeRatioClamped(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// Stable queue selects the closed regime: latency is three times baseline.
 	a := analyzer.Analysis{
 		Saturated: true, QueueGrowthRate: 0, ServedIOPS: 900,
@@ -149,7 +204,7 @@ func TestDecide_scaleUpClosedRegimeRatioClamped(t *testing.T) {
 }
 
 func TestDecide_baselineUnavailableIsDefensiveNoAction(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// Defensive case: a hand-built saturated Analysis lacks a baseline.
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 0, BaselineEstablished: false}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -159,7 +214,7 @@ func TestDecide_baselineUnavailableIsDefensiveNoAction(t *testing.T) {
 }
 
 func TestDecide_targetBelowMinChangeIsNoAction(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// (900 served + 5 growth) / 0.85 rounds to 1100, below min_change.
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 5, QueueGrowthRateValid: true, ServedIOPS: 900}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -172,7 +227,7 @@ func TestDecide_targetBelowMinChangeIsNoAction(t *testing.T) {
 }
 
 func TestDecide_budgetExhaustedBlocksOtherwiseValidScaleUp(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, QueueGrowthRateValid: true, ServedIOPS: 900}
 	state := GuardrailState{ChangesInLast24h: testPolicy.MaxChangesPer24h}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, state, epoch)
@@ -182,7 +237,7 @@ func TestDecide_budgetExhaustedBlocksOtherwiseValidScaleUp(t *testing.T) {
 }
 
 func TestDecide_scaleDown(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// Demand rounds to 500, then max_scale_down_ratio clamps it to 1000.
 	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300, EffectiveDemandP95Down: 300}
 	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -195,7 +250,7 @@ func TestDecide_scaleDown(t *testing.T) {
 }
 
 func TestDecide_scaleDownNeverBelowMinIOPS(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// Keep Current high enough for the minimum-change assertion after ratio clamping.
 	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 50, EffectiveDemandP95Down: 50}
 	got := d.Decide("disk1", 1500, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -208,7 +263,7 @@ func TestDecide_scaleDownNeverBelowMinIOPS(t *testing.T) {
 }
 
 func TestDecide_scaleDownTargetRetainsHeadroomForBothIOPSAndBandwidth(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// Large blocks make effective demand 1800 IOPS-equivalent rather than 900 served IOPS.
 	a := analyzer.Analysis{
 		Underutilized:             true,
@@ -235,47 +290,8 @@ func TestDecide_scaleDownTargetRetainsHeadroomForBothIOPSAndBandwidth(t *testing
 	}
 }
 
-func TestDecide_scaleDownDisabledNeverWrites(t *testing.T) {
-	// Process capability disables scale-down independently of policy.
-	d := NewPolicyDecider(false)
-	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300, EffectiveDemandP95Down: 300}
-	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
-	if got.Action != ActionNoAction {
-		t.Fatalf("Action = %v, want ActionNoAction (got %+v)", got.Action, got)
-	}
-	if got.Reason != "scale_down_disabled" {
-		t.Errorf("Reason = %q, want scale_down_disabled", got.Reason)
-	}
-	if got.Target != got.Current {
-		t.Errorf("Target = %d, want == Current (%d) — no candidate target when the direction is disabled", got.Target, got.Current)
-	}
-	if got.Demand != 300 {
-		t.Errorf("Demand = %v, want 300 (candidate recommendation still surfaced for observability)", got.Demand)
-	}
-}
-
-func TestDecide_scaleDownDisabledIgnoresCooldownAndBudget(t *testing.T) {
-	// The capability gate precedes cooldown and budget checks.
-	d := NewPolicyDecider(false)
-	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 300, EffectiveDemandP95Down: 300}
-	state := GuardrailState{} // no cooldown active, full budget
-	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, testPolicy, state, epoch)
-	if got.Action != ActionNoAction || got.Reason != "scale_down_disabled" {
-		t.Errorf("got %+v, want NoAction/scale_down_disabled regardless of cooldown/budget state", got)
-	}
-}
-
-func TestDecide_scaleUpUnaffectedByScaleDownGate(t *testing.T) {
-	d := NewPolicyDecider(false)
-	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 100, QueueGrowthRateValid: true, ServedIOPS: 900}
-	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
-	if got.Action != ActionScaleUp {
-		t.Errorf("Action = %v, want ActionScaleUp — the scale-down gate must not affect scale-up", got.Action)
-	}
-}
-
 func TestDecide_neitherSignalIsNoAction(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// Fresh, full, quiet evidence is a real no-signal outcome.
 	a := analyzer.Analysis{Saturated: false, Underutilized: false, HasData: true, Fresh: true, WindowFullUp: true, WindowFullDown: true}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -285,7 +301,7 @@ func TestDecide_neitherSignalIsNoAction(t *testing.T) {
 }
 
 func TestDecide_noDataIsNoAction(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// HasData=false represents true cold start.
 	a := analyzer.Analysis{Saturated: false, Underutilized: false, HasData: false, Fresh: false}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -295,7 +311,7 @@ func TestDecide_noDataIsNoAction(t *testing.T) {
 }
 
 func TestDecide_staleMetricsIsNoAction(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// HasData=true with Fresh=false represents previously available data becoming stale.
 	a := analyzer.Analysis{Saturated: false, Underutilized: false, HasData: true, Fresh: false, WindowFullUp: true, WindowFullDown: true}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -305,7 +321,7 @@ func TestDecide_staleMetricsIsNoAction(t *testing.T) {
 }
 
 func TestDecide_windowNotFullIsNoAction(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	// Fresh but incomplete windows must report cold start.
 	a := analyzer.Analysis{Saturated: false, Underutilized: false, HasData: true, Fresh: true, WindowFullUp: false, WindowFullDown: false}
 	got := d.Decide("disk1", 1000, a, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
@@ -315,7 +331,7 @@ func TestDecide_windowNotFullIsNoAction(t *testing.T) {
 }
 
 func TestDecide_vmHeadroomAndBudgetRemainingAlwaysSet(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	vm := VMState{IOPSPool: 6000, SiblingP95IOPS: 1500}
 	state := GuardrailState{ResizeInProgress: true, ChangesInLast24h: 10}
 	got := d.Decide("disk1", 1000, analyzer.Analysis{}, vm, testPolicy, state, epoch)
@@ -328,7 +344,7 @@ func TestDecide_vmHeadroomAndBudgetRemainingAlwaysSet(t *testing.T) {
 }
 
 func TestDecide_diskIDAndCurrentSetEvenOnNoAction(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	got := d.Decide("disk-xyz", 3000, analyzer.Analysis{}, plentyOfHeadroom, testPolicy, GuardrailState{}, epoch)
 	if got.DiskID != "disk-xyz" || got.Current != 3000 {
 		t.Errorf("got DiskID=%q Current=%d, want disk-xyz/3000", got.DiskID, got.Current)
@@ -437,7 +453,7 @@ func TestDemand_invalidQueueGrowthRateNeverSums(t *testing.T) {
 
 // Invalid queue units fall back to latency demand rather than max-clamp.
 func TestDecide_invalidQueueGrowthRateFallsBackNotMaxClamp(t *testing.T) {
-	d := NewPolicyDecider(true)
+	d := NewPolicyDecider()
 	a := analyzer.Analysis{
 		Saturated:            true,
 		QueueGrowthRate:      1_000_000,

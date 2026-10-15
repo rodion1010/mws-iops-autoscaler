@@ -1,5 +1,5 @@
-// Command mws-iops-autoscaler is the MWS IOPS Autoscaler agent (Phase 1: local
-// mode, scale-up — docs/prd-mws-iops-autoscaler.md §6).
+// Command mws-iops-autoscaler is the MWS IOPS Autoscaler agent (local mode,
+// bidirectional — docs/prd-mws-iops-autoscaler.md §6).
 package main
 
 import (
@@ -133,12 +133,6 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	readiness := &health.Readiness{}
 	readiness.SetConfigValid(true) // LoadAndValidate above already proved this
 
-	// Phase 1 (PRD §6) is local mode, scale-up only. This is the one place
-	// that capability gets decided (issue #14) — Phase 3 flips it here and
-	// nowhere else; both the Decider and the Agent's own defense-in-depth
-	// check read the same value, not two independently maintained copies.
-	const allowScaleDown = false
-
 	// Freshness bounds (issue #15), derived from the same collection/
 	// discovery cadence the pipeline already runs on rather than hardcoded
 	// or independently configured: a threshold that isn't a multiple of
@@ -157,7 +151,6 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 		resolved:          resolved,
 		vmName:            vmName,
 		dryRun:            dryRun,
-		allowScaleDown:    allowScaleDown,
 		maxDiscoveryAge:   maxDiscoveryAge,
 		maxSampleAge:      maxSampleAge,
 		maxSampleGap:      maxSampleGap,
@@ -165,7 +158,7 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 		client:            client,
 		sampler:           sampler,
 		analyzer:          analyzer.NewWindowAnalyzer(),
-		decider:           decider.NewPolicyDecider(allowScaleDown),
+		decider:           decider.NewPolicyDecider(),
 		actuator:          actuator.NewComputeActuator(client),
 		tracker:           tracker,
 		telemetry:         reg,

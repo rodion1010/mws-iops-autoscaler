@@ -533,8 +533,20 @@ sibling sharing the pool has no data or a stale sample this cycle, the controlle
 already be spent. This is deliberately **not** `VM_IOPS_CAP_REACHED` — that action drives
 `iops_autoscaler_vm_cap_reached`, alert-worthy as "actionable — add vCPU" (§7.3), and a measurement
 gap is a different remediation (fix that disk's metrics path) that must not alias onto the vCPU-upgrade
-signal. Scale-down is unaffected — reducing this disk's own IOPS never consumes more of the shared
-pool, so an unmeasured sibling has nothing to fail closed against on that path (issue #56).
+signal.
+
+**Scale-down fails closed on the same two conditions, for a different reason.** A quiet reading on
+this disk is indistinguishable from demand the shared pool is itself suppressing: a busy sibling can
+hold this disk's served IOPS well below what it would actually use, which reads as `Underutilized`
+even though cutting the limit now would leave it unable to serve its real peak once that sibling's
+load clears. So the `Underutilized` branch checks the same `SiblingDemandUnknown` flag
+(`sibling_demand_unmeasurable`, same reasoning as scale-up's) and `Decision.VMHeadroomIOPS` — the raw
+`vm_iops_limit − p95_aggregate_iops_of_other_disks`, **not** the policy/platform-capped `ceiling` the
+sizing math above uses. A disk already sitting at its own `max_iops` has `ceiling <= current` too,
+with no VM contention at all; using the capped ceiling here would permanently refuse to scale that
+disk back down once quiet, long after the load that justified the cap is gone. If raw headroom has
+fallen to or below this disk's own `current` limit (`vm_pool_contended`), its quiet reading cannot be
+trusted and no action is taken. Both checks are evaluated before cooldown and guardrails.
 
 ### 4.7 Actuation
 
@@ -914,19 +926,6 @@ type Decider interface {
     Decide(diskID string, current int64, a Analysis, vm VMState, p EffectivePolicy, state GuardrailState, now time.Time) Decision
 }
 
-// PolicyDecider (the concrete implementation) also takes allowScaleDown, a
-// constructor-only capability, not a per-call argument: Phase 1 (PRD §6) is
-// scale-up only, and that must not depend on any user-tunable threshold
-// happening to never trigger scale-down (issue #14). With allowScaleDown
-// false, Underutilized still computes and surfaces a candidate Demand for
-// observability, but Action is always no_action/scale_down_disabled,
-// checked before cooldown or guardrails — never merely clamped by them.
-// The orchestrator applies the same capability a second time, independently,
-// before ever calling the Actuator (defense in depth: a Decider is an
-// interface, and the caller must not simply trust an implementation to have
-// gotten this right). Phase 3 flips this one constructor argument and
-// nothing else.
-
 // Decide's default (neither Saturated nor Underutilized) branch reports
 // four distinct NoAction reasons, not one generic "no_signal" (issue #15,
 // deepened by the pre-merge review) — an operator reading the
@@ -1069,6 +1068,7 @@ iops_autoscaler_writes_total{path,outcome}                    counter   path=dis
 iops_autoscaler_write_duration_seconds{path}                  histogram
 iops_autoscaler_vm_headroom_iops{disk,vm}                     gauge
 iops_autoscaler_vm_cap_reached{vm}                            gauge 0|1
+iops_autoscaler_vm_min_iops_floor_exceeds_pool{vm}             gauge 0|1
 iops_autoscaler_metric_source{disk,source}                    gauge  guest|platform
 iops_autoscaler_metric_staleness_seconds{disk}                gauge
 iops_autoscaler_window_fill_ratio{disk,direction}             gauge
@@ -1101,6 +1101,15 @@ every managed disk on that VM has been decided, where `anyCapped` is the OR acro
 Previously `RecordDecision` set it per disk inside the loop, so whichever disk was decided last would
 silently overwrite an earlier disk's `ActionVMCapReached` — a VM where one disk capped and a
 later-processed disk did not could export `vm_cap_reached=0`.
+
+`vm_min_iops_floor_exceeds_pool` is `vm_cap_reached`'s static counterpart, not a duplicate of it: it
+sums each managed disk's own resolved `min_iops` (configuration.md §5 — disk > vm > platform default)
+across every disk sharing the VM and compares that sum against the VM's real pool (`VMIOPSPool`, §4.6),
+independent of any observed load. `vm_cap_reached` says demand is currently outrunning the pool;
+`vm_min_iops_floor_exceeds_pool` says the operator's own configured floors already cannot all be
+honored at once, even with every disk sitting idle — a configuration problem to fix in the config file,
+not a signal that the VM needs more vCPU. Set once per reconcile cycle the same way `vm_cap_reached` is,
+over managed disks only (an unmanaged sibling's `min_iops` is not this agent's to account for).
 
 `metric_source{disk,source}` sets **both** the guest and platform series on every call — the active
 source's to 1, the other to 0 — rather than only ever setting the active one to 1. A `GaugeVec` only
@@ -1289,10 +1298,16 @@ controller sees 513/1000 and concludes there is headroom, while the disk is at 1
 
 Not a test but the mechanism that makes the defaults defensible: run `--dry-run` (US-013) against
 real workloads, record every decision that *would* have been made plus what the load did next, then
-tune thresholds against that corpus. This is the same validation step §9.2 folds into M6 before
-actuation is flipped on — a mechanism used once as a gate before GA, and again wherever recalibration
-is needed — not a separate observe-only release phase of its own (§9.2). **No default in
-`docs/configuration.md` should be treated as validated until it has survived this.**
+tune thresholds against that corpus — not a separate observe-only release phase of its own (§9.2).
+**No default in `docs/configuration.md` should be treated as validated until it has survived this.**
+
+This was originally planned as a gate on M6 (scale-up) and M9 (scale-down) actuation each shipping at
+all — §9.2 still describes that original sequencing as design rationale. For scale-down specifically,
+the Product Lead chose to ship the capability itself ahead of that gate (PRD Phase 3 — no production
+users yet, nothing to stage a rollout behind). That decision is about the *capability*, not this
+harness: the defaults remain unvalidated regardless of whether the capability is live, and running
+this corpus against real traffic stays tracked as ordinary hardening work (`docs/TODO.md`), not
+something already satisfied by shipping.
 
 ---
 
@@ -1364,9 +1379,12 @@ visible and reversible on the very next cycle. The estimators in §4.5 are still
 but the cost of that being wrong in the *up* direction is bounded in a way it is not in the *down*
 direction.
 
-**Scale-down (M9) waits until scale-up has run live.** Its failure mode is real, not just wasteful: a
-wrong scale-down throttles the workload. It also gets to reuse M6–M8 telemetry for calibration
-instead of guessing thresholds cold.
+**Scale-down (M9) was designed to wait until scale-up had run live.** Its failure mode is real, not
+just wasteful: a wrong scale-down throttles the workload. It was meant to reuse M6–M8 telemetry for
+calibration instead of guessing thresholds cold. In practice the capability shipped ahead of that
+telemetry existing (PRD Phase 3) — the sequencing above is why M9 was *planned* after M6–M8, not a
+claim that it waited for them in the end; §8.5 is the canonical statement of what calibrating the
+defaults still requires, independent of when the capability itself went live.
 
 **Platform metrics (M7) are built and exercised in `local` mode (M8, shadow/comparison against the
 trusted guest source) before `fleet` mode exists.** `fleet` has no guest fallback — if the platform

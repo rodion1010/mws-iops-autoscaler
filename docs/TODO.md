@@ -77,9 +77,8 @@ These were identified during design/review but explicitly deferred, not solved:
   chosen. Options: keep it same-repo-only and informational, gate it behind a maintainer-applied
   label, or move to ephemeral per-job runners with per-run credentials so no long-lived credentialed
   machine executes untrusted code.
-- **Three of `docs/design.md` §8.3's ten e2e scenarios are not implemented.** VM cap detection is just
-  unwritten; scale-down and no-flapping are blocked on Phase 3 shipping scale-down at all. See
-  `docs/testing.md`'s coverage table for the honest per-scenario status of the other seven.
+- **One of `docs/design.md` §8.3's ten e2e scenarios is not implemented: VM cap detection.** See
+  `docs/testing.md`'s coverage table for the honest per-scenario status of the other nine.
 
 ### Alerting: what the agent should page a human about, and how
 
@@ -132,3 +131,34 @@ Two independent moves, worth separating:
 - A second persistent smoke VM would let PR smoke runs parallelize across PRs, but only pays off
   once the PR-tier suite is large enough that queueing on a single VM is the actual bottleneck —
   decide after the real per-suite timing measurement from the growing e2e scenario set.
+
+### Validating scale-down's defaults against real traffic
+
+Scale-down is live (no capability gate — decided while the agent still has no real users, so there
+was nothing to protect by staging the rollout further). Its decision logic, write path, and
+smoke-tier e2e coverage (`TestSmoke_Decisions_ScaleDownAfterQuiet`, `TestSmoke_Decisions_NoFlapping`)
+are done. Two things from the original Phase 3 plan are still worth doing, now as ordinary hardening
+rather than a launch gate:
+
+- **Soak and chaos don't exist as a CI tier for any scenario today** (design.md §8.4: 24h diurnal-load
+  soak, 20%-fault-injection chaos, both local-mode). A 24h job cannot fit either existing workflow's
+  timeout model (`docs/ci-cd.md`'s "Timeout budgets") and would occupy this project's one self-hosted
+  runner for its entire duration, blocking every PR/merge e2e run unless a second runner exists first
+  (the item above) or it is scheduled off-hours. Chaos additionally needs a fault-injection layer
+  nothing in `internal/platformfake` or `e2e/` has today. This needs its own decision (new runner vs.
+  scheduled `workflow_dispatch` job vs. accepting the gap) before anyone builds it — a candidate for an
+  ADR rather than a quiet bump.
+- **The calibration harness (design.md §8.5) is a manual process, not a tool.** It reuses `--dry-run`
+  and the decision journal to build a corpus of (decision-that-would-have-fired, what-the-load-did-next)
+  pairs against real traffic, then tunes the default thresholds against it. Nothing automates the
+  corpus collection or the tuning step. No default in `docs/configuration.md` should be treated as
+  validated until it has survived this — true for scale-down's defaults now exactly as it already was
+  for scale-up's.
+- **The durable 24h change budget's own acceptance criterion (issue #51) has no live coverage.**
+  `TestSmoke_Decisions_NoFlapping` proves two real up/down cycles and bounds alternation count, but it
+  runs against a budget the smoke harness deliberately resets to empty every run (`docs/testing.md`
+  "Why preflight matters more than cleanup") — nothing live proves the budget actually suppresses the
+  next otherwise-valid change once exhausted, or that the suppression survives an agent restart.
+  Doesn't fit inside the smoke tier's shared-VM, reset-per-run model; needs its own full-tier scenario
+  that drives real actuations toward `max_changes_per_24h`, confirms `budget_exhausted`, restarts the
+  agent, and confirms the count (not just the state file) persisted.

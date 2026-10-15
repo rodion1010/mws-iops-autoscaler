@@ -128,6 +128,27 @@ func validateResolvedPolicy(path string, rp ResolvedPolicy) []error {
 			"%s.advanced.evaluation: scale_down_window (%s) is shorter than scale_up_window (%s) — invites flapping",
 			path, rp.Advanced.ScaleDownWindow, rp.Advanced.ScaleUpWindow))
 	}
+	// Saturation is gated by utilization_threshold, not by either target
+	// ratio — a completed scale-up or scale-down leaves utilization at
+	// exactly its own target ratio, so each must sit below the threshold
+	// or that change would immediately clear the saturation gate again.
+	if rp.Advanced.ScaleUpUtilization >= rp.Advanced.UtilizationThreshold {
+		errs = append(errs, fmt.Errorf(
+			"%s.advanced.target.scale_up_utilization: %v is not below saturation.utilization_threshold (%v) — "+
+				"a completed scale-up would immediately clear the saturation gate again, inviting back-to-back changes",
+			path, rp.Advanced.ScaleUpUtilization, rp.Advanced.UtilizationThreshold))
+	}
+	if rp.Advanced.ScaleDownUtilization >= rp.Advanced.UtilizationThreshold {
+		errs = append(errs, fmt.Errorf(
+			"%s.advanced.target.scale_down_utilization: %v is not below saturation.utilization_threshold (%v) — "+
+				"a completed scale-down would immediately clear the saturation gate again, defeating the headroom it's meant to leave",
+			path, rp.Advanced.ScaleDownUtilization, rp.Advanced.UtilizationThreshold))
+	}
+	if rp.Advanced.ScaleDownUtilization >= rp.Advanced.ScaleUpUtilization {
+		errs = append(errs, fmt.Errorf(
+			"%s.advanced.target: scale_down_utilization (%v) is not below scale_up_utilization (%v) — invites flapping",
+			path, rp.Advanced.ScaleDownUtilization, rp.Advanced.ScaleUpUtilization))
+	}
 	if rp.Advanced.CooldownScaleUp > rp.Advanced.ScaleUpWindow {
 		errs = append(errs, fmt.Errorf(
 			"%s.advanced.cooldown.scale_up: %s is longer than scale_up_window (%s) — the agent could never act",
