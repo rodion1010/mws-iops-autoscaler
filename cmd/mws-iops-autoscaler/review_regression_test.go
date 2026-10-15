@@ -254,6 +254,35 @@ func TestRegressionConflictRediscoveryFailureAbortsCycle(t *testing.T) {
 	}
 }
 
+func TestRegressionDryRunConflictRediscoveryFailureAbortsCycle(t *testing.T) {
+	client := &stubClient{
+		vm: vmWithTwoIndependentDisks(),
+		disks: map[string]*compute.Disk{
+			"vm-1-good": {Name: "vm-1-good", SpecIOPS: 1000},
+			"vm-1-bad":  {Name: "vm-1-bad", SpecIOPS: 1000},
+		},
+	}
+	act := &conflictOnFirstCallActuator{}
+	a := newDiscoverableTestAgent(t, act, client)
+	a.dryRun = true
+	a.maxDiscoveryAge = time.Hour
+	a.analyzer = analyzer.NewWindowAnalyzer()
+	a.decider = perDiskDecider{byDisk: map[string]decider.Action{
+		"vm-1-good": decider.ActionScaleUp,
+		"vm-1-bad":  decider.ActionScaleUp,
+	}}
+	if err := a.discover(context.Background()); err != nil {
+		t.Fatalf("initial discover: %v", err)
+	}
+	client.getVMErr = errors.New("rediscovery unavailable")
+
+	a.reconcile(context.Background())
+
+	if len(act.calls) != 1 {
+		t.Fatalf("actuator calls = %d, want 1: a dry-run conflict must force rediscovery and abort the cycle like a real one", len(act.calls))
+	}
+}
+
 func TestRegressionPreWriteConflictDoesNotConsumeChangeBudget(t *testing.T) {
 	act := &erroringActuatorRecording{err: fmt.Errorf("pre-write refusal: %w", compute.ErrConcurrentModification)}
 	a, tracker := newTestAgent(t, act)
