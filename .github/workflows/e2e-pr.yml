@@ -1,7 +1,8 @@
 name: E2E (smoke)
 
-# The smoke tier reuses one persistent target. Fork PRs do not receive its
-# SSH secret; the trust-boundary decision is tracked in docs/TODO.md.
+# The smoke tier reuses one persistent target and runs PR code on a credentialed
+# runner, so it runs only for branches of this repository. Fork PRs are skipped
+# with an explicit notice (docs/ci-cd.md, "PR-tier trust model").
 on:
   pull_request:
 
@@ -14,7 +15,14 @@ permissions:
   contents: read
 
 jobs:
+  fork-skipped:
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "::notice::Live e2e is skipped for pull requests from forks; a maintainer reviews the change and runs it from a branch of this repository."
+
   smoke:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     # Budget derivation is in docs/ci-cd.md's "Timeout budgets" — recompute
     # before shrinking this or adding a TestSmoke_* scenario.

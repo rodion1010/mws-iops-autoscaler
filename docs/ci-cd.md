@@ -25,9 +25,14 @@ runs on a credentialed self-hosted runner. As implemented, the smoke path is usa
 same-repository collaborator branches only: a fork PR's approval permits workflow execution but
 never delivers the `E2E_SSH_PRIVATE_KEY` secret (GitHub does not send ordinary secrets to
 public-fork `pull_request` workflows, and private-fork secret sharing is a separate, explicit
-repository/organization setting), so an approved fork PR's smoke run fails on the missing key
-rather than exercising anything. Fork-PR smoke stays unresolved until a safe secret and
-runner-isolation model is chosen — `docs/TODO.md`'s trust-boundary item.
+repository/organization setting).
+
+**PR-tier trust model (Product Lead decision, 2026-10-15):** live e2e runs automatically only for
+pull requests from branches of this repository. `e2e-pr.yml` skips the `smoke` job for fork PRs and
+the `fork-skipped` job reports why; a maintainer reviews a fork change and, if it needs live
+coverage, re-runs it from a branch of this repository. A skipped `smoke` satisfies a required status
+check, so branch protection must be paired with that review. The runner service account's role set
+is still broader than the PR tier needs (`docs/TODO.md`).
 
 ## Runner vs. target VM — two different machines
 
@@ -207,20 +212,17 @@ right now. Provisioned by hand via the `mws` CLI, in this order:
      current GitHub plan — the API answers 403, "Upgrade to GitHub Pro or make this repository
      public to enable this feature" (verified 2026-09-06). Upgrade to a plan that supports branch
      protection. Do **not** make the repository public to obtain it: that would expose the repo
-     before the trust-boundary decision below is made.
-   - **Trust decision:** making the smoke job a *required* check is what turns "PR-supplied code
-     runs on the credentialed self-hosted runner" from an option into a merge prerequisite — the
-     Product Lead must choose the PR e2e trust model first (`docs/TODO.md`'s trust-boundary item).
+     before the runner's role set is narrowed.
+   - **Trust model:** decided (same-repository branches only, see the PR-tier trust model above).
+     Narrow the runner's role set (`docs/TODO.md`) before making `smoke` a required check.
    Once both are resolved: upgrade the plan, then configure `verify` and `smoke` as required
    status checks.
 9. **Confirm GitHub's fork-approval requirement is active** for workflow runs from outside contributors
    (default: first-time contributors need approval). Approval only permits execution — it does not
    make fork-PR smoke work: the job needs the `E2E_SSH_PRIVATE_KEY` secret, which GitHub never sends
    to public-fork `pull_request` workflows (private-fork secret sharing is a separate, explicit
-   repository/organization setting), so an approved fork PR's smoke run fails on the missing key. The
-   implemented smoke path is for same-repository collaborator branches; fork-PR smoke stays
-   unresolved until a safe secret and runner-isolation model is chosen — see `docs/TODO.md`'s
-   trust-boundary item.
+   repository/organization setting). `e2e-pr.yml` therefore skips fork PRs by design — see the
+   PR-tier trust model above.
 
 Every full-tier run additionally creates and attaches `ci-agent-sa` to its own freshly created VM as part
 of the workflow itself (not a one-time step) — see step 3 above's per-run analogue in
