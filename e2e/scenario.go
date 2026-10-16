@@ -340,6 +340,23 @@ func StopAgent(ctx context.Context, t Target) error {
 	return err
 }
 
+// loadLogPath is a stable path (mirroring agentLogPath) so a scenario whose
+// expected saturation/demand never shows up can tell whether fio actually
+// ran for its full --runtime=600 or died immediately (e.g. a bad guest path)
+// — FetchLoadLog reads it back. All three Drive*Load functions share it:
+// only one load generator runs at a time per scenario.
+const loadLogPath = remoteWorkDir + "/load.log"
+
+// FetchLoadLog returns the fio job's captured stdout/stderr — diagnostic
+// only, the same convention as FetchAgentLog.
+func FetchLoadLog(ctx context.Context, t Target) string {
+	out, err := t.Run(ctx, "cat "+loadLogPath+" 2>/dev/null || true")
+	if err != nil {
+		return fmt.Sprintf("(failed to fetch load log: %v)", err)
+	}
+	return out
+}
+
 // DriveLoad tags its root-owned fio process for scoped cleanup.
 func DriveLoad(ctx context.Context, t Target) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
@@ -347,7 +364,7 @@ func DriveLoad(ctx context.Context, t Target) error {
 		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --iodepth=64 --direct=1 --time_based=1 --runtime=600",
 		guestPath,
 	)
-	return t.RunBackground(ctx, cmd)
+	return t.RunBackgroundToLog(ctx, cmd, loadLogPath)
 }
 
 // DriveRateLimitedLoad caps ops well under the saturation gate (this
@@ -362,7 +379,7 @@ func DriveRateLimitedLoad(ctx context.Context, t Target, rateIOPS int) error {
 		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --iodepth=1 --direct=1 --time_based=1 --runtime=600 --rate_iops=%d",
 		guestPath, rateIOPS,
 	)
-	return t.RunBackground(ctx, cmd)
+	return t.RunBackgroundToLog(ctx, cmd, loadLogPath)
 }
 
 // DriveBandwidthLoad uses a large block size at depth to saturate bandwidth
@@ -376,7 +393,7 @@ func DriveBandwidthLoad(ctx context.Context, t Target) error {
 		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=64k --iodepth=64 --direct=1 --time_based=1 --runtime=600",
 		guestPath,
 	)
-	return t.RunBackground(ctx, cmd)
+	return t.RunBackgroundToLog(ctx, cmd, loadLogPath)
 }
 
 // WaitForScaleUp requires an observed baseline and rejects changes that occur
@@ -660,13 +677,21 @@ func runAgentScenarioWithDisksErr(ctx context.Context, target Target, project st
 		// failure to, and a failure to stop is never this function's own
 		// error to report (the caller's run() error, if any, already is).
 		_ = StopAgent(stopCtx, target)
+		// killLoadCmd matches by fio job name, not by guest device, so this
+		// also reaches a Drive*Load call a run() made against some other
+		// Target on the same shared VM (e.g. a churn/sibling disk). Without
+		// this, a scenario that fails or times out leaves its fio running
+		// for the rest of its --runtime=600, contending for CPU/IO with
+		// whatever full-tier test runs next.
+		_, _ = target.Run(stopCtx, killLoadCmd())
 	}()
 
 	if err := run(agentStarted); err != nil {
 		diagnosticCtx, diagnosticCancel := recoveryContext()
 		journal := FetchJournal(diagnosticCtx, target)
+		loadLog := FetchLoadLog(diagnosticCtx, target)
 		diagnosticCancel()
-		return fmt.Errorf("%w\njournal:\n%s", err, journal)
+		return fmt.Errorf("%w\njournal:\n%s\nload log:\n%s", err, journal, loadLog)
 	}
 	return nil
 }
