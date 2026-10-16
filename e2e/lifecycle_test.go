@@ -155,6 +155,19 @@ func provisionFullFixture(ctx context.Context, project string) (fullFixture, err
 	return fix, nil
 }
 
+// teardownTimeout is derived, not copied from the backstop step's own
+// budget: teardown.sh's dominant cost is the VM delete's own 5-minute
+// default wait (provision.sh's comment on --wait-timeout), since its four
+// disk deletes now run in parallel rather than sequentially — one disk
+// delete's worst case, not four. recoveryContext's generic 2 minutes,
+// still used for every other cleanup in this package, is sized for a
+// single SSH round-trip or disk detach and was observed to legitimately
+// undershoot the VM delete alone once a fully-exercised run left real
+// state behind, not just on a fast early-failure path. 8 minutes leaves
+// 3 minutes of margin above the 5-minute VM-delete ceiling for API
+// latency and scheduling jitter.
+const teardownTimeout = 8 * time.Minute
+
 // TestMain tears down the full tier's shared ephemeral VM+disk exactly once,
 // after every test in the package has run, rather than per test — fullTarget
 // provisions it lazily and shares it across every full-tier test that asks
@@ -162,14 +175,6 @@ func provisionFullFixture(ctx context.Context, project string) (fullFixture, err
 // failed partway: run identity comes from E2E_RUN_ID (set once per workflow
 // run, not generated here), which is what lets teardown.sh clean up a
 // partial run (docs/ci-cd.md).
-// teardownTimeout matches the backstop GitHub Actions step's own budget
-// (docs/ci-cd.md) for the identical script: recoveryContext's generic 2
-// minutes is sized for a single SSH round-trip or disk detach, not a VM
-// delete (5m default wait) followed by four sequential disk deletes —
-// observed to legitimately exceed 2 minutes once a fully-exercised run
-// leaves real state behind, not just on a fast early-failure path.
-const teardownTimeout = 8 * time.Minute
-
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if fullFixtureAttempted {
