@@ -162,10 +162,18 @@ func provisionFullFixture(ctx context.Context, project string) (fullFixture, err
 // failed partway: run identity comes from E2E_RUN_ID (set once per workflow
 // run, not generated here), which is what lets teardown.sh clean up a
 // partial run (docs/ci-cd.md).
+// teardownTimeout matches the backstop GitHub Actions step's own budget
+// (docs/ci-cd.md) for the identical script: recoveryContext's generic 2
+// minutes is sized for a single SSH round-trip or disk detach, not a VM
+// delete (5m default wait) followed by four sequential disk deletes —
+// observed to legitimately exceed 2 minutes once a fully-exercised run
+// leaves real state behind, not just on a fast early-failure path.
+const teardownTimeout = 8 * time.Minute
+
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if fullFixtureAttempted {
-		ctx, cancel := recoveryContext()
+		ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
 		if err := runScript(ctx, "teardown.sh"); err != nil {
 			fmt.Fprintf(os.Stderr, "teardown: %v\n", err)
 			if code == 0 {
