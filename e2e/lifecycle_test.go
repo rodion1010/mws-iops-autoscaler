@@ -155,17 +155,9 @@ func provisionFullFixture(ctx context.Context, project string) (fullFixture, err
 	return fix, nil
 }
 
-// teardownTimeout is derived, not copied from the backstop step's own
-// budget: teardown.sh's dominant cost is the VM delete's own 5-minute
-// default wait (provision.sh's comment on --wait-timeout), since its four
-// disk deletes now run in parallel rather than sequentially — one disk
-// delete's worst case, not four. recoveryContext's generic 2 minutes,
-// still used for every other cleanup in this package, is sized for a
-// single SSH round-trip or disk detach and was observed to legitimately
-// undershoot the VM delete alone once a fully-exercised run left real
-// state behind, not just on a fast early-failure path. 8 minutes leaves
-// 3 minutes of margin above the 5-minute VM-delete ceiling for API
-// latency and scheduling jitter.
+// teardownTimeout sums teardown.sh's own two bounded phases — the VM
+// delete's --wait-timeout 5m then the parallel disks' --wait-timeout 2m —
+// plus 1 minute of margin for process/API overhead.
 const teardownTimeout = 8 * time.Minute
 
 // TestMain tears down the full tier's shared ephemeral VM+disk exactly once,
