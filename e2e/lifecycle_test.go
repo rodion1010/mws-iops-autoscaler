@@ -155,6 +155,11 @@ func provisionFullFixture(ctx context.Context, project string) (fullFixture, err
 	return fix, nil
 }
 
+// teardownTimeout sums teardown.sh's own two bounded phases — the VM
+// delete's --wait-timeout 5m then the parallel disks' --wait-timeout 2m —
+// plus 1 minute of margin for process/API overhead.
+const teardownTimeout = 8 * time.Minute
+
 // TestMain tears down the full tier's shared ephemeral VM+disk exactly once,
 // after every test in the package has run, rather than per test — fullTarget
 // provisions it lazily and shares it across every full-tier test that asks
@@ -165,7 +170,7 @@ func provisionFullFixture(ctx context.Context, project string) (fullFixture, err
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if fullFixtureAttempted {
-		ctx, cancel := recoveryContext()
+		ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
 		if err := runScript(ctx, "teardown.sh"); err != nil {
 			fmt.Fprintf(os.Stderr, "teardown: %v\n", err)
 			if code == 0 {
