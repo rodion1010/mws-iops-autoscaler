@@ -1,0 +1,59 @@
+name: Runner diagnostics (temporary)
+
+# Scratch, manually-dispatched diagnostic job for investigating why
+# `mws compute virtual-machine create` has been slow from this runner
+# (see docs/TODO.md's CI/CD hardening section). Not wired to any trigger
+# other than workflow_dispatch; delete once the investigation concludes.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: [self-hosted, mws-iops-autoscaler-runner]
+    timeout-minutes: 10
+    steps:
+      - name: Authorize operator SSH key
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          touch ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILLxHx6BI8D9Ijeu1ujwFrasrbjLTlamsciQRIDjCuxk user@example"
+          grep -qF "$key" ~/.ssh/authorized_keys || echo "$key" >> ~/.ssh/authorized_keys
+          whoami
+          echo "ssh_user=$(whoami)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: System state
+        run: |
+          echo "--- uptime/load ---"
+          uptime
+          echo "--- memory ---"
+          free -m
+          echo "--- disk ---"
+          df -h
+          echo "--- top CPU/mem processes ---"
+          ps aux --sort=-%cpu | head -30
+          echo "--- listening sockets ---"
+          ss -tunlp || netstat -tunlp
+          echo "--- who/last ---"
+          who
+          last -n 20 || true
+
+      - name: Network path to MWS API
+        run: |
+          echo "--- DNS resolution timing ---"
+          time getent hosts compute.mwsapis.ru || true
+          echo "--- curl timing to API ---"
+          curl -w '\ndns=%{time_namelookup} connect=%{time_connect} ttfb=%{time_starttransfer} total=%{time_total}\n' -s -o /dev/null https://compute.mwsapis.ru/ || true
+          echo "--- route/traceroute ---"
+          ip route
+          traceroute -n -w1 -m 15 compute.mwsapis.ru 2>&1 || true
+
+      - name: GitHub Actions runner process state
+        run: |
+          echo "--- runner service processes ---"
+          ps aux | grep -i -E 'Runner\.(Listener|Worker)' | grep -v grep || true
+          systemctl status 'actions.runner.*' --no-pager 2>&1 | head -40 || true
