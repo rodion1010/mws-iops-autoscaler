@@ -361,7 +361,7 @@ func FetchLoadLog(ctx context.Context, t Target) string {
 func DriveLoad(ctx context.Context, t Target) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
 	cmd := fmt.Sprintf(
-		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --iodepth=64 --direct=1 --time_based=1 --runtime=600",
+		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --ioengine=libaio --iodepth=64 --direct=1 --time_based=1 --runtime=600",
 		guestPath,
 	)
 	return t.RunBackgroundToLog(ctx, cmd, loadLogPath)
@@ -376,7 +376,7 @@ func DriveLoad(ctx context.Context, t Target) error {
 func DriveRateLimitedLoad(ctx context.Context, t Target, rateIOPS int) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
 	cmd := fmt.Sprintf(
-		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --iodepth=1 --direct=1 --time_based=1 --runtime=600 --rate_iops=%d",
+		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=4k --ioengine=libaio --iodepth=1 --direct=1 --time_based=1 --runtime=600 --rate_iops=%d",
 		guestPath, rateIOPS,
 	)
 	return t.RunBackgroundToLog(ctx, cmd, loadLogPath)
@@ -390,7 +390,7 @@ func DriveRateLimitedLoad(ctx context.Context, t Target, rateIOPS int) error {
 func DriveBandwidthLoad(ctx context.Context, t Target) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
 	cmd := fmt.Sprintf(
-		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=64k --iodepth=64 --direct=1 --time_based=1 --runtime=600",
+		"sudo fio --name=e2e-loadtest --filename=%s --rw=randread --bs=64k --ioengine=libaio --iodepth=64 --direct=1 --time_based=1 --runtime=600",
 		guestPath,
 	)
 	return t.RunBackgroundToLog(ctx, cmd, loadLogPath)
