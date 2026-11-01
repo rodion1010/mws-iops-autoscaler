@@ -30,7 +30,9 @@ a boundary on its own: the runner's cloud credentials come from IMDS, not from a
 pull requests from branches of this repository. `e2e-pr.yml` is triggered by `pull_request_target`,
 so GitHub loads it from the base branch: a PR cannot edit away the origin guard, which a plain
 `pull_request` workflow (loaded from the PR's merge commit) would allow. The `smoke` job runs only when
-the PR head repository is this repository and then checks out the PR head explicitly; for fork PRs the
+the PR head repository is this repository and then checks out the PR's merge ref
+(`refs/pull/<n>/merge`), failing if that merge commit does not contain the current PR head (GitHub
+stops updating it while the PR conflicts with the base); for fork PRs the
 GitHub-hosted `fork-skipped` job prints why, and fork code is never checked out or executed. A
 maintainer reviews a fork change and, if it needs live coverage, re-runs it from a branch of this
 repository. Consequences: changes to `e2e-pr.yml` itself only take effect after they reach the base
