@@ -326,6 +326,21 @@ func TestRegressionPreWriteConflictDoesNotConsumeChangeBudget(t *testing.T) {
 	}
 }
 
+func TestRegressionPreWriteFailureDoesNotConsumeChangeBudget(t *testing.T) {
+	act := &erroringActuatorRecording{err: compute.MarkNoWriteSent(errors.New("re-read before write: connection refused"))}
+	a, tracker := newTestAgent(t, act)
+	// Live IOPS matches neither the reservation's before nor target, so the
+	// ambiguous-write reconciliation would leave the reservation pending.
+	a.client = &stubClient{disks: map[string]*compute.Disk{"vm-1-data": {Name: "vm-1-data", SpecIOPS: 5000}}}
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := len(tracker.PendingChanges()); got != 0 {
+		t.Fatalf("pending reservations = %d, want 0: a failure before the mutating request proves no write", got)
+	}
+}
+
 type fixedSamplesSource struct {
 	samples []metrics.Sample
 }
