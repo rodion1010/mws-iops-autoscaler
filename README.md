@@ -1,5 +1,7 @@
 # MWS IOPS Autoscaler
 
+**English** | [Русский](README.ru.md)
+
 [![CI](https://github.com/rodion1010/mws-iops-autoscaler/actions/workflows/ci.yml/badge.svg)](https://github.com/rodion1010/mws-iops-autoscaler/actions/workflows/ci.yml)
 ![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -10,37 +12,20 @@ is saturated, lowering it after sustained quiet so you stop paying for unused he
 for workloads whose storage demand changes over time: instead of provisioning the peak IOPS limit from
 the start, you define a safe range and let the agent track the workload's actual needs within it.
 
-> [!IMPORTANT]
-> The current implementation is **local mode, bidirectional**. Run one agent inside each target MWS virtual
-> machine.
-
-**Contents:** [What it does](#what-it-does) · [Prerequisites](#prerequisites) · [Quick start](#quick-start) · [Configuration](#configuration-essentials) · [CLI options](#command-line-options) · [Observability](#observability) · [Troubleshooting](#troubleshooting) · [Development](#development)
+**Contents:** [What it does](#what-it-does) · [Prerequisites](#prerequisites) · [Quick start](#quick-start) · [Configuration](#configuration-essentials) · [CLI options](#command-line-options) · [Observability](#observability) · [Troubleshooting](#troubleshooting) · [Development](#development) · [License](#license)
 
 ## What it does
 
-```mermaid
-flowchart LR
-  A[VM metadata] --> B[Disk discovery]
-  B --> C["/proc/diskstats window"]
-  C --> D{Saturated or<br/>underutilized?}
-  D -->|yes| E[MWS Compute API<br/>raise / lower IOPS]
-  D -->|no| F[No action]
-  E --> G[Journal + Prometheus]
-  F --> G
-```
-
-On every control-loop cycle, the agent:
+One agent runs inside each target MWS VM. On every control-loop cycle, it:
 
 1. identifies the MWS VM on which it is running;
-2. discovers its attached NBS-PL2 disks and classifies them as dependent or independent;
-3. reads per-disk activity from Linux `/proc/diskstats`;
-4. waits for a complete observation window and detects actual saturation from utilization, queue and
-   latency signals;
+2. discovers its attached NBS-PL2 disks and determines whether each is
+   [dependent or independent](https://mws.ru/docs/cloud-platform/compute/general/disks-spec-ref-overview.html);
+3. reads per-disk I/O counters from Linux `/proc/diskstats`;
+4. waits for a complete observation window and detects saturation or sustained underutilization from
+   utilization, queue and latency signals;
 5. estimates the required IOPS and applies the increase or decrease through the appropriate MWS Compute API;
 6. records the decision and exposes health and Prometheus telemetry.
-
-Both MWS attachment models are supported. An **independent** disk is updated through the disk API; a
-**dependent** disk is part of the VM specification and is updated through the VM API.
 
 ### Available now
 
@@ -57,45 +42,36 @@ Both MWS attachment models are supported. An **independent** disk is updated thr
 
 ## Prerequisites
 
-Before starting the agent, prepare the following:
-
-- An **MWS Cloud project** with the Compute service enabled. Local mode derives the project, zone and
-  VM name from the VM's own instance metadata.
-- A Linux MWS VM with at least one attached **NBS-PL2** disk. The guest must expose each managed disk
-  as `/dev/disk/by-id/mws-<device_name>` and expose `/proc/diskstats`.
-- An MWS service account attached to that VM. Grant it `compute.editor` in the project so the agent can
-  discover the VM and disks and update their IOPS.
-- Access from the VM to the instance metadata service at `169.254.169.254` and to the MWS API at
+- Enable the Compute service in your MWS Cloud project.
+- Create a Linux MWS VM and attach at least one **NBS-PL2** disk. Make sure the guest exposes each
+  managed disk as `/dev/disk/by-id/mws-<device_name>` and exposes `/proc/diskstats`.
+- Create a service account, grant it `compute.editor` in the project and attach it to the VM. If the
+  agent will manage dependent disks, also grant the service account `iam.serviceAccount.admin` on
+  itself.
+- Make sure the VM can reach the instance metadata service at `169.254.169.254` and the MWS API at
   `https://api.mwsapis.ru`.
-- Go **1.26 or newer** and Git, needed only to build the binary from source.
-- A writable persistent directory for the 24-hour change budget. The default is
+- To build from source, install Go **1.26 or newer** and Git.
+- Prepare a writable persistent directory for the 24-hour change budget. The default is
   `/var/lib/mws-iops-autoscaler`.
-
-> [!WARNING]
-> Updating a dependent disk currently makes MWS re-check access to the service account attached to the
-> VM. Live testing found that `compute.editor` alone is insufficient: the calling service account also
-> needs `iam.serviceAccount.admin` **on that attached service-account resource**, even though the update
-> does not change the VM identity. This is an upstream permission issue and grants broader access than
-> expected. Prefer an independent disk if that workaround is unacceptable.
 
 ## Quick start
 
-The safest first launch is an interactive dry run on the target VM. It exercises discovery, sampling
-and decisions without changing provisioned IOPS.
+Start with an interactive dry run on the target VM. It exercises discovery, sampling and decisions
+without changing provisioned IOPS.
 
 ### 1. Prepare the MWS resources
 
-In the MWS console, enable Compute for the project, create a service account, grant it
-`compute.editor` in that project and attach it to the target VM. The equivalent VM update with the
-MWS CLI is:
+1. In the MWS console, enable Compute for the project and create a service account.
+2. In the project's IAM section, grant the service account `compute.editor`.
+3. If the agent will manage dependent disks, open **IAM → Service accounts**, select the agent's
+   service account and, on the **Доступы к ресурсу** (resource access) tab, grant that same service account
+   `iam.serviceAccount.admin`.
+4. [Attach the service account to the VM](https://mws.ru/docs/cloud-platform/compute/general/vm-link-sa.html)
+   in the console or with the MWS CLI:
 
-```bash
-mws compute vm update <vm-name> --service-account <service-account>
-```
-
-Role assignments can be made in the project's IAM section. Follow the dependent-disk warning under
-Prerequisites only if the agent must manage that attachment class. The MWS documentation also covers
-[linking a service account to a VM](https://mws.ru/docs/cloud-platform/compute/general/vm-link-sa.html).
+   ```bash
+   mws compute vm update <vm-name> --service-account <service-account>
+   ```
 
 ### 2. Verify the VM prerequisites
 
@@ -125,9 +101,9 @@ the VM.
 
 ### 4. Create a configuration
 
-Save the following as `config.yaml`. This example assumes the boot disk's device_name (as VM status
-reports it) is `mws-bootdisk`; change that value to match your own VM. Every other supported disk
-attached to the VM is managed automatically:
+Save the following as `config.yaml`. The example excludes the boot disk with `device_name`
+`mws-bootdisk`; replace it with the boot disk's `device_name` from your VM status. The agent
+manages every other supported disk attached to the VM:
 
 ```yaml
 apiVersion: autoscaling.mws.cloud/v1alpha1
@@ -192,9 +168,9 @@ mkdir -p ./var
   -listen 127.0.0.1:9435
 ```
 
-Leave it running for at least one complete scale-up window—five minutes with the defaults (scale-down
-needs a full 30-minute window with the defaults). Generate a
-representative workload and inspect the journal to see both proposed actions and reasons for no action:
+Leave it running for at least one complete observation window. With the defaults, a scale-up
+decision needs 5 minutes of data and a scale-down decision needs 30 minutes. Generate a representative
+workload and inspect the journal for proposed actions and the reasons for no action:
 
 ```bash
 tail -f ./decisions.jsonl
@@ -213,11 +189,17 @@ curl -fsS http://127.0.0.1:9435/readyz
 curl -fsS http://127.0.0.1:9435/metrics | head
 ```
 
-`/healthz` returns HTTP 200 while the process is alive. `/readyz` returns HTTP 200 only after the
-configuration is valid, discovery has succeeded, the managed set is non-empty, the latest metrics
-collection call has succeeded and the durable change budget is healthy; otherwise it returns HTTP
-503 with a JSON breakdown. A successful collection call can still yield no sample for an individual
-disk, so use the decision journal to diagnose `no_data` and staleness reasons.
+`/healthz` returns HTTP 200 while the process is alive. `/readyz` returns HTTP 200 only when all of
+the following hold:
+
+- the configuration is valid;
+- discovery has succeeded and the managed set is non-empty;
+- the latest metrics collection call has succeeded;
+- the durable change budget is healthy.
+
+Otherwise `/readyz` returns HTTP 503 with a JSON breakdown. A successful collection call can still
+yield no sample for an individual disk: use the decision journal to diagnose `no_data` and staleness
+reasons.
 
 ### 8. Enable writes
 
@@ -255,11 +237,12 @@ Run the binary under your own process supervisor:
 - `disks.mode: selected` manages only entries under `selected`.
 - Disk names are the platform-visible MWS `device_name` values (the `mws-` prefix included), not
   Linux `/dev` paths.
-- Disk attachment class is detected automatically; users do not configure the write path.
+- The agent detects the disk attachment class itself; you do not configure the write path.
 - `runtime.metrics.source` is `guest`.
-- A change is blocked when metrics or discovery are stale, the observation window is incomplete, the
-  disk is neither saturated (scale-up) nor sustainedly underutilized (scale-down), cooldown or the
-  change budget applies, identity cannot be verified, or sibling demand leaves insufficient VM headroom.
+- The agent changes nothing when metrics or discovery are stale, the observation window is
+  incomplete, the disk is neither saturated nor underutilized for the whole window, a cooldown or the
+  change budget applies, the disk identity cannot be verified, or sibling disks leave too little VM
+  headroom.
 
 ## Command-line options
 
@@ -280,8 +263,8 @@ also through the instance metadata service.
 
 The decision journal emits one JSON object per managed disk per reconciliation cycle, including the
 current and proposed IOPS, action, reason, utilization, demand, latency, VM headroom, window fill and
-remaining change budget. It is the first place to look when asking “why did the agent scale—or why did
-it not scale?”
+remaining change budget. Check it first when you need to know why the agent changed a disk or left it
+unchanged.
 
 Prometheus metrics include:
 
@@ -300,12 +283,12 @@ for the relevant signals. Ownership and escalation policy are tracked in
 
 | Symptom | What to check |
 |---|---|
-| Cannot resolve VM identity or credentials | Run inside the target MWS VM; verify its attached service account and metadata access with the command above. |
-| Compute API returns 403 | Verify that Compute is enabled and the service account has `compute.editor`. For a dependent disk, also check the upstream IAM workaround in Prerequisites. |
+| Cannot resolve VM identity or credentials | Run inside the target MWS VM; verify its attached service account and metadata access as in [step 2](#2-verify-the-vm-prerequisites). |
+| Compute API returns 403 | Verify that Compute is enabled and the service account has `compute.editor`. For a dependent disk, also check the `iam.serviceAccount.admin` grant from [step 1](#1-prepare-the-mws-resources). |
 | `/readyz` reports `discovery_succeeded: false` | Check API connectivity, permissions and that at least one supported attached disk matches the selection. |
 | `/readyz` reports `source_reachable: false` | Check `/proc/diskstats` and the `/dev/disk/by-id/mws-<device_name>` symlinks. |
 | `configured_disks_unmanaged` appears in `/readyz` | A selected or excluded name no longer resolves. Fix the name or disk attachment. This is reported as degradation while the agent stays ready. |
-| No change occurs | Wait for the observation window, then inspect the decision `reason`; the workload may be neither saturated nor sustainedly underutilized, or a safety guardrail may be active. |
+| No change occurs | Wait for the observation window, then inspect the decision `reason`: the disk may be neither saturated nor underutilized, or a safety guardrail may be active. |
 | `budget_healthy: false` | The durable state could not be trusted. Fix storage permissions or filesystem errors and restart the agent. |
 | Disk is capped while demand remains high | Check the per-disk maximum and `iops_autoscaler_vm_cap_reached`; add vCPU if the VM-wide IOPS pool is the limit. |
 
