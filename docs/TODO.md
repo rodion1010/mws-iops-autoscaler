@@ -67,13 +67,13 @@ These were identified during design/review but explicitly deferred, not solved:
 
 ### Alerting contract for the remaining `docs/design.md` §7.3 conditions
 
-The repository owns the alert signal, not its delivery (decided together with the runtime-degradation
-contract in `docs/design.md` §7.3). Only `configured_disks_unmanaged` has a written threshold, duration,
-severity, owner and recovery. The other §7.3 conditions (metric staleness beyond three publication
-intervals, write failure rate, budget exhausted, `VM_IOPS_CAP_REACHED` sustained, a disk pinned at
-`max_iops` while saturated) still have only the raw metric. Each needs the same contract plus a test
-that its signal activates and clears. A disk pinned at its ceiling cannot be expressed today: the
-effective ceiling (`policy.max_iops` with the headroom clamp) is never published as its own series.
+Ownership is decided in `docs/design.md` §7.3. Only `configured_disks_unmanaged` has a written
+threshold, duration, severity, owner and recovery there. The other §7.3 conditions (metric staleness
+beyond three publication intervals, write failure rate, budget exhausted, `VM_IOPS_CAP_REACHED`
+sustained, a disk pinned at `max_iops` while saturated) each need the same contract plus a test that
+its signal activates and clears. Two of them have no signal yet: a write failure is only a log line
+(`iops_autoscaler_decisions_total` is recorded before the write), and the effective ceiling
+(`policy.max_iops` with the headroom clamp) is never published as its own series.
 
 ### Config hot-reload
 

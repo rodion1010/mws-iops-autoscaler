@@ -276,8 +276,8 @@ Prometheus metrics include:
 
 See [design: observability](docs/design.md#7-observability) for the complete telemetry contract and
 the signals considered alert-worthy. Ready-to-use alert rules are not shipped; configure monitoring
-for the relevant signals. Ownership and escalation policy are tracked in
-[issue #59](https://github.com/rodion1010/mws-iops-autoscaler/issues/59).
+for the relevant signals. The ownership and alerting contract for a disk that stops resolving is in
+[design: health and alerting](docs/design.md#73-health-and-alerting).
 
 ## Troubleshooting
 

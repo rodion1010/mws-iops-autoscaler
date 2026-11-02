@@ -193,7 +193,7 @@ What happens when one doesn't resolve depends on discovery history, not one fixe
   appears in `/readyz`'s body as `configured_disks_unmanaged` (`{device_name, reason}`) and as the
   `iops_autoscaler_disk_configured_unmanaged{device_name,reason}` gauge — neither of which flips
   `/readyz`'s binary verdict, which stays reserved for whole-agent failures. There is no escalation
-  timer back to fatal; an operator who wants one builds it on the exposed signal.
+  timer back to fatal; the alerting contract for the exposed signal is in docs/design.md §7.3.
 
 `mode: auto-discovery`'s `exclude` gets the identical treatment for the same reason, not the asymmetric
 "harmless no-op" it used to be: an exclude entry that never matches a live disk could just as easily be
