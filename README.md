@@ -287,7 +287,7 @@ for the relevant signals. Ownership and escalation policy are tracked in
 | Compute API returns 403 | Verify that Compute is enabled and the service account has `compute.editor`. For a dependent disk, also check the `iam.serviceAccount.admin` grant from [step 1](#1-prepare-the-mws-resources). |
 | `/readyz` reports `discovery_succeeded: false` | Check API connectivity, permissions and that at least one supported attached disk matches the selection. |
 | `/readyz` reports `source_reachable: false` | Check `/proc/diskstats` and the `/dev/disk/by-id/mws-<device_name>` symlinks. |
-| `configured_disks_unmanaged` appears in `/readyz` | A selected or excluded name no longer resolves. Fix the name or disk attachment. This is reported as degradation while the agent stays ready. |
+| `configured_disks_unmanaged` appears in `/readyz` | A selected or excluded name no longer resolves. Fix the name or disk attachment. This is reported as degradation while the agent stays ready, so alert on it: [alerting contract](docs/design.md#73-health-and-alerting). |
 | No change occurs | Wait for the observation window, then inspect the decision `reason`: the disk may be neither saturated nor underutilized, or a safety guardrail may be active. |
 | `budget_healthy: false` | The durable state could not be trusted. Fix storage permissions or filesystem errors and restart the agent. |
 | Disk is capped while demand remains high | Check the per-disk maximum and `iops_autoscaler_vm_cap_reached`; add vCPU if the VM-wide IOPS pool is the limit. |
