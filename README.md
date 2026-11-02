@@ -1,5 +1,9 @@
 # MWS IOPS Autoscaler
 
+[![CI](https://github.com/rodion1010/mws-iops-autoscaler/actions/workflows/ci.yml/badge.svg)](https://github.com/rodion1010/mws-iops-autoscaler/actions/workflows/ci.yml)
+![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 MWS IOPS Autoscaler is an external agent for **MWS Cloud Compute** that watches the real demand of
 attached NBS-PL2 disks and adjusts their provisioned IOPS to match it — raising the limit when a disk
 is saturated, lowering it after sustained quiet so you stop paying for unused headroom. It is intended
@@ -7,10 +11,23 @@ for workloads whose storage demand changes over time: instead of provisioning th
 the start, you define a safe range and let the agent track the workload's actual needs within it.
 
 > [!IMPORTANT]
-> The current release is **local mode, bidirectional**. Run one agent inside each target MWS virtual
-> machine. Fleet mode and platform metrics are not implemented yet.
+> The current implementation is **local mode, bidirectional**. Run one agent inside each target MWS virtual
+> machine.
+
+**Contents:** [What it does](#what-it-does) · [Prerequisites](#prerequisites) · [Quick start](#quick-start) · [Configuration](#configuration-essentials) · [CLI options](#command-line-options) · [Observability](#observability) · [Troubleshooting](#troubleshooting) · [Development](#development)
 
 ## What it does
+
+```mermaid
+flowchart LR
+  A[VM metadata] --> B[Disk discovery]
+  B --> C["/proc/diskstats window"]
+  C --> D{Saturated or<br/>underutilized?}
+  D -->|yes| E[MWS Compute API<br/>raise / lower IOPS]
+  D -->|no| F[No action]
+  E --> G[Journal + Prometheus]
+  F --> G
+```
 
 On every control-loop cycle, the agent:
 
@@ -19,7 +36,7 @@ On every control-loop cycle, the agent:
 3. reads per-disk activity from Linux `/proc/diskstats`;
 4. waits for a complete observation window and detects actual saturation from utilization, queue and
    latency signals;
-5. estimates the required IOPS and applies the increase through the appropriate MWS Compute API;
+5. estimates the required IOPS and applies the increase or decrease through the appropriate MWS Compute API;
 6. records the decision and exposes health and Prometheus telemetry.
 
 Both MWS attachment models are supported. An **independent** disk is updated through the disk API; a
@@ -31,8 +48,8 @@ Both MWS attachment models are supported. An **independent** disk is updated thr
 |---|---|
 | Cloud and disk type | MWS Cloud Compute, attached NBS-PL2 disks |
 | Deployment model | One local agent per target Linux VM |
-| Scaling direction | Scale-up only |
-| Metrics | Guest metrics from `/proc/diskstats`; no Monitoring API key required |
+| Scaling direction | Bidirectional: raises the limit on saturation, lowers it after sustained quiet |
+| Metrics | Guest metrics read from `/proc/diskstats` |
 | Disk selection | Automatic discovery, optional exclusions, or an explicit selected list |
 | Safety | Per-disk bounds, 100-IOPS rounding, cooldown, trailing 24-hour change budget, concurrent-update protection and dry-run |
 | VM capacity | Respects the MWS VM pool of `3000 × vCPU` and accounts for sibling-disk demand |
@@ -43,16 +60,14 @@ Both MWS attachment models are supported. An **independent** disk is updated thr
 Before starting the agent, prepare the following:
 
 - An **MWS Cloud project** with the Compute service enabled. Local mode derives the project, zone and
-  VM name from the VM's own instance metadata — no environment variable names them, since the agent
-  always runs inside the target VM and there is no scenario where a different value would be correct.
+  VM name from the VM's own instance metadata.
 - A Linux MWS VM with at least one attached **NBS-PL2** disk. The guest must expose each managed disk
   as `/dev/disk/by-id/mws-<device_name>` and expose `/proc/diskstats`.
 - An MWS service account attached to that VM. Grant it `compute.editor` in the project so the agent can
   discover the VM and disks and update their IOPS.
 - Access from the VM to the instance metadata service at `169.254.169.254` and to the MWS API at
   `https://api.mwsapis.ru`.
-- Go **1.26 or newer** and Git if you build the binary from source. They are not runtime dependencies
-  after the binary has been built.
+- Go **1.26 or newer** and Git, needed only to build the binary from source.
 - A writable persistent directory for the 24-hour change budget. The default is
   `/var/lib/mws-iops-autoscaler`.
 
@@ -164,8 +179,7 @@ status 1 and reports every detected violation.
 
 ### 6. Start in dry-run mode
 
-Create a local state directory and start the agent — no project or zone environment variable is
-needed inside the VM:
+Create a local state directory and start the agent:
 
 ```bash
 mkdir -p ./var
@@ -178,7 +192,8 @@ mkdir -p ./var
   -listen 127.0.0.1:9435
 ```
 
-Leave it running for at least one complete scale-up window—five minutes with the defaults. Generate a
+Leave it running for at least one complete scale-up window—five minutes with the defaults (scale-down
+needs a full 30-minute window with the defaults). Generate a
 representative workload and inspect the journal to see both proposed actions and reasons for no action:
 
 ```bash
@@ -186,8 +201,7 @@ tail -f ./decisions.jsonl
 ```
 
 Dry-run never mutates disk IOPS. For independent disks it can ask the API to validate the proposed
-write; for dependent disks the verdict is computed locally because the platform has no equivalent
-validation-only VM update.
+write; for dependent disks the verdict is computed locally.
 
 ### 7. Check health and metrics
 
@@ -221,8 +235,11 @@ After the dry-run decisions match your expectations, stop the process and start 
 Ensure the process user can create and write both paths. Keep the state directory persistent across
 restarts: `budget.jsonl` is the durable record that enforces the trailing 24-hour change limit.
 
-The repository does not currently ship a package or service unit. When placing the binary under your
-own process supervisor:
+> [!WARNING]
+> IOPS changes persist in MWS after the agent stops. There is no dead-man switch that restores the
+> previous limit or triggers scale-down; restart the agent promptly or adjust the disk manually.
+
+Run the binary under your own process supervisor:
 
 - run exactly one agent for a target VM;
 - restart on failure and stop with `SIGTERM`;
@@ -239,11 +256,10 @@ own process supervisor:
 - Disk names are the platform-visible MWS `device_name` values (the `mws-` prefix included), not
   Linux `/dev` paths.
 - Disk attachment class is detected automatically; users do not configure the write path.
-- `runtime.metrics.source` must currently be `guest`. `platform` is rejected because that source is not
-  implemented yet.
-- Scale-up is blocked when metrics or discovery are stale, the observation window is incomplete, the
-  disk is not saturated, cooldown or the change budget applies, identity cannot be verified, or sibling
-  demand leaves insufficient VM headroom.
+- `runtime.metrics.source` is `guest`.
+- A change is blocked when metrics or discovery are stale, the observation window is incomplete, the
+  disk is neither saturated (scale-up) nor sustainedly underutilized (scale-down), cooldown or the
+  change budget applies, identity cannot be verified, or sibling demand leaves insufficient VM headroom.
 
 ## Command-line options
 
@@ -259,10 +275,6 @@ own process supervisor:
 Local mode resolves its own project, zone and VM name from the VM's instance metadata service before
 starting. The MWS Go SDK separately obtains credentials from the service account attached to the VM,
 also through the instance metadata service.
-
-`MWS_PROJECT` and `MWS_ZONE` — the MWS Go SDK's own environment variables — are not read by this
-agent at all: local mode always runs inside the target VM, so there is no scenario where pointing it
-at a different project or zone than the one it is actually running in would be correct.
 
 ## Observability
 
@@ -280,8 +292,9 @@ Prometheus metrics include:
 - skipped or configured-but-unmanaged disks and durable-budget health.
 
 See [design: observability](docs/design.md#7-observability) for the complete telemetry contract and
-the signals considered alert-worthy. Ready-to-use alert rules and their ownership and escalation
-policy are not defined yet; this is tracked in [issue #59](https://github.com/rodion1010/mws-iops-autoscaler/issues/59).
+the signals considered alert-worthy. Ready-to-use alert rules are not shipped; configure monitoring
+for the relevant signals. Ownership and escalation policy are tracked in
+[issue #59](https://github.com/rodion1010/mws-iops-autoscaler/issues/59).
 
 ## Troubleshooting
 
@@ -291,8 +304,8 @@ policy are not defined yet; this is tracked in [issue #59](https://github.com/ro
 | Compute API returns 403 | Verify that Compute is enabled and the service account has `compute.editor`. For a dependent disk, also check the upstream IAM workaround in Prerequisites. |
 | `/readyz` reports `discovery_succeeded: false` | Check API connectivity, permissions and that at least one supported attached disk matches the selection. |
 | `/readyz` reports `source_reachable: false` | Check `/proc/diskstats` and the `/dev/disk/by-id/mws-<device_name>` symlinks. |
-| `configured_disks_unmanaged` appears in `/readyz` | A selected or excluded name no longer resolves. Fix the name or disk attachment. This is reported as degradation without making the whole agent unready. |
-| No scale-up occurs | Wait for the observation window, then inspect the decision `reason`; the workload may not be saturated or a safety guardrail may be active. |
+| `configured_disks_unmanaged` appears in `/readyz` | A selected or excluded name no longer resolves. Fix the name or disk attachment. This is reported as degradation while the agent stays ready. |
+| No change occurs | Wait for the observation window, then inspect the decision `reason`; the workload may be neither saturated nor sustainedly underutilized, or a safety guardrail may be active. |
 | `budget_healthy: false` | The durable state could not be trusted. Fix storage permissions or filesystem errors and restart the agent. |
 | Disk is capped while demand remains high | Check the per-disk maximum and `iops_autoscaler_vm_cap_reached`; add vCPU if the VM-wide IOPS pool is the limit. |
 
@@ -309,7 +322,10 @@ Further reading:
 - [Documentation index](docs/README.md)
 - [Configuration reference](docs/configuration.md)
 - [Architecture and safety invariants](docs/design.md)
-- [Verified MWS platform behavior](docs/platform-reference.md)
 - [Development environment](docs/development.md)
 - [Testing strategy](docs/testing.md)
 - [CI/CD](docs/ci-cd.md)
+
+## License
+
+[Apache License 2.0](LICENSE)
