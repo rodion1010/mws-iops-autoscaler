@@ -29,14 +29,6 @@ These were identified during design/review but explicitly deferred, not solved:
   first e2e scenario verifies the IOPS change via the compute API, not platform metrics. Add it (console-only
   grant, per `docs/platform-reference.md`) when fleet mode's `metrics.source: platform` needs live e2e
   coverage.
-- **Fork-PR handling needs a decision before the repo goes public.** GitHub's default only requires
-  approval for a contributor's *first* PR; afterward their workflows run unattended on the self-hosted
-  runner. Approval alone never makes fork smoke work, though: the job needs the `E2E_SSH_PRIVATE_KEY`
-  secret, which is not sent to public-fork `pull_request` workflows at all (private-fork secret
-  sharing is a separate, explicit repository/organization setting), so an approved fork PR's smoke run
-  just fails on the missing key. Before going public, either stop triggering the PR-tier e2e job from
-  `pull_request` entirely (label-gated or maintainer-dispatched instead) or build the secret and
-  runner-isolation model from the trust-boundary item below.
 - **Runner SA privilege is broader than the PR-tier smoke test needs.** The runner's SA carries
   `compute.editor` + `vpc.editor` so the same runner can also drive the merge-tier full
   create/destroy test; any code that reaches the runner (post fork-approval) can use all of it, not just
@@ -59,24 +51,17 @@ These were identified during design/review but explicitly deferred, not solved:
   merge today. Two independent blockers: (a) the current GitHub plan does not offer branch protection
   for this private repository at all — the API answers 403, "Upgrade to GitHub Pro or make this
   repository public to enable this feature" — so it needs a plan upgrade, and *not* making the repo
-  public (that must wait for the trust-boundary decision below); and (b) the trust-boundary question
-  below: making PR-tier e2e *required* is what turns "PR code runs on the credentialed runner" from
-  an option into a merge prerequisite. Order: upgrade the plan, resolve the trust decision, then
-  configure `verify` and `smoke` as required checks.
-- **Trust boundary: PR-supplied code runs on a credentialed self-hosted runner.** `e2e-pr.yml` checks
-  out and executes the PR's own code on the persistent runner, whose attached SA is ambient via IMDS,
-  and whose SSH key reaches target VMs (which themselves expose an SA through their own IMDS — so
-  guest access is not the "SSH only, no cloud API" boundary it might look like). Known critical risk,
-  accepted for now with two trusted committers on a private repo; needs a real decision before the
-  repo goes public or before PR-tier e2e becomes a required check. As implemented, the smoke path is
-  usable for same-repository collaborator branches only: the job requires the `E2E_SSH_PRIVATE_KEY`
-  secret, which GitHub never sends to public-fork `pull_request` workflows (private-fork secret
-  sharing is a separate, explicit repository/organization setting) — fork-PR approval permits
-  execution but does not deliver the secret, so an approved fork PR's smoke run fails on the missing
-  key. Fork-PR smoke is unresolved/unsupported until a safe secret and runner-isolation model is
-  chosen. Options: keep it same-repo-only and informational, gate it behind a maintainer-applied
-  label, or move to ephemeral per-job runners with per-run credentials so no long-lived credentialed
-  machine executes untrusted code.
+  public (until the runner's role set is narrowed); and (b) the PR-tier trust model is now decided
+  (same-repository branches only), but a skipped fork `smoke` satisfies a required check, so fork PRs
+  need maintainer review. Order: upgrade the plan or publish, then configure `verify` and `smoke` as
+  required checks.
+- **Residual risk of the PR-tier trust model: PR-supplied code still runs on a credentialed
+  self-hosted runner.** Live e2e is limited to branches of this repository (see `docs/ci-cd.md`'s
+  PR-tier trust model), which removes fork code but not the ambient privilege: `e2e-pr.yml` executes
+  the branch's own code on the persistent runner, whose attached SA is ambient via IMDS, and whose SSH
+  key reaches target VMs (which themselves expose an SA through their own IMDS). Remaining work:
+  narrow the runner's role set (next item), and consider ephemeral per-job runners if external
+  committers are ever added.
 - **One of `docs/design.md` §8.3's ten e2e scenarios is not implemented: VM cap detection.** See
   `docs/testing.md`'s coverage table for the honest per-scenario status of the other nine.
 
