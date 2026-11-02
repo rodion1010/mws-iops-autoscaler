@@ -654,10 +654,17 @@ func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (in
 		}
 		for _, d := range vm.Disks {
 			if d.DeviceName == m.Disk.DeviceName {
-				if err := verifyLiveIncarnation(m.Disk.DiskName, m.Disk.IncarnationID, d.IncarnationID); err != nil {
+				// The VM response carries no disk incarnation, so read the attached disk and take
+				// both identity and value from that one response. An empty expected incarnation
+				// skips only the identity comparison, not this read.
+				disk, err := a.client.GetDisk(ctx, d.DiskName)
+				if err != nil {
 					return 0, err
 				}
-				return d.IOPS, nil
+				if err := verifyLiveIncarnation(m.Disk.DiskName, m.Disk.IncarnationID, disk.IncarnationID); err != nil {
+					return 0, err
+				}
+				return disk.SpecIOPS, nil
 			}
 		}
 		return 0, fmt.Errorf("device_name %q not found on VM %q", m.Disk.DeviceName, a.vmName)
@@ -666,10 +673,14 @@ func (a *Agent) liveCurrentIOPS(ctx context.Context, m registry.ManagedDisk) (in
 	}
 }
 
-// verifyLiveIncarnation rejects a known mismatch; unavailable IDs fall back to IOPS-only reconciliation.
+// verifyLiveIncarnation fails closed: a known expected incarnation needs a present, equal live one.
+// An empty expected ID (a reservation recorded without identity) skips the check.
 func verifyLiveIncarnation(diskName, expected, live string) error {
-	if expected == "" || live == "" || expected == live {
+	if expected == "" || expected == live {
 		return nil
+	}
+	if live == "" {
+		return fmt.Errorf("disk %q has no live incarnation to compare with the reservation's %q — its live state cannot resolve this reservation", diskName, expected)
 	}
 	return fmt.Errorf("disk %q live incarnation %q differs from the reservation's %q — a different resource was created under the same name; its live state cannot resolve this reservation", diskName, live, expected)
 }
