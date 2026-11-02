@@ -13,7 +13,7 @@ the runner's own environment, not the repository.
 | Tier | Runs on | Triggers | What it proves |
 |---|---|---|---|
 | **Fast checks** | GitHub-hosted (`ubuntu-latest`) | Every PR, push to `main` | `gofmt`, `go vet`, `go test ./...`, `go test -race ./...`, plus the `docs/design.md` §8.2 integration suite against `internal/platformfake`. No cloud credentials involved. Implemented in `.github/workflows/ci.yml`. |
-| **PR-tier e2e ("smoke")** | Self-hosted runner | `pull_request`, but usable only for same-repository collaborator branches — the job needs the `E2E_SSH_PRIVATE_KEY` secret, which GitHub never sends to public-fork `pull_request` workflows (private-fork secret sharing is a separate, explicit setting); see below | The agent, built from the PR's code, actually raises a real disk's IOPS limit on a real MWS VM. Reuses one persistent test VM+disk. |
+| **PR-tier e2e ("smoke")** | Self-hosted runner | `pull_request_target`, running only for same-repository branches — the origin guard lives in workflow code loaded from the base branch; see below | The agent, built from the PR's code, actually raises a real disk's IOPS limit on a real MWS VM. Reuses one persistent test VM+disk. |
 | **Merge-tier e2e ("full")** | Self-hosted runner | Push to `main`, `workflow_dispatch` | Same scenario as smoke, but provisions a fresh VM+disk from scratch and tears it down — the only tier that exercises create/destroy. |
 
 Fast checks and PR-tier e2e are **intended** to be required status checks on `main`'s branch
@@ -22,12 +22,23 @@ two independent reasons: the current GitHub plan does not offer it for this priv
 all (the runbook's step 8 records the 403 and the plan upgrade it needs), and `docs/TODO.md`
 records the open question of whether PR-tier e2e should gate merges at all while PR-supplied code
 runs on a credentialed self-hosted runner. As implemented, the smoke path is usable for
-same-repository collaborator branches only: a fork PR's approval permits workflow execution but
-never delivers the `E2E_SSH_PRIVATE_KEY` secret (GitHub does not send ordinary secrets to
-public-fork `pull_request` workflows, and private-fork secret sharing is a separate, explicit
-repository/organization setting), so an approved fork PR's smoke run fails on the missing key
-rather than exercising anything. Fork-PR smoke stays unresolved until a safe secret and
-runner-isolation model is chosen — `docs/TODO.md`'s trust-boundary item.
+same-repository branches only; fork PRs are skipped by a guard evaluated in workflow code from the
+base branch (see below). Withholding the SSH secret from fork `pull_request` runs would not have been
+a boundary on its own: the runner's cloud credentials come from IMDS, not from a secret.
+
+**PR-tier trust model (Product Lead decision, 2026-10-15):** live e2e runs automatically only for
+pull requests from branches of this repository. `e2e-pr.yml` is triggered by `pull_request_target`,
+so GitHub loads it from the base branch: a PR cannot edit away the origin guard, which a plain
+`pull_request` workflow (loaded from the PR's merge commit) would allow. The `smoke` job runs only when
+the PR head repository is this repository and then checks out the PR's merge ref
+(`refs/pull/<n>/merge`), failing if that merge commit does not contain the current PR head (GitHub
+stops updating it while the PR conflicts with the base); for fork PRs the
+GitHub-hosted `fork-skipped` job prints why, and fork code is never checked out or executed. A
+maintainer reviews a fork change and, if it needs live coverage, re-runs it from a branch of this
+repository. Consequences: changes to `e2e-pr.yml` itself only take effect after they reach the base
+branch, and a skipped `smoke` satisfies a required status check, so branch protection must be paired
+with that review. The runner service account's role set is still broader than the PR tier needs
+(`docs/TODO.md`).
 
 ## Runner vs. target VM — two different machines
 
@@ -207,20 +218,15 @@ right now. Provisioned by hand via the `mws` CLI, in this order:
      current GitHub plan — the API answers 403, "Upgrade to GitHub Pro or make this repository
      public to enable this feature" (verified 2026-09-06). Upgrade to a plan that supports branch
      protection. Do **not** make the repository public to obtain it: that would expose the repo
-     before the trust-boundary decision below is made.
-   - **Trust decision:** making the smoke job a *required* check is what turns "PR-supplied code
-     runs on the credentialed self-hosted runner" from an option into a merge prerequisite — the
-     Product Lead must choose the PR e2e trust model first (`docs/TODO.md`'s trust-boundary item).
+     before the runner's role set is narrowed.
+   - **Trust model:** decided (same-repository branches only, see the PR-tier trust model above).
+     Narrow the runner's role set (`docs/TODO.md`) before making `smoke` a required check.
    Once both are resolved: upgrade the plan, then configure `verify` and `smoke` as required
    status checks.
 9. **Confirm GitHub's fork-approval requirement is active** for workflow runs from outside contributors
-   (default: first-time contributors need approval). Approval only permits execution — it does not
-   make fork-PR smoke work: the job needs the `E2E_SSH_PRIVATE_KEY` secret, which GitHub never sends
-   to public-fork `pull_request` workflows (private-fork secret sharing is a separate, explicit
-   repository/organization setting), so an approved fork PR's smoke run fails on the missing key. The
-   implemented smoke path is for same-repository collaborator branches; fork-PR smoke stays
-   unresolved until a safe secret and runner-isolation model is chosen — see `docs/TODO.md`'s
-   trust-boundary item.
+   (default: first-time contributors need approval). Approval only permits execution. `e2e-pr.yml` is
+   `pull_request_target` and skips fork PRs by design, so an approved fork PR never reaches the
+   credentialed runner — see the PR-tier trust model above.
 
 Every full-tier run additionally creates and attaches `ci-agent-sa` to its own freshly created VM as part
 of the workflow itself (not a one-time step) — see step 3 above's per-run analogue in

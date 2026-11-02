@@ -142,6 +142,114 @@ func TestRegressionPendingReservationNeverResolvesAgainstReplacementDisk(t *test
 	}
 }
 
+func TestRegressionPendingDependentReservationNeverResolvesAgainstReplacementDisk(t *testing.T) {
+	// The VM response never carries a disk incarnation, so the replacement is only visible through GetDisk.
+	client := &replacementClient{
+		disk: &compute.Disk{Name: "vm-1-boot", SpecIOPS: 2000, IncarnationID: "incarnation-b"},
+		vm: &compute.VirtualMachine{Name: "vm-1", Disks: []compute.StorageDisk{
+			{Alias: "bootdisk", DeviceName: "bootdisk", DiskName: "vm-1-boot", Class: compute.ClassDependent, IOPS: 2000},
+		}},
+	}
+	m := dependentDisk()
+	m.Disk.IOPS = 1000
+	m.Disk.IncarnationID = "incarnation-a"
+
+	a, tracker := newTestAgent(t, &recordingActuator{})
+	a.client = client
+	a.managed = []registry.ManagedDisk{m}
+	if err := tracker.ReserveChange(m.Disk.IdentityKey(), "reservation-a", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if got := len(tracker.PendingChanges()); got != 1 {
+		t.Fatalf("pending reservations = %d, want 1: incarnation-b cannot prove whether incarnation-a's write landed", got)
+	}
+}
+
+func TestRegressionPendingReservationStaysPendingWhenLiveIncarnationIsUnknown(t *testing.T) {
+	boot := compute.StorageDisk{Alias: "bootdisk", DeviceName: "bootdisk", DiskName: "vm-1-boot", Class: compute.ClassDependent, IOPS: 2000}
+	cases := []struct {
+		name   string
+		m      registry.ManagedDisk
+		client *replacementClient
+	}{
+		{"independent", independentDisk(), &replacementClient{disk: &compute.Disk{Name: "vm-1-data", SpecIOPS: 2000}}},
+		{"dependent", dependentDisk(), &replacementClient{
+			disk: &compute.Disk{Name: "vm-1-boot", SpecIOPS: 2000},
+			vm:   &compute.VirtualMachine{Name: "vm-1", Disks: []compute.StorageDisk{boot}},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tc.m
+			m.Disk.IncarnationID = "incarnation-a"
+			a, tracker := newTestAgent(t, &recordingActuator{})
+			a.client = tc.client
+			a.managed = []registry.ManagedDisk{m}
+			if err := tracker.ReserveChange(m.Disk.IdentityKey(), "reservation-a", 1000, 2000, time.Now()); err != nil {
+				t.Fatalf("ReserveChange: %v", err)
+			}
+
+			a.reconcilePendingBudget(context.Background())
+
+			if got := len(tracker.PendingChanges()); got != 1 {
+				t.Fatalf("pending reservations = %d, want 1: a live disk without an incarnation cannot prove it is incarnation-a", got)
+			}
+		})
+	}
+}
+
+func TestRegressionDependentReservationUsesIOPSFromTheVerifiedDiskRead(t *testing.T) {
+	// The VM snapshot says 2000 (the reservation's target) but the disk read that verified the
+	// incarnation says 5000, so the live value matches neither side of the reservation.
+	client := &replacementClient{
+		disk: &compute.Disk{Name: "vm-1-boot", SpecIOPS: 5000, IncarnationID: "incarnation-a"},
+		vm: &compute.VirtualMachine{Name: "vm-1", Disks: []compute.StorageDisk{
+			{Alias: "bootdisk", DeviceName: "bootdisk", DiskName: "vm-1-boot", Class: compute.ClassDependent, IOPS: 2000},
+		}},
+	}
+	m := dependentDisk()
+	m.Disk.IncarnationID = "incarnation-a"
+	a, tracker := newTestAgent(t, &recordingActuator{})
+	a.client = client
+	a.managed = []registry.ManagedDisk{m}
+	if err := tracker.ReserveChange(m.Disk.IdentityKey(), "reservation-a", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if got := len(tracker.PendingChanges()); got != 1 {
+		t.Fatalf("pending reservations = %d, want 1: identity and IOPS must come from the same disk read", got)
+	}
+}
+
+func TestRegressionDependentReservationWithoutExpectedIncarnationStillReadsTheDisk(t *testing.T) {
+	// No expected incarnation skips the identity comparison, not the authoritative disk read:
+	// the VM attachment says 2000 (the reservation's target) but the disk resource says 5000.
+	client := &replacementClient{
+		disk: &compute.Disk{Name: "vm-1-boot", SpecIOPS: 5000},
+		vm: &compute.VirtualMachine{Name: "vm-1", Disks: []compute.StorageDisk{
+			{Alias: "bootdisk", DeviceName: "bootdisk", DiskName: "vm-1-boot", Class: compute.ClassDependent, IOPS: 2000},
+		}},
+	}
+	m := dependentDisk()
+	a, tracker := newTestAgent(t, &recordingActuator{})
+	a.client = client
+	a.managed = []registry.ManagedDisk{m}
+	if err := tracker.ReserveChange(m.Disk.IdentityKey(), "reservation-a", 1000, 2000, time.Now()); err != nil {
+		t.Fatalf("ReserveChange: %v", err)
+	}
+
+	a.reconcilePendingBudget(context.Background())
+
+	if got := len(tracker.PendingChanges()); got != 1 {
+		t.Fatalf("pending reservations = %d, want 1: the disk's SpecIOPS (5000) matches neither before nor target", got)
+	}
+}
+
 func TestRegressionConflictRediscoveryFailureAbortsCycle(t *testing.T) {
 	client := &stubClient{
 		vm: vmWithTwoIndependentDisks(),
@@ -215,6 +323,21 @@ func TestRegressionPreWriteConflictDoesNotConsumeChangeBudget(t *testing.T) {
 
 	if got := len(tracker.PendingChanges()); got != 0 {
 		t.Fatalf("pending reservations = %d, want 0: ErrConcurrentModification proves the mutating request was never sent", got)
+	}
+}
+
+func TestRegressionPreWriteFailureDoesNotConsumeChangeBudget(t *testing.T) {
+	act := &erroringActuatorRecording{err: compute.MarkNoWriteSent(errors.New("re-read before write: connection refused"))}
+	a, tracker := newTestAgent(t, act)
+	// Live IOPS matches neither the reservation's before nor target, so the
+	// ambiguous-write reconciliation would leave the reservation pending.
+	a.client = &stubClient{disks: map[string]*compute.Disk{"vm-1-data": {Name: "vm-1-data", SpecIOPS: 5000}}}
+	d := decider.Decision{DiskID: "vm-1-data", Action: decider.ActionScaleUp, Current: 1000, Target: 2000}
+
+	a.actuate(context.Background(), independentDisk(), d, time.Now())
+
+	if got := len(tracker.PendingChanges()); got != 0 {
+		t.Fatalf("pending reservations = %d, want 0: a failure before the mutating request proves no write", got)
 	}
 }
 

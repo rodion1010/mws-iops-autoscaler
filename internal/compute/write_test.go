@@ -505,3 +505,65 @@ func TestDirectionPreserved(t *testing.T) {
 		})
 	}
 }
+
+func TestWritePathsMarkEveryFailureBeforeTheMutatingRequestAsNoWriteSent(t *testing.T) {
+	ctx := context.Background()
+	dependentVM := func(c *fakeClient, etag string, disks ...StorageDisk) {
+		c.vms["vm-1"] = &VirtualMachine{Name: "vm-1", Etag: etag, Disks: disks}
+	}
+	boot := StorageDisk{Alias: "boot", DeviceName: "bootdisk", DiskName: "vm-1-boot", Class: ClassDependent, IOPS: 1000}
+
+	cases := []struct {
+		name  string
+		setup func(c *fakeClient)
+		call  func(c *fakeClient) error
+	}{
+		{"independent: disk read fails", func(c *fakeClient) {}, func(c *fakeClient) error {
+			_, err := UpdateIndependentDiskIOPS(ctx, c, "datadisk", 1000, 2000, "", false, "k")
+			return err
+		}},
+		{"independent: no etag", func(c *fakeClient) { c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 1000} }, func(c *fakeClient) error {
+			_, err := UpdateIndependentDiskIOPS(ctx, c, "datadisk", 1000, 2000, "", false, "k")
+			return err
+		}},
+		{"dependent: VM read fails", func(c *fakeClient) {}, func(c *fakeClient) error {
+			_, err := UpdateDependentDiskIOPS(ctx, c, "vm-1", "bootdisk", 1000, 2000, "", false, "k")
+			return err
+		}},
+		{"dependent: VM has no etag", func(c *fakeClient) { dependentVM(c, "", boot) }, func(c *fakeClient) error {
+			_, err := UpdateDependentDiskIOPS(ctx, c, "vm-1", "bootdisk", 1000, 2000, "", false, "k")
+			return err
+		}},
+		{"dependent: device not found", func(c *fakeClient) { dependentVM(c, "etag-1", boot) }, func(c *fakeClient) error {
+			_, err := UpdateDependentDiskIOPS(ctx, c, "vm-1", "missing", 1000, 2000, "", false, "k")
+			return err
+		}},
+		{"dependent: incarnation disk read fails", func(c *fakeClient) { dependentVM(c, "etag-1", boot) }, func(c *fakeClient) error {
+			_, err := UpdateDependentDiskIOPS(ctx, c, "vm-1", "bootdisk", 1000, 2000, "incarnation-a", false, "k")
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newFakeClient()
+			tc.setup(c)
+			err := tc.call(c)
+			if !errors.Is(err, ErrNoWriteSent) {
+				t.Fatalf("err = %v, want errors.Is ErrNoWriteSent: no mutating request was sent", err)
+			}
+		})
+	}
+}
+
+func TestWritePathDoesNotMarkAFailedMutatingRequestAsNoWriteSent(t *testing.T) {
+	c := newFakeClient()
+	c.vms["vm-1"] = &VirtualMachine{Name: "vm-1", Etag: "etag-1", Disks: []StorageDisk{
+		{Alias: "boot", DeviceName: "bootdisk", DiskName: "vm-1-boot", Class: ClassDependent, IOPS: 1000},
+	}}
+	c.dependentWriteErr = errors.New("connection reset")
+
+	_, err := UpdateDependentDiskIOPS(context.Background(), c, "vm-1", "bootdisk", 1000, 2000, "", false, "k")
+	if err == nil || errors.Is(err, ErrNoWriteSent) {
+		t.Fatalf("err = %v, want a failure that may have reached the API and is not marked ErrNoWriteSent", err)
+	}
+}

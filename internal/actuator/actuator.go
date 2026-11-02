@@ -65,8 +65,8 @@ func NewComputeActuator(c compute.Client) *ComputeActuator {
 
 func (a *ComputeActuator) Apply(ctx context.Context, d decider.Decision, target Target, dryRun bool, idempotencyKey string) (Applied, error) {
 	if d.Action != decider.ActionScaleUp && d.Action != decider.ActionScaleDown {
-		return Applied{}, fmt.Errorf("actuator: refusing to apply action %q for disk %q — only scale_up/scale_down write anything",
-			d.Action, d.DiskID)
+		return Applied{}, compute.MarkNoWriteSent(fmt.Errorf("actuator: refusing to apply action %q for disk %q — only scale_up/scale_down write anything",
+			d.Action, d.DiskID))
 	}
 
 	switch target.Class {
@@ -94,6 +94,6 @@ func (a *ComputeActuator) Apply(ctx context.Context, d decider.Decision, target 
 		return Applied{DiskID: d.DiskID, IOPS: applied}, nil
 
 	default:
-		return Applied{}, fmt.Errorf("actuator: disk %q has unknown class %q", d.DiskID, target.Class)
+		return Applied{}, compute.MarkNoWriteSent(fmt.Errorf("actuator: disk %q has unknown class %q", d.DiskID, target.Class))
 	}
 }
