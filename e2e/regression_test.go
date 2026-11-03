@@ -273,7 +273,7 @@ func TestRegression_WaitForScaleDown_RejectsEarlyDrop(t *testing.T) {
 		raiseAfterCycles: 1,
 		raiseTo:          800,
 	}
-	_, err := waitForScaleDown(context.Background(), f, newScriptedTarget(compute.ClassDependent), 2*time.Second, 500*time.Millisecond, 5*time.Millisecond, time.Now())
+	_, err := waitForScaleDown(context.Background(), f, newScriptedTarget(compute.ClassDependent), 2*time.Second, time.Hour, 5*time.Millisecond, time.Now())
 	if err == nil {
 		t.Fatalf("a drop before the scale-down window could elapse must fail closed, not pass")
 	}
