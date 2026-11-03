@@ -1,0 +1,44 @@
+name: E2E (sweep)
+
+# Deletes e2e-full VMs and disks that outlived their run. It is independent of the test jobs on
+# purpose: a job-level kill or a lost runner never reaches their own teardown
+# (docs/ci-cd.md, "Orphan sweeper").
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Delete the candidates. Off reports them and deletes nothing.
+        type: boolean
+        default: false
+      ttl_hours:
+        description: Minimum age in hours; must stay above e2e-full.yml's timeout-minutes.
+        default: "3"
+
+concurrency:
+  group: e2e-sweep
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: [self-hosted, mws-iops-autoscaler-runner]
+    timeout-minutes: 30
+    steps:
+      # Pin third-party actions because this runner has cloud credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Sweep
+        env:
+          MWS_PROJECT: ${{ vars.MWS_PROJECT }}
+          # Scheduled runs only report until the repository variable E2E_SWEEP_APPLY is "true".
+          SWEEP_APPLY: ${{ inputs.apply || (github.event_name == 'schedule' && vars.E2E_SWEEP_APPLY == 'true') }}
+          SWEEP_TTL_HOURS: ${{ inputs.ttl_hours || '3' }}
+        run: |
+          set -o pipefail
+          bash e2e/scripts/sweep.sh | tee -a "$GITHUB_STEP_SUMMARY"

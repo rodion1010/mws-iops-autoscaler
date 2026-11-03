@@ -92,6 +92,7 @@ workflow's `-run` filter rather than failing loud — CI would just quietly stop
 | `headroom_test.go` | `TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap` (E5) — an unmanaged sibling doing real, sustained I/O must still count toward a managed disk's VM headroom (`docs/design.md` §4.6, D4/US-009). Runs unconditionally as an ordinary required scenario (see "VM headroom coverage" below); no longer `xfail`-wrapped. |
 | `xfail.go` | `xfail(t, issueURL, scenario)` — converts a `func() error` scenario's outcome into a non-blocking `t.Skip` on error (a known, tracked gap) or a forced `t.Fatal` on nil (the fix shipped; remove this wrapper). The scenario it wraps must never call a `*testing.T` failure method itself — Go cannot catch one raised from inside a test — so it is built from `runAgentScenarioWithDisksErr` and the package's other error-returning primitives, never `runAgentScenarioWithDisks` or a bare `t.Fatalf`. Currently unused — available for the still-unimplemented §8.3 scenarios listed above. |
 | `regression_test.go` | Deterministic, infrastructure-free regression tests for the observable-baseline precondition and agent-stop verification, driven by a scripted `compute.Client` and a scripted guest-OS runner — they run in the GitHub-hosted `CI` verify job on every PR (`-run '^TestRegression_'`) and alongside both live e2e tiers, and need no VM. Grouped by mechanism: `TestRegression_Preflight_*` (baseline reset, stale-agent stop) and `TestRegression_WaitForScaleUp_*` (convergence and timing). |
+| `sweep_script_test.go` | `TestRegression_Sweep_*`: drives `scripts/sweep.sh` against a stub `mws` on `PATH` — age and ownership filtering, dry-run, ambiguous names and ages fail closed, partial teardown and idempotent reruns, list failures. Infrastructure-free, so it runs in the `CI` verify job. |
 | `scripts/provision.sh`, `scripts/teardown.sh` | Shell scripts wrapping the `mws` CLI directly (not the Go SDK) to create/destroy the merge-tier's ephemeral VM+disk — see `docs/ci-cd.md`'s provisioning runbook for why a CLI wrapper instead of Terraform. |
 
 To find where a given behavior is implemented: the scenario steps themselves are always in
@@ -271,7 +272,7 @@ never leaves the shared VM dirty. What "always runs" honestly means here is boun
 `defer`, which covers ordinary test failures and panics, but not hard cancellation or runner loss —
 neither e2e workflow has an `if: always()` infrastructure-cleanup step (the only `always()` step
 deletes the SSH key file). A run killed that way can still leak processes or a raised disk, which is
-exactly the orphan-sweeper gap recorded in `docs/TODO.md`; the next run's `Preflight` — not this
+exactly the gap the orphan sweeper (`docs/ci-cd.md`) does not cover, since it only deletes full-tier VMs and disks; the next run's `Preflight` — not this
 run's `Cleanup` — is what actually has to work for the shared VM to stay usable.
 
 ### Why the harness supervises the agent process directly

@@ -38,10 +38,6 @@ These were identified during design/review but explicitly deferred, not solved:
   `SSH_PRIVKEY_CLAUDE`-style pattern (one keypair, public key baked into target VMs at creation, private
   key as a GitHub secret) for speed. A per-run ephemeral keypair (generated in `$RUNNER_TEMP`, public key
   injected only for that run, removed after) would be tighter; not built now.
-- **No orphan sweeper for merge-tier ephemeral resources.** The merge-tier full test tags what it creates
-  and tears down on completion, but nothing independently sweeps resources left behind by a crashed run,
-  a cancelled pipeline, or a runner that lost its connection mid-test. Needs a periodic job checking for
-  stale run-id-tagged resources past some TTL.
 - **No automated drift check for the hand-provisioned persistent resources.** Runner VM, agent-under-test
   SA bindings, the persistent test VM/disk's baseline IOPS, and the GitHub fork-approval setting are all
   provisioned by hand per `docs/ci-cd.md`'s runbook, with no idempotent "verify environment matches the
