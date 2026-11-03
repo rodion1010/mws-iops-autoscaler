@@ -41,4 +41,8 @@ jobs:
           SWEEP_TTL_HOURS: ${{ inputs.ttl_hours || '3' }}
         run: |
           set -o pipefail
-          bash e2e/scripts/sweep.sh | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=0
+          bash e2e/scripts/sweep.sh | tee "${RUNNER_TEMP}/sweep-report.txt" || rc=$?
+          # A fenced block keeps the tab-separated report readable in the step summary.
+          { echo '```'; cat "${RUNNER_TEMP}/sweep-report.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

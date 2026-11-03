@@ -104,7 +104,9 @@ how that state is surfaced.
 
 Today one self-hosted runner serves both e2e tiers, so a merge-tier full run (~20 min) blocks every
 PR's smoke run behind it, and all smoke runs are additionally serialized on one shared persistent VM
-(`concurrency: e2e-smoke-vm`) regardless of runner count.
+(`concurrency: e2e-smoke-vm`) regardless of runner count. A second runner also lets the orphan sweeper
+(`docs/ci-cd.md`) overlap a re-run job that reuses old resource names; take its age from the later of
+`createTime` and `updateTime` first, once an update is confirmed to bump `updateTime`.
 
 Two independent moves, worth separating:
 - A second runner dedicated to one tier (e.g. runner A = PR smoke only, runner B = merge full only)

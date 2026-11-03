@@ -270,8 +270,8 @@ cannot run, e.g. fork PRs without secrets), and alongside the live scenarios in 
 returns the aggregated error — which the tests fail on (`t.Errorf` from the defer), so a green check
 never leaves the shared VM dirty. What "always runs" honestly means here is bounded: it runs via Go
 `defer`, which covers ordinary test failures and panics, but not hard cancellation or runner loss —
-neither e2e workflow has an `if: always()` infrastructure-cleanup step (the only `always()` step
-deletes the SSH key file). A run killed that way can still leak processes or a raised disk, which is
+the smoke workflow has no `if: always()` infrastructure-cleanup step, and the full workflow's backstop
+teardown only covers `go test`'s own `-timeout`. A run killed that way can still leak processes or a raised disk, which is
 exactly the gap the orphan sweeper (`docs/ci-cd.md`) does not cover, since it only deletes full-tier VMs and disks; the next run's `Preflight` — not this
 run's `Cleanup` — is what actually has to work for the shared VM to stay usable.
 

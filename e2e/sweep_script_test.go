@@ -32,7 +32,9 @@ case "$verb" in
 list)
   [ -f "$STUB_DIR/fail-list-$kind" ] && { echo "stub: list failed" >&2; exit 1; }
   deleted=$(cd "$STUB_DIR" && ls deleted-* 2>/dev/null | sed 's/^deleted-//')
-  jq -c --arg deleted "$deleted" '.items |= map(select((.metadata.id | split("/") | last) as $n | ($deleted | split("\n") | index($n)) | not))' "$STUB_DIR/$kind.json" ;;
+  file="$STUB_DIR/$kind.json"; prev=""
+  for a in "$@"; do [ "$prev" = --page-token ] && file="$STUB_DIR/$kind.page-$a.json"; prev="$a"; done
+  jq -c --arg deleted "$deleted" '.items |= map(select((.metadata.id | split("/") | last) as $n | ($deleted | split("\n") | index($n)) | not))' "$file" ;;
 delete)
   name="${4##*/}"
   echo "$kind $name ${*:5}" >> "$STUB_DIR/calls"
@@ -68,6 +70,19 @@ func (f *sweepFixture) resources(kind, segment string, items map[string]any) {
 	}
 }
 
+// raw writes a list response verbatim to the stub's file (kind.json, or kind.page-<token>.json).
+func (f *sweepFixture) raw(file, body string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.state, file), []byte(body), 0o644); err != nil {
+		f.t.Fatalf("write %s: %v", file, err)
+	}
+}
+
+// diskItem is one disk entry of a list response, created age before sweepNow.
+func diskItem(name string, age time.Duration) string {
+	return fmt.Sprintf(`{"metadata":{"id":"compute/projects/p/disks/%s","createTime":%q}}`, name, sweepNow.Add(-age).Format(time.RFC3339))
+}
+
 func (f *sweepFixture) touch(name string) {
 	f.t.Helper()
 	if err := os.WriteFile(filepath.Join(f.state, name), nil, 0o644); err != nil {
@@ -76,7 +91,7 @@ func (f *sweepFixture) touch(name string) {
 }
 
 // run executes sweep.sh and returns its output, exit error and the delete calls recorded so far.
-func (f *sweepFixture) run(apply bool) (out string, err error, calls []string) {
+func (f *sweepFixture) run(apply bool, extraEnv ...string) (out string, err error, calls []string) {
 	f.t.Helper()
 	cmd := exec.Command("bash", "sweep.sh")
 	cmd.Dir = "scripts"
@@ -87,6 +102,7 @@ func (f *sweepFixture) run(apply bool) (out string, err error, calls []string) {
 		fmt.Sprintf("SWEEP_NOW=%d", sweepNow.Unix()),
 		fmt.Sprintf("SWEEP_APPLY=%t", apply),
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	b, err := cmd.CombinedOutput()
 	if raw, rerr := os.ReadFile(filepath.Join(f.state, "calls")); rerr == nil {
 		calls = strings.Split(strings.TrimSpace(string(raw)), "\n")
@@ -227,5 +243,70 @@ func TestRegression_Sweep_ListFailureDeletesNothingOfThatKind(t *testing.T) {
 		if strings.HasPrefix(c, "virtual-machine ") {
 			t.Errorf("deleted a VM after its list failed: %q", c)
 		}
+	}
+}
+
+func TestRegression_Sweep_ReadsEveryPageOfAList(t *testing.T) {
+	f := newSweepFixture(t)
+	f.resources("virtual-machine", "virtualMachines", map[string]any{})
+	f.raw("disk.json", `{"items":[`+diskItem("e2e-full-111-boot", 5*time.Hour)+`],"nextPageToken":"t2"}`)
+	f.raw("disk.page-t2.json", `{"items":[`+diskItem("e2e-full-222-data", 5*time.Hour)+`]}`)
+
+	out, err, calls := f.run(true)
+	if err != nil {
+		t.Fatalf("sweep.sh failed: %v\n%s", err, out)
+	}
+	if len(calls) != 2 || !strings.Contains(strings.Join(calls, "\n"), "e2e-full-222-data") {
+		t.Errorf("delete calls = %q, want both pages' resources (the second page was not read)\n%s", calls, out)
+	}
+}
+
+func TestRegression_Sweep_UnfamiliarListShapeDeletesNothing(t *testing.T) {
+	f := newSweepFixture(t)
+	f.resources("virtual-machine", "virtualMachines", map[string]any{})
+	f.raw("disk.json", `{"items":[`+diskItem("e2e-full-111-boot", 5*time.Hour)+`],"nextPage":"t2"}`)
+
+	out, err, calls := f.run(true)
+	if err == nil {
+		t.Fatalf("sweep.sh succeeded, want a failing exit for a list response it does not recognize\n%s", out)
+	}
+	if len(calls) != 0 {
+		t.Errorf("delete calls = %q, want none: a response that may hide more pages must not drive a delete", calls)
+	}
+}
+
+func TestRegression_Sweep_RepeatingPageTokenFailsClosedInsteadOfLooping(t *testing.T) {
+	f := newSweepFixture(t)
+	f.resources("virtual-machine", "virtualMachines", map[string]any{})
+	f.raw("disk.json", `{"items":[`+diskItem("e2e-full-111-boot", 5*time.Hour)+`],"nextPageToken":"t2"}`)
+	f.raw("disk.page-t2.json", `{"items":[],"nextPageToken":"t2"}`)
+
+	out, err, calls := f.run(true)
+	if err == nil {
+		t.Fatalf("sweep.sh succeeded, want a failing exit when the listing never ends\n%s", out)
+	}
+	if len(calls) != 0 {
+		t.Errorf("delete calls = %q, want none from an incomplete listing", calls)
+	}
+}
+
+func TestRegression_Sweep_RefusesATTLBelowTheFloor(t *testing.T) {
+	for _, ttl := range []string{"0", "1", "-1", "abc", "2h", "x[$(touch pwned)]"} {
+		t.Run(ttl, func(t *testing.T) {
+			f := newSweepFixture(t)
+			f.resources("virtual-machine", "virtualMachines", map[string]any{"e2e-full-111": 5 * time.Hour})
+			f.resources("disk", "disks", map[string]any{"e2e-full-111-boot": 5 * time.Hour})
+
+			out, err, calls := f.run(true, "SWEEP_TTL_HOURS="+ttl)
+			if err == nil {
+				t.Fatalf("sweep.sh succeeded with SWEEP_TTL_HOURS=%q, want a refusal\n%s", ttl, out)
+			}
+			if len(calls) != 0 {
+				t.Errorf("delete calls = %q, want none with SWEEP_TTL_HOURS=%q", calls, ttl)
+			}
+			if _, statErr := os.Stat(filepath.Join("scripts", "pwned")); statErr == nil {
+				t.Fatalf("SWEEP_TTL_HOURS=%q executed a command", ttl)
+			}
+		})
 	}
 }

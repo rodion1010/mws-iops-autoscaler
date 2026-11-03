@@ -98,7 +98,7 @@ their environment from GitHub repository variables (non-secret) and one secret:
 
 | Name | Kind | Used by |
 |---|---|---|
-| `MWS_PROJECT`, `MWS_ZONE` | variable | both |
+| `MWS_PROJECT`, `MWS_ZONE` | variable | smoke, full (sweep uses only `MWS_PROJECT`) |
 | `E2E_SMOKE_VM_NAME`, `E2E_SMOKE_DEVICE_NAME`, `E2E_SMOKE_SSH_HOST` | variable | smoke |
 | `E2E_SMOKE_INDEPENDENT_DEVICE_NAME` | variable | smoke — the second, independent disk permanently attached to the same persistent VM (`E2E_SMOKE_VM_NAME`), used for the independent write path and dry-run scenarios |
 | `E2E_SUBNET_ID`, `E2E_BOOT_IMAGE`, `E2E_VM_TYPE`, `E2E_AGENT_SA`, `E2E_SSH_PUBLIC_KEY` | variable | full |
@@ -127,7 +127,8 @@ backstop teardown step — rather than by the job-level kill.
 | `e2e-pr.yml` (smoke) | 58m | ~54m (nine `TestSmoke_*` scenarios; seven at 5–6m, `TestSmoke_Decisions_NoFlapping` at 12m for its two full up/down proof cycles) | 63 |
 | `e2e-full.yml` (full) | 84m | ~83m (shared fixture's 15m provisioning context, paid once, + each `TestFull_*` test's own context + `TestMain`'s dedicated 8-minute teardown budget) | 96 |
 
-Recompute the relevant worst-case sum before shrinking either `timeout-minutes` value, and again
+`timeout-minutes` must also stay below the orphan sweeper's TTL floor (see "Orphan sweeper"). Recompute
+the relevant worst-case sum before shrinking either `timeout-minutes` value, and again
 whenever a `TestSmoke_*`/`TestFull_*` test is added. The full tier's margin is already thin enough
 that the next addition should probably trigger the "split by subject" idea (`docs/TODO.md`) rather
 than another bump.
@@ -151,7 +152,10 @@ independently of the test jobs, so it still works after a job-level kill or a lo
   considered. A name that starts with it but does not match exactly, or a missing or unparseable
   `metadata.createTime`, is reported as `SKIP-AMBIGUOUS-*`, deleted never, and fails the run.
 - **Age.** `metadata.createTime` from the API, at least `ttl_hours` (default 3) old. The TTL must stay
-  above `e2e-full.yml`'s `timeout-minutes` (96): a younger resource may belong to a live run.
+  above `e2e-full.yml`'s `timeout-minutes` (96): a younger resource may belong to a live run, and
+  `sweep.sh` refuses a TTL under 2 hours. That protection also relies on there being one runner. A
+  re-run job keeps its `run_id`, so it reuses the same names and keeps the old `createTime`; with a
+  second runner it could overlap a sweep (`docs/TODO.md`, runner scaling).
 - **Order.** VMs first, then disks with `--purge`, as `teardown.sh` does. Every candidate is attempted and
   a failure only flips the exit status, so one stuck delete does not shield the rest.
 - **Report.** One line per resource, `ACTION<TAB>kind<TAB>name<TAB>age_hours`, with `ACTION` one of

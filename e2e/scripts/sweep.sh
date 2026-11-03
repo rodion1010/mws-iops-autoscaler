@@ -11,6 +11,13 @@ set -uo pipefail
 
 : "${MWS_PROJECT:?}"
 TTL_HOURS="${SWEEP_TTL_HOURS:-3}"
+# The floor keeps the TTL above e2e-full.yml's 96-minute timeout-minutes; a smaller or malformed value
+# could age a live run's resources out, so refuse it instead of guessing.
+if ! [[ $TTL_HOURS =~ ^[0-9]+$ ]] || ((10#$TTL_HOURS < 2)); then
+  echo "sweep: SWEEP_TTL_HOURS must be a whole number of at least 2, got '${TTL_HOURS}'" >&2
+  exit 2
+fi
+TTL_HOURS=$((10#$TTL_HOURS))
 NOW="${SWEEP_NOW:-$(date +%s)}"
 CUTOFF=$((NOW - TTL_HOURS * 3600))
 VM_RE='^e2e-full-[0-9]+$'
@@ -21,8 +28,10 @@ status=0
 # Prints "<name>\t<createTime>" for every resource of a kind. Any list failure or unfamiliar response
 # shape fails closed so a partial listing never drives a delete.
 list_resources() {
-  local kind=$1 token="" page
+  local kind=$1 token="" page pages=0
   while :; do
+    # A repeating token would otherwise page forever.
+    ((++pages > 50)) && return 1
     page=$(mws compute "$kind" list --project "$MWS_PROJECT" ${token:+--page-token "$token"} -f json) || return 1
     jq -e 'keys - ["items", "nextPageToken"] == []' <<<"$page" >/dev/null || return 1
     jq -r '.items[]? | [(.metadata.id | split("/") | last), (.metadata.createTime // "")] | @tsv' <<<"$page" || return 1
