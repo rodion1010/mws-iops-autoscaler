@@ -250,6 +250,110 @@ func TestRegression_WaitForScaleUp_TimesOutAtBaseline(t *testing.T) {
 	}
 }
 
+func TestRegression_WaitForScaleDown_RejectsAlreadyLowered(t *testing.T) {
+	f := &scriptedClient{
+		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
+		class:    compute.ClassDependent,
+		trueIOPS: 800,
+	}
+	_, err := waitForScaleDown(context.Background(), f, newScriptedTarget(compute.ClassDependent), 50*time.Millisecond, time.Hour, time.Millisecond, time.Now())
+	if err == nil {
+		t.Fatalf("an already-lowered first observation must be a precondition failure, not success")
+	}
+	if !strings.Contains(err.Error(), "precondition") {
+		t.Fatalf("error should name the precondition violation, got: %v", err)
+	}
+}
+
+func TestRegression_WaitForScaleDown_RejectsEarlyDrop(t *testing.T) {
+	f := &scriptedClient{
+		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
+		class:            compute.ClassDependent,
+		trueIOPS:         1000,
+		raiseAfterCycles: 1,
+		raiseTo:          800,
+	}
+	_, err := waitForScaleDown(context.Background(), f, newScriptedTarget(compute.ClassDependent), 2*time.Second, time.Hour, 5*time.Millisecond, time.Now())
+	if err == nil {
+		t.Fatalf("a drop before the scale-down window could elapse must fail closed, not pass")
+	}
+	if !strings.Contains(err.Error(), "scale-down window") {
+		t.Fatalf("error should name the scale-down window violation, got: %v", err)
+	}
+}
+
+func TestRegression_WaitForScaleDown_AcceptsObservedBaselineThenDrop(t *testing.T) {
+	f := &scriptedClient{
+		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
+		class:            compute.ClassDependent,
+		trueIOPS:         1000,
+		raiseAfterCycles: 7,
+		raiseTo:          800,
+	}
+	final, err := waitForScaleDown(context.Background(), f, newScriptedTarget(compute.ClassDependent), 2*time.Second, 20*time.Millisecond, 5*time.Millisecond, time.Now())
+	if err != nil {
+		t.Fatalf("a drop at/after the scale-down window below an observed baseline must succeed, got: %v", err)
+	}
+	if final != 800 {
+		t.Fatalf("final IOPS = %d, want 800", final)
+	}
+}
+
+func TestRegression_WaitForScaleDown_TimesOutAtBaseline(t *testing.T) {
+	f := &scriptedClient{
+		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
+		class:    compute.ClassDependent,
+		trueIOPS: 1000,
+	}
+	_, err := waitForScaleDown(context.Background(), f, newScriptedTarget(compute.ClassDependent), 30*time.Millisecond, time.Hour, 5*time.Millisecond, time.Now())
+	if err == nil {
+		t.Fatalf("a disk that never drops below an observed baseline must time out")
+	}
+	if !strings.Contains(err.Error(), "still at") {
+		t.Fatalf("error should be the timeout, got: %v", err)
+	}
+}
+
+func TestRegression_WaitForScaleDown_RiseIsNotAScaleDown(t *testing.T) {
+	f := &scriptedClient{
+		vmName: "vm-1", deviceName: "datadisk", alias: "data", diskName: "disk-1",
+		class:            compute.ClassDependent,
+		trueIOPS:         1000,
+		raiseAfterCycles: 1,
+		raiseTo:          1200,
+	}
+	_, err := waitForScaleDown(context.Background(), f, newScriptedTarget(compute.ClassDependent), 100*time.Millisecond, time.Millisecond, 5*time.Millisecond, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "still at 1200") {
+		t.Fatalf("a rise must never satisfy the scale-down wait; want the timeout reporting the raised value, got: %v", err)
+	}
+}
+
+func TestRegression_Flapping_CountsOnlyActuatingAlternations(t *testing.T) {
+	cases := []struct {
+		name    string
+		actions []string
+		want    int
+	}{
+		{"no records", nil, 0},
+		{"repeated scale-ups are not flapping", []string{"scale_up", "scale_up", "scale_up"}, 0},
+		{"one up-down cycle is one alternation", []string{"scale_up", "scale_down"}, 1},
+		{"back and forth counts every flip", []string{"scale_up", "scale_down", "scale_up", "scale_down"}, 3},
+		{"non-actuating records neither count nor break a run", []string{"scale_up", "no_action", "vm_cap_reached", "scale_down"}, 1},
+		{"only non-actuating records", []string{"no_action", "no_action", "vm_cap_reached"}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := make([]journalRecord, len(tc.actions))
+			for i, a := range tc.actions {
+				recs[i] = journalRecord{Action: a}
+			}
+			if got := countActuatingTransitions(recs); got != tc.want {
+				t.Fatalf("countActuatingTransitions(%v) = %d, want %d", tc.actions, got, tc.want)
+			}
+		})
+	}
+}
+
 // sshWarning exercises marker parsing with prefixed stderr noise.
 const sshWarning = "Warning: Permanently added '203.0.113.7' (ED25519) to the list of known hosts.\n"
 
