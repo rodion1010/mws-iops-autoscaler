@@ -48,8 +48,9 @@ nothing a public PR changes in `.github/` can reach the runner. A maintainer por
 branch here, runs the tiers, and publishes the result with the next mirror update
 (`SRC=<private URL> DST=<mirror URL> mirror/publish.sh`). The script strips itself and
 `docs/platform-dependencies.md` from the mirror, refuses unless `SRC` is private and `DST` is a
-different, public repository, and fails closed if a replaced string survives in any commit's tree or
-message or the scan itself fails; `mirror/publish_test.sh` covers those refusals against local
+different, public repository, rewrites commit identities through `mirror/mailmap`, and fails closed
+if a replaced string survives in any commit's tree, message or author/committer identity, or the
+scan itself fails; `mirror/publish_test.sh` covers those refusals against local
 repositories.
 
 **Attack paths and residual risk.** Code that runs on the runner gets the runner SA's token from the
