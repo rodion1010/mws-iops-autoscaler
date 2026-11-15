@@ -213,8 +213,8 @@ whether that's fatal belongs to `Agent.discover`, which does have history:
   (§7.1) — neither of which affects `/readyz`'s binary verdict — and a `WARN` log line is emitted only
   on the transition into or out of a degraded state, not on every cycle it persists.
 
-No timer escalates a runtime degradation back to fatal; an operator who wants an escalation policy
-builds it on top of the exposed signal (docs/TODO.md's alerting entry).
+No timer escalates a runtime degradation back to fatal; the alerting contract for the exposed signal
+is in §7.3.
 
 Every exclusion above returns a `compute.SkippedDisk{Alias, DiskName, Category, Reason}` rather than
 silently dropping the disk (US-002) — `Category` is one of a small set of stable codes
@@ -1221,7 +1221,35 @@ response is byte-for-byte what it was before this field existed.
 Alert-worthy: metric staleness beyond 3 publication intervals; write failure rate above threshold;
 change budget exhausted; `VM_IOPS_CAP_REACHED` sustained (actionable — add vCPU); any disk pinned at
 `max_iops` while still saturated (the ceiling is too low); any entry in `configured_disks_unmanaged`
-sustained beyond a few discovery cycles (a typo an operator should fix, not merely observe).
+sustained for three discovery cycles (a typo an operator should fix, not merely observe; contract
+below).
+
+For every condition above the repository owns the signal, not its delivery: it ships no alerting rules
+and no notifier, and the deploying team owns the rule, the severity routing and the on-call response for
+its own fleet.
+
+**Alerting contract for a runtime-degraded disk** (`configured_disks_unmanaged`, §4.1):
+
+- *Readiness:* stays true while the process runs. The other managed disks are still scaled, and an
+  unready verdict would at most restart the process, which cannot fix a wrong name or a detached disk.
+- *Authoritative signal:* `iops_autoscaler_disk_configured_unmanaged{device_name,reason}`. A series
+  exists only while that name is unresolved, so the condition is "the series exists" (`== 1`), not a
+  value comparison. `/readyz`'s `configured_disks_unmanaged` carries the same set for ad-hoc checks.
+- *Condition:* the series exists continuously for at least three discovery cycles, 15 minutes at the
+  default `discovery_interval` of 5m (scale the duration with a non-default interval). A shorter blip
+  is a normal detach/reattach and should not fire.
+- *Severity:* warning; the fix should land within one business day. For `selected_not_found` the disk
+  keeps its last applied IOPS limit and is not scaled, so the cost is missed autoscaling. For
+  `exclude_target_not_found` the risk is the opposite: a disk the operator meant to leave alone is
+  scaled, and spends change budget.
+- *Owner:* the team that deploys the agent on that VM. The names come from its configuration, so only
+  it can say whether the name or the attachment is wrong.
+- *Recovery:* automatic only when the disk comes back under the same `device_name`: the series is
+  deleted and the `/readyz` field disappears on the first successful discovery after that, with one
+  `WARN` log line on the transition (§4.1). A corrected name needs a restart, because configuration is
+  read once. After any restart a still-unresolved name is fatal on the first discovery (§4.1): the gauge
+  is not published and `/readyz` reports not ready (`discovery_succeeded: false`), so that case is
+  covered by the readiness alert, not by this one.
 
 ---
 

@@ -38,10 +38,6 @@ These were identified during design/review but explicitly deferred, not solved:
   `SSH_PRIVKEY_CLAUDE`-style pattern (one keypair, public key baked into target VMs at creation, private
   key as a GitHub secret) for speed. A per-run ephemeral keypair (generated in `$RUNNER_TEMP`, public key
   injected only for that run, removed after) would be tighter; not built now.
-- **No orphan sweeper for merge-tier ephemeral resources.** The merge-tier full test tags what it creates
-  and tears down on completion, but nothing independently sweeps resources left behind by a crashed run,
-  a cancelled pipeline, or a runner that lost its connection mid-test. Needs a periodic job checking for
-  stale run-id-tagged resources past some TTL.
 - **No automated drift check for the hand-provisioned persistent resources.** Runner VM, agent-under-test
   SA bindings, the persistent test VM/disk's baseline IOPS, and the GitHub fork-approval setting are all
   provisioned by hand per `docs/ci-cd.md`'s runbook, with no idempotent "verify environment matches the
@@ -65,26 +61,15 @@ These were identified during design/review but explicitly deferred, not solved:
 - **One of `docs/design.md` §8.3's ten e2e scenarios is not implemented: VM cap detection.** See
   `docs/testing.md`'s coverage table for the honest per-scenario status of the other nine.
 
-### Alerting: what the agent should page a human about, and how
+### Alerting contract for the remaining `docs/design.md` §7.3 conditions
 
-`docs/design.md` §7.3 lists alert-worthy conditions (metric staleness beyond three publication
-intervals, write failure rate above threshold, budget exhaustion, `/readyz` false) but nothing
-defines how an operator actually receives them. Today every one of these is visible only by scraping
-`/metrics` or reading logs — the agent has no notion of an alert, and the repository ships no
-alerting rules.
-
-This became concrete while planning e2e discovery scenarios: several of them ("a `selected`
-disk disappeared", "a `selected` disk is not attached yet") were cases where the *right* product
-behaviour was "keep autoscaling the other disks and raise a loud, addressable signal" rather than
-"stop acting" — now implemented (docs/design.md §4.1, docs/configuration.md §4.2): a runtime mismatch
-degrades only the affected disk, surfaced via `/readyz`'s `configured_disks_unmanaged` and the
-`iops_autoscaler_disk_configured_unmanaged{device_name,reason}` gauge. That signal existing is not the
-same as it reaching anyone, though, which is exactly what stays undefined.
-
-Open question — does the agent own alerting at all, or only expose signals for a platform-side
-alerting stack, and if the latter, do we ship recommended Prometheus alerting rules alongside the
-binary — is now a pending decision request: [`docs/adr/adr-020-alerting-ownership.md`](adr/adr-020-alerting-ownership.md)
-(issue #59).
+Ownership is decided in `docs/design.md` §7.3. Only `configured_disks_unmanaged` has a written
+threshold, duration, severity, owner and recovery there. The other §7.3 conditions (metric staleness
+beyond three publication intervals, write failure rate, budget exhausted, `VM_IOPS_CAP_REACHED`
+sustained, a disk pinned at `max_iops` while saturated) each need the same contract plus a test that
+its signal activates and clears. Two of them have no signal yet: a write failure is only a log line
+(`iops_autoscaler_decisions_total` is recorded before the write), and the effective ceiling
+(`policy.max_iops` with the headroom clamp) is never published as its own series.
 
 ### Config hot-reload
 
@@ -108,7 +93,9 @@ how that state is surfaced.
 
 Today one self-hosted runner serves both e2e tiers, so a merge-tier full run (~20 min) blocks every
 PR's smoke run behind it, and all smoke runs are additionally serialized on one shared persistent VM
-(`concurrency: e2e-smoke-vm`) regardless of runner count.
+(`concurrency: e2e-smoke-vm`) regardless of runner count. A second runner also lets the orphan sweeper
+(`docs/ci-cd.md`) overlap a re-run job that reuses old resource names; take its age from the later of
+`createTime` and `updateTime` first, once an update is confirmed to bump `updateTime`.
 
 Two independent moves, worth separating:
 - A second runner dedicated to one tier (e.g. runner A = PR smoke only, runner B = merge full only)

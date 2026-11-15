@@ -93,16 +93,17 @@ pipeline configuration.
 
 ## Workflow configuration
 
-`.github/workflows/e2e-pr.yml` and `.github/workflows/e2e-full.yml` read their environment from
-GitHub repository variables (non-secret) and one secret:
+`.github/workflows/e2e-pr.yml`, `.github/workflows/e2e-full.yml` and `.github/workflows/e2e-sweep.yml` read
+their environment from GitHub repository variables (non-secret) and one secret:
 
 | Name | Kind | Used by |
 |---|---|---|
-| `MWS_PROJECT`, `MWS_ZONE` | variable | both |
+| `MWS_PROJECT`, `MWS_ZONE` | variable | smoke, full (sweep uses only `MWS_PROJECT`) |
 | `E2E_SMOKE_VM_NAME`, `E2E_SMOKE_DEVICE_NAME`, `E2E_SMOKE_SSH_HOST` | variable | smoke |
 | `E2E_SMOKE_INDEPENDENT_DEVICE_NAME` | variable | smoke — the second, independent disk permanently attached to the same persistent VM (`E2E_SMOKE_VM_NAME`), used for the independent write path and dry-run scenarios |
 | `E2E_SUBNET_ID`, `E2E_BOOT_IMAGE`, `E2E_VM_TYPE`, `E2E_AGENT_SA`, `E2E_SSH_PUBLIC_KEY` | variable | full |
 | `E2E_SSH_USER` | variable | both |
+| `E2E_SWEEP_APPLY` | variable | sweep — `true` lets the scheduled run delete; any other value reports only (see "Orphan sweeper") |
 | `E2E_SSH_PRIVATE_KEY` | **secret** | both — written to a `runner.temp` file for the job's duration, removed in an `if: always()` step |
 
 None of these are MWS API credentials — those come from IMDS, never from a GitHub secret (see
@@ -115,7 +116,7 @@ runner/provisioner SA's broader project-level privileges.
 ## Timeout budgets
 
 A job-level `timeout-minutes` kill has no cleanup path — GitHub Actions tears the whole job down at
-that point, so no later step (not even `if: always()`) runs (`docs/TODO.md`'s "orphan sweeper" gap).
+that point, so no later step (not even `if: always()`) runs; the orphan sweeper below is the backstop.
 Each workflow therefore sets `timeout-minutes` above the SUM of every test's own worst-case
 `context.WithTimeout`, not the sum of typical durations, and sets `go test -timeout` below
 `timeout-minutes` so a hung suite is killed by `go test` itself — leaving the job alive to run its
@@ -126,7 +127,8 @@ backstop teardown step — rather than by the job-level kill.
 | `e2e-pr.yml` (smoke) | 58m | ~54m (nine `TestSmoke_*` scenarios; seven at 5–6m, `TestSmoke_Decisions_NoFlapping` at 12m for its two full up/down proof cycles) | 63 |
 | `e2e-full.yml` (full) | 84m | ~83m (shared fixture's 15m provisioning context, paid once, + each `TestFull_*` test's own context + `TestMain`'s dedicated 8-minute teardown budget) | 96 |
 
-Recompute the relevant worst-case sum before shrinking either `timeout-minutes` value, and again
+`timeout-minutes` must also stay below the orphan sweeper's TTL floor (see "Orphan sweeper"). Recompute
+the relevant worst-case sum before shrinking either `timeout-minutes` value, and again
 whenever a `TestSmoke_*`/`TestFull_*` test is added. The full tier's margin is already thin enough
 that the next addition should probably trigger the "split by subject" idea (`docs/TODO.md`) rather
 than another bump.
@@ -134,11 +136,42 @@ than another bump.
 `e2e-full.yml`'s backstop teardown step (`continue-on-error: true`, 8-minute budget) exists only for
 the case where `go test`'s own `-timeout` fires and kills the test binary before
 `TestMain`'s post-`m.Run()` teardown call runs (`e2e/lifecycle_test.go`). It does not cover the
-job-level kill — that has no backstop yet (`docs/TODO.md`'s TTL sweeper, issue #47). On an ordinary
+job-level kill — the orphan sweeper below covers that. On an ordinary
 pass or failure, `TestMain`'s own teardown has already run, so this step reports "not found" for
 every resource — expected noise, not a signal. The smoke tier has no equivalent step: the shared
 target's hard-cleanup guarantee is Preflight, not teardown (`docs/testing.md`), so the next run
 resets the target regardless of how the previous one ended.
+
+## Orphan sweeper
+
+`.github/workflows/e2e-sweep.yml` runs `e2e/scripts/sweep.sh` daily (03:17 UTC) and on manual dispatch,
+independently of the test jobs, so it still works after a job-level kill or a lost runner.
+
+- **Ownership.** Only the names `provision.sh` gives the full tier: a VM `e2e-full-<numeric run id>` and
+  disks `e2e-full-<run id>-boot|data|noname|churn`. Anything not starting with `e2e-full-` is never
+  considered. A name that starts with it but does not match exactly, or a missing or unparseable
+  `metadata.createTime`, is reported as `SKIP-AMBIGUOUS-*`, deleted never, and fails the run.
+- **Age.** `metadata.createTime` from the API, at least `ttl_hours` (default 3) old. The TTL must stay
+  above `e2e-full.yml`'s `timeout-minutes` (96): a younger resource may belong to a live run, and
+  `sweep.sh` refuses a TTL under 2 hours. That protection also relies on there being one runner. A
+  re-run job keeps its `run_id`, so it reuses the same names and keeps the old `createTime`; with a
+  second runner it could overlap a sweep (`docs/TODO.md`, runner scaling).
+- **Order.** VMs first, then disks with `--purge`, as `teardown.sh` does. Every candidate is attempted and
+  a failure only flips the exit status, so one stuck delete does not shield the rest.
+- **Report.** One line per resource, `ACTION<TAB>kind<TAB>name<TAB>age_hours`, with `ACTION` one of
+  `WOULD-DELETE`, `DELETED`, `DELETE-FAILED`, `KEEP-YOUNG`, `SKIP-AMBIGUOUS-NAME`, `SKIP-AMBIGUOUS-AGE`,
+  also appended to the run's step summary.
+- **Dry-run.** Dispatch with `apply` off, or leave the repository variable `E2E_SWEEP_APPLY` unset: the
+  run lists what it would delete and deletes nothing. Scheduled runs delete only once `E2E_SWEEP_APPLY`
+  is `true`; review a dry-run first.
+- **Permissions.** No new grant: it runs on the runner VM with the runner/provisioner SA, whose
+  `compute.editor` already covers listing and deleting VMs and disks (Service accounts above).
+- **Recovery.** The sweep recomputes from a fresh listing each run, so rerunning is safe. After
+  `DELETE-FAILED` (a disk still attached to a VM that is not ours, a quota or API error) fix the cause and
+  rerun. For `SKIP-AMBIGUOUS-*` delete or rename the resource by hand; the sweeper will not. A failed
+  list deletes nothing of that kind.
+
+The persistent smoke target is not swept: it is reset by `Preflight`, not deleted.
 
 ## Provisioning runbook
 
