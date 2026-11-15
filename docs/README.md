@@ -9,7 +9,7 @@
 | [`development.md`](development.md) | Credential handling, developer setup and the reference test environment |
 | [`testing.md`](testing.md) | How the unit/integration/e2e test tiers are implemented: what each covers, how to run it, how the test code is organized |
 | [`ci-cd.md`](ci-cd.md) | The CI/CD pipeline: verification tiers, service accounts and IAM, the provisioning runbook |
-| [`platform-dependencies.md`](platform-dependencies.md) | Upstream gaps, temporary workarounds and removal conditions |
+| [`platform-dependencies.md`](platform-dependencies.md) | Upstream gaps, temporary workarounds and removal conditions (private repository only; not in the public mirror) |
 | [`TODO.md`](TODO.md) | Parking lot; nothing is implemented from here without an explicit decision |
 | [`adr/`](adr/) | Temporary decision requests awaiting Product Lead input; normally empty |
 | [`../CLAUDE.md`](../CLAUDE.md) | Repository instructions for coding agents |

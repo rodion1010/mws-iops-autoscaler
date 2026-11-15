@@ -25,6 +25,8 @@ permissions:
 
 jobs:
   sweep:
+    # Only the private CI repository has the runner and its variables (docs/ci-cd.md, "Public mirror").
+    if: vars.MWS_PROJECT != ''
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     timeout-minutes: 30
     steps:

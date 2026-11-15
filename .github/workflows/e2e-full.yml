@@ -16,6 +16,8 @@ permissions:
 
 jobs:
   full:
+    # Only the private CI repository has the runner and its variables (docs/ci-cd.md, "Public mirror").
+    if: vars.MWS_PROJECT != ''
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     # Budget derivation and the job-level-kill/backstop-step split are in
     # docs/ci-cd.md's "Timeout budgets" — recompute before changing this.
