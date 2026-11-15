@@ -55,8 +55,6 @@ These were identified during design/review but explicitly deferred, not solved:
   credentialed runner (`docs/ci-cd.md`'s attack paths and residual risk). Acceptable while the
   maintainer is the only one with write access; narrow the runner's role set (above) or move to
   ephemeral runners before that changes.
-- **One of `docs/design.md` §8.3's ten e2e scenarios is not implemented: VM cap detection.** See
-  `docs/testing.md`'s coverage table for the honest per-scenario status of the other nine.
 
 ### Alerting contract for the remaining `docs/design.md` §7.3 conditions
 

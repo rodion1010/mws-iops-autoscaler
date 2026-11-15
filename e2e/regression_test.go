@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -556,5 +557,35 @@ func TestRegression_Load_UsesAsyncEngineSoIodepthTakesEffect(t *testing.T) {
 		if !strings.Contains(cmd, "--ioengine=libaio") || !strings.Contains(cmd, "--bs="+bs+" ") {
 			t.Errorf("load command %q must select an async engine at block size %s; fio's default ignores --iodepth", cmd, bs)
 		}
+	}
+}
+
+// TestRegression_VMCap_RecordMatchesOnlyPoolBoundCap guards the VM cap
+// scenario's predicate: a disk pinned at policy.max_iops reports the same
+// vm_cap_reached action, but with VM headroom still above its current limit.
+func TestRegression_VMCap_RecordMatchesOnlyPoolBoundCap(t *testing.T) {
+	cases := map[string]struct {
+		line string
+		want bool
+	}{
+		"pool exhausted":                    {`{"disk":"d1","action":"vm_cap_reached","reason":"vm_headroom_insufficient","current_iops":3200,"vm_headroom_iops":2900}`, true},
+		"headroom equals current":           {`{"disk":"d1","action":"vm_cap_reached","reason":"vm_headroom_insufficient","current_iops":3200,"vm_headroom_iops":3200}`, true},
+		"pinned at max_iops, pool has room": {`{"disk":"d1","action":"vm_cap_reached","reason":"vm_headroom_insufficient","current_iops":10000,"vm_headroom_iops":12000}`, false},
+		"zero headroom (hand-built record)": {`{"disk":"d1","action":"vm_cap_reached","reason":"vm_headroom_insufficient","current_iops":3200,"vm_headroom_iops":0}`, false},
+		"scale-up":                          {`{"disk":"d1","action":"scale_up","reason":"saturated","current_iops":1000,"vm_headroom_iops":900}`, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var rec journalRecord
+			if err := json.Unmarshal([]byte(tc.line), &rec); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if rec.Disk != "d1" {
+				t.Fatalf("Disk = %q, want d1 — the scenario maps the record back to a target by it", rec.Disk)
+			}
+			if got := isVMPoolCapRecord(rec); got != tc.want {
+				t.Fatalf("isVMPoolCapRecord = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
