@@ -56,7 +56,10 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 		if vm.SiblingDemandUnknown {
 			return withReason(base, ActionNoAction, "sibling_demand_unmeasurable")
 		}
-		if ceiling <= current {
+		// Raw VM headroom, not ceiling: a disk at its own max_iops has
+		// ceiling <= current with pool to spare, and must fall through to
+		// target_not_above_current rather than raise the add-vCPU signal.
+		if base.VMHeadroomIOPS <= current {
 			return withReason(base, ActionVMCapReached, "vm_headroom_insufficient")
 		}
 		if now.Sub(state.LastChangeUp) < p.CooldownScaleUp {

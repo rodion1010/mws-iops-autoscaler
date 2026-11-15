@@ -55,6 +55,23 @@ func TestDecide_vmCapReached(t *testing.T) {
 	}
 }
 
+// A disk pinned at its own max_iops while the VM pool has room must not
+// report vm_cap_reached: that action drives the "add vCPU" alert (design.md
+// §7.3), and the fix here is raising max_iops, not the VM.
+func TestDecide_saturatedAtPolicyMaxWithAmplePoolIsNotVMCap(t *testing.T) {
+	d := NewPolicyDecider()
+	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 10, QueueGrowthRateValid: true, ServedIOPS: 2000}
+	p := testPolicy
+	p.MaxIOPS = 2000
+	got := d.Decide("disk1", 2000, a, plentyOfHeadroom, p, GuardrailState{}, epoch)
+	if got.Action != ActionNoAction || got.Reason != "target_not_above_current" {
+		t.Errorf("got %v/%q, want NoAction/target_not_above_current", got.Action, got.Reason)
+	}
+	if got.Target != got.Current {
+		t.Errorf("Target = %d, want == Current (%d)", got.Target, got.Current)
+	}
+}
+
 // TestDecide_siblingDemandUnknownBlocksScaleUp is issue #56's regression
 // test: a sibling with no reliable sample folds its real consumption into
 // SiblingP95IOPS as zero rather than reporting it as unknown, so ceiling
