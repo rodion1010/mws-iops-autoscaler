@@ -4,7 +4,8 @@ name: E2E (smoke)
 # runner, so it runs only for branches of this repository. pull_request_target
 # loads this file from the base branch, so a PR cannot edit away the origin
 # guard below; fork PRs get a GitHub-hosted notice job and their code is never
-# checked out (docs/ci-cd.md, "PR-tier trust model").
+# checked out. vars.MWS_PROJECT exists only in the private CI repository, so the
+# public mirror never queues a job for the runner (docs/ci-cd.md, "PR-tier trust model").
 on:
   pull_request_target:
 
@@ -13,13 +14,13 @@ permissions:
 
 jobs:
   fork-skipped:
-    if: github.event.pull_request.head.repo.full_name != github.repository
+    if: github.event.pull_request.head.repo.full_name != github.repository || vars.MWS_PROJECT == ''
     runs-on: ubuntu-latest
     steps:
-      - run: echo "::notice::Live e2e is skipped for pull requests from forks; a maintainer reviews the change and runs it from a branch of this repository."
+      - run: echo "::notice::Live e2e runs only for branches of the private CI repository; a maintainer reviews the change and runs it from a branch there."
 
   smoke:
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository && vars.MWS_PROJECT != ''
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     # All smoke runs share one target and must execute serially. Job-level, so the
     # fork notice job never takes the group's single pending slot from a smoke run.

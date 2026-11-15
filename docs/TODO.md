@@ -46,18 +46,15 @@ These were identified during design/review but explicitly deferred, not solved:
   e2e as intended required status checks, but nothing enforces that yet — a red check does not block a
   merge today. Two independent blockers: (a) the current GitHub plan does not offer branch protection
   for this private repository at all — the API answers 403, "Upgrade to GitHub Pro or make this
-  repository public to enable this feature" — so it needs a plan upgrade, and *not* making the repo
-  public (until the runner's role set is narrowed); and (b) the PR-tier trust model is now decided
-  (same-repository branches only), but a skipped fork `smoke` satisfies a required check, so fork PRs
-  need maintainer review. Order: upgrade the plan or publish, then configure `verify` and `smoke` as
+  repository public to enable this feature" — so it needs a plan upgrade (publication goes through
+  the public mirror, not by making this repository public); and (b) the PR-tier trust model is
+  decided (same-repository branches only), but a skipped fork `smoke` satisfies a required check, so
+  fork PRs need maintainer review. Order: upgrade the plan, then configure `verify` and `smoke` as
   required checks.
-- **Residual risk of the PR-tier trust model: PR-supplied code still runs on a credentialed
-  self-hosted runner.** Live e2e is limited to branches of this repository (see `docs/ci-cd.md`'s
-  PR-tier trust model), which removes fork code but not the ambient privilege: `e2e-pr.yml` executes
-  the branch's own code on the persistent runner, whose attached SA is ambient via IMDS, and whose SSH
-  key reaches target VMs (which themselves expose an SA through their own IMDS). Remaining work:
-  narrow the runner's role set (next item), and consider ephemeral per-job runners if external
-  committers are ever added.
+- **Ephemeral per-job runners before a second committer.** Branch code still runs on the persistent
+  credentialed runner (`docs/ci-cd.md`'s attack paths and residual risk). Acceptable while the
+  maintainer is the only one with write access; narrow the runner's role set (above) or move to
+  ephemeral runners before that changes.
 
 ### Alerting contract for the remaining `docs/design.md` §7.3 conditions
 
@@ -124,7 +121,7 @@ rather than a launch gate:
   corpus collection or the tuning step. No default in `docs/configuration.md` should be treated as
   validated until it has survived this — true for scale-down's defaults now exactly as it already was
   for scale-up's.
-- **The durable 24h change budget's own acceptance criterion (issue #51) has no live coverage.**
+- **The durable 24h change budget has no live coverage (issue #88).**
   `TestSmoke_Decisions_NoFlapping` proves two real up/down cycles and bounds alternation count, but it
   runs against a budget the smoke harness deliberately resets to empty every run (`docs/testing.md`
   "Why preflight matters more than cleanup") — nothing live proves the budget actually suppresses the

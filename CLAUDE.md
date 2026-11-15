@@ -12,7 +12,7 @@ not an architecture or platform reference.
 - Local setup and the reference test environment: [docs/development.md](docs/development.md)
 - How the test tiers are implemented and organized: [docs/testing.md](docs/testing.md)
 - The CI/CD pipeline that runs them: [docs/ci-cd.md](docs/ci-cd.md)
-- Known upstream limitations and temporary workarounds: [docs/platform-dependencies.md](docs/platform-dependencies.md)
+- Known upstream limitations and temporary workarounds: [docs/platform-dependencies.md](docs/platform-dependencies.md) (private repository only; not in the public mirror)
 - Deferred ideas: [docs/TODO.md](docs/TODO.md)
 
 If documents contradict one another, surface the conflict instead of silently choosing an
