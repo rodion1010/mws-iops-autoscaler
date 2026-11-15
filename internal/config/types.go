@@ -1,12 +1,11 @@
-// Package config parses and resolves the IOPS autoscaler's config file. Schema
-// and validation rules are docs/configuration.md; the inheritance model is its
-// §5. Phase 1 (docs/prd-mws-iops-autoscaler.md §6) is local mode only — fleet's
-// project/instance layer is not implemented here yet.
+// Package config parses, validates and resolves the IOPS autoscaler's config
+// file. Only local mode is supported; fleet mode's project/instance layer is
+// not implemented.
 package config
 
 import "sort"
 
-// Config is the top-level local-mode document (docs/configuration.md §6.1, §6.2).
+// Config is the top-level local-mode document.
 type Config struct {
 	Version int         `yaml:"version"`
 	Mode    string      `yaml:"mode"`
@@ -25,7 +24,7 @@ type modePeek struct {
 }
 
 // PolicySpec is a partial policy override. Every field is a pointer so the
-// resolver (resolve.go) can tell "not set, inherit" apart from a zero value.
+// resolver can tell "not set, inherit" apart from a zero value.
 type PolicySpec struct {
 	Limits   *LimitsSpec   `yaml:"limits"`
 	Advanced *AdvancedSpec `yaml:"advanced"`
@@ -36,7 +35,7 @@ type LimitsSpec struct {
 	MaxIOPS *int `yaml:"max_iops"`
 }
 
-// AdvancedSpec holds experimental controller parameters (docs/configuration.md §2).
+// AdvancedSpec holds experimental controller parameters.
 // billing_step_iops is deliberately absent: it is platform-fixed, so strict
 // decoding rejects it as an unknown key.
 type AdvancedSpec struct {
@@ -48,7 +47,7 @@ type AdvancedSpec struct {
 	Budget     *BudgetSpec     `yaml:"budget"`
 }
 
-// EvaluationSpec has no collection_interval of its own (docs/design.md §4.2) — sampling
+// EvaluationSpec has no collection_interval of its own — sampling
 // cadence is process-wide (runtime.metrics.collection_interval), since one
 // Sampler ticks one source for every managed disk in a single call; a
 // per-policy override could never actually be honored. Window readiness is
@@ -61,7 +60,7 @@ type EvaluationSpec struct {
 
 type SaturationSpec struct {
 	// UtilizationThreshold gates on whichever of IOPS or bandwidth
-	// utilization is higher, not IOPS alone (docs/design.md §4.4).
+	// utilization is higher, not IOPS alone.
 	UtilizationThreshold *float64     `yaml:"utilization_threshold"`
 	QueueDepthThreshold  *float64     `yaml:"queue_depth_threshold"`
 	Latency              *LatencySpec `yaml:"latency"`
@@ -69,9 +68,8 @@ type SaturationSpec struct {
 
 type LatencySpec struct {
 	// Mode: only "relative" is accepted (Validate rejects anything else,
-	// including "absolute") — design.md §2/§9.4 places absolute latency
-	// thresholds out of scope for v1, and no Analyzer code path reads this
-	// field at all (issue #6, reopened).
+	// including "absolute"). Absolute latency thresholds are out of scope,
+	// and no Analyzer code path reads this field.
 	Mode               *string  `yaml:"mode"`
 	BaselineMultiplier *float64 `yaml:"baseline_multiplier"`
 }
@@ -96,9 +94,9 @@ type BudgetSpec struct {
 	MaxChangesPer24h *int `yaml:"max_changes_per_24h"`
 }
 
-// DisksSpec is the disk selection strategy (docs/configuration.md §4).
+// DisksSpec is the disk selection strategy.
 // Policies is keyed by device_name — the exact value VM status reports,
-// never a kernel device path (docs/design.md §4.1). In selected mode its keys
+// never a kernel device path. In selected mode its keys
 // are the managed set; in auto-discovery mode they override single disks.
 type DisksSpec struct {
 	Mode     string                 `yaml:"mode"` // auto-discovery | selected
@@ -111,8 +109,8 @@ type RuntimeSpec struct {
 	Controller ControllerSpec `yaml:"controller"`
 }
 
-// MetricsSpec.CollectionInterval is the single canonical sampling cadence
-// (docs/design.md §4.2) — there is no policy-level equivalent to conflict with.
+// MetricsSpec.CollectionInterval is the single canonical sampling cadence —
+// there is no policy-level equivalent to conflict with.
 type MetricsSpec struct {
 	Source             string    `yaml:"source"` // guest | platform
 	CollectionInterval *Duration `yaml:"collection_interval"`

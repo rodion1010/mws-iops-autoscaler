@@ -20,8 +20,8 @@ func isVMPoolCapRecord(rec journalRecord) bool {
 		rec.VMHeadroomIOPS > 0 && rec.VMHeadroomIOPS <= rec.CurrentIOPS
 }
 
-// TestSmoke_Decisions_VMCapReachedUnderAggregateLoad covers docs/design.md
-// §8.3's "VM cap detection" row: both managed smoke disks under deep load
+// TestSmoke_Decisions_VMCapReachedUnderAggregateLoad asserts VM cap
+// detection: both managed smoke disks under deep load
 // together exceed the VM's IOPS pool, so the agent must report
 // vm_cap_reached and leave the capped disk's limit alone.
 //

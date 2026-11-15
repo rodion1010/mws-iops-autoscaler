@@ -71,7 +71,7 @@ disks: {mode: auto-discovery}
 runtime: {}
 `)
 	if _, err := Load(path); err == nil {
-		t.Fatal("Load succeeded with evaluation.collection_interval set — it must be rejected as an unknown key (docs/design.md §4.2)")
+		t.Fatal("Load succeeded with evaluation.collection_interval set — it must be rejected as an unknown key")
 	}
 }
 
@@ -145,7 +145,7 @@ disks:
 runtime: {}
 `)
 	if _, err := Load(path); err == nil {
-		t.Fatal("Load succeeded on the superseded disks.selected list")
+		t.Fatal("Load accepted disks.selected, which is not part of the schema")
 	}
 }
 
@@ -158,7 +158,7 @@ mode: fleet
 project: {}
 `)
 	if _, err := Load(path); err == nil {
-		t.Fatal("Load succeeded on mode: fleet, which Phase 1 does not support")
+		t.Fatal("Load succeeded on mode: fleet, which this build does not support")
 	}
 }
 

@@ -64,7 +64,7 @@ func TestSelect_autoDiscoveryNoExcludeReturnsAll(t *testing.T) {
 
 func TestSelect_autoDiscoveryExcludeTargetNotFoundIsDegradedNotFatal(t *testing.T) {
 	// A typo in exclude must not be indistinguishable from the harmless
-	// "nothing to exclude" case (docs/configuration.md §4.2) — but it also
+	// "nothing to exclude" case — but it also
 	// must not block the rest of the managed set from being built.
 	spec := config.DisksSpec{Mode: "auto-discovery", Exclude: []string{"bootdisk", "no-such-disk"}}
 	managed, degraded, err := Select(testVM(), spec, testResolved())

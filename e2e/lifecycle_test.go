@@ -26,8 +26,7 @@ var fullEnv = []string{
 // fullFixture is the merge tier's shared ephemeral VM, provisioned once with
 // three data disks: one with an explicit deviceName (used by
 // TestFull_Lifecycle_ProvisionScaleUpTeardown), one with none, so the
-// platform defaults its guest device to mws-{alias}
-// (docs/platform-reference.md's "Guest device mapping") — used by
+// platform defaults its guest device to mws-{alias} — used by
 // TestFull_DeviceNaming_NoDeviceNameDefaultsToAlias — and a churn disk
 // created but left unattached at creation, for scenarios that must observe
 // a live attach or detach (AttachChurnDisk/DetachChurnDisk, e2e/churn.go).
@@ -36,7 +35,7 @@ var fullEnv = []string{
 //
 // The storage-disks entry strings (boot/data/noname) are captured verbatim
 // from provision.sh rather than reconstructed here: mws compute vm update
-// --storage-disks resends the VM's whole disk list (docs/ci-cd.md), so
+// --storage-disks resends the VM's whole disk list, so
 // AttachChurnDisk/DetachChurnDisk must resend the exact entries the VM was
 // created with, not a Go-side guess at their syntax.
 type fullFixture struct {
@@ -135,9 +134,9 @@ func fullNoDeviceNameTarget(t *testing.T) Target {
 	return fix.noNameTarget()
 }
 
-// provisionFullFixture provisions the merge tier's ephemeral VM and its two
-// disks and verifies each one's class, in one place so ensureFullFixture's
-// sync.Once body stays a thin wrapper.
+// provisionFullFixture provisions the merge tier's ephemeral VM and its disks
+// and verifies each one's class, so ensureFullFixture's sync.Once body stays a
+// thin wrapper.
 func provisionFullFixture(ctx context.Context, project string) (fullFixture, error) {
 	fix, err := provision(ctx)
 	if err != nil {
@@ -166,7 +165,7 @@ const teardownTimeout = 8 * time.Minute
 // for one. Teardown runs whenever provisioning was attempted, even if it
 // failed partway: run identity comes from E2E_RUN_ID (set once per workflow
 // run, not generated here), which is what lets teardown.sh clean up a
-// partial run (docs/ci-cd.md).
+// partial run.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if fullFixtureAttempted {

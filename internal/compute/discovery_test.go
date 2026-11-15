@@ -111,7 +111,7 @@ func TestDiscover_unresolvableDiskExcludedNotFatal(t *testing.T) {
 
 	vm, skipped, err := Discover(context.Background(), c, "vm-1")
 	if err != nil {
-		t.Fatalf("Discover: %v, want no error — an unresolvable disk is skipped, not fatal (US-002)", err)
+		t.Fatalf("Discover: %v, want no error — an unresolvable disk is skipped, not fatal", err)
 	}
 	if len(vm.Disks) != 1 || vm.Disks[0].Alias != "ok" {
 		t.Fatalf("Disks = %+v, want only the resolvable disk — an unresolvable one must be excluded from the managed set, not kept with IOPS==0", vm.Disks)
@@ -221,7 +221,7 @@ func TestDiscover_duplicateDeviceNameBothSkipped(t *testing.T) {
 		t.Fatalf("Discover: %v", err)
 	}
 	if len(vm.Disks) != 0 {
-		t.Fatalf("Disks = %+v, want none — registry.Select joins by device_name (docs/design.md §4.1); a collision must exclude both, not let one silently win", vm.Disks)
+		t.Fatalf("Disks = %+v, want none — registry.Select joins by device_name; a collision must exclude both, not let one silently win", vm.Disks)
 	}
 	if len(skipped) != 2 {
 		t.Fatalf("skipped = %+v, want both entries excluded", skipped)

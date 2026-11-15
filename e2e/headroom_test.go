@@ -11,12 +11,11 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/compute"
 )
 
-// TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap is E5 (docs/testing.md):
-// an unmanaged sibling's real I/O must still count toward a managed disk's
-// VM headroom — docs/design.md §4.6 defines headroom from "other disks", not
-// "other managed disks". disks.selected names only the data disk, so any
-// headroom reduction observed can only have come from the unmanaged churn
-// disk.
+// TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap asserts that an
+// unmanaged sibling's real I/O counts toward a managed disk's VM headroom:
+// headroom is computed from all other disks, not only managed ones.
+// disks.policies names only the data disk, so any observed headroom
+// reduction can only come from the unmanaged churn disk.
 func TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap(t *testing.T) {
 	fix, ok := ensureFullFixture(t)
 	if !ok {
@@ -69,18 +68,15 @@ func TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap(t *testing.T) {
 	if err := AssertDiskClass(ctx, client, churnTarget); err != nil {
 		t.Fatalf("verify churn disk class after attach: %v", err)
 	}
-	// See TestFull_Discovery_AttachedDiskManagedWithoutRestart's identical
-	// wait: the compute API confirming attachment does not mean the guest
-	// kernel has created the device node yet.
+	// The compute API confirming attachment does not mean the guest kernel
+	// has created the device node yet.
 	if err := waitForGuestDevicePath(ctx, churnTarget, 60*time.Second, 5*time.Second); err != nil {
 		t.Fatalf("wait for churn guest device path: %v", err)
 	}
 
-	// Driven before the agent starts so its down-window has as much of this
-	// test's remaining runtime as possible to fill — §4.6's p95 is windowed,
-	// not instantaneous. Never move this inside the run() callback below
-	// (see e2e/cold_start_test.go's identical warning for why sequencing
-	// here is load-bearing, not stylistic).
+	// Driven before the agent starts so the windowed (not instantaneous)
+	// headroom p95 has as much of the remaining runtime as possible to fill.
+	// Do not move it into the scenario callback below.
 	if err := DriveLoad(ctx, churnTarget); err != nil {
 		t.Fatalf("drive load on churn disk: %v", err)
 	}
@@ -90,7 +86,7 @@ func TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap(t *testing.T) {
 		t.Fatalf("discover VM to read its IOPS pool: %v", err)
 	}
 	pool := compute.VMIOPSPool(vm)
-	// docs/development.md requires at least 2 vCPU (>= 6000 pool); a smaller
+	// The test environment requires at least 2 vCPU (>= 6000 pool); a smaller
 	// reading means VMIOPSPool or VM-type discovery broke, not that the
 	// reductionThreshold below needs to shrink to match it.
 	if pool < 1000 {

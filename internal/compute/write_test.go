@@ -24,8 +24,8 @@ func TestUpdateIndependentDiskIOPS_success(t *testing.T) {
 }
 
 func TestUpdateIndependentDiskIOPS_decreaseSucceeds(t *testing.T) {
-	// Every other test in this file exercises an increase; a decrease must
-	// clear the same re-read/etag/write/verify flow (design.md §4.7).
+	// A decrease must clear the same re-read/etag/write/verify flow as an
+	// increase.
 	c := newFakeClient()
 	c.disks["datadisk"] = &Disk{Name: "datadisk", SpecIOPS: 3000, Etag: "etag-1"}
 
@@ -338,7 +338,7 @@ func TestUpdateDependentDiskIOPS_refusesIndependentDisk(t *testing.T) {
 
 	_, err := UpdateDependentDiskIOPS(context.Background(), c, "iops-test-vm", "datadisk", 1000, 3000, "", false, "")
 	if err == nil {
-		t.Fatal("UpdateDependentDiskIOPS succeeded on an independent disk — it must be routed through UpdateIndependentDiskIOPS instead (docs/design.md §4.7)")
+		t.Fatal("UpdateDependentDiskIOPS succeeded on an independent disk — it must be routed through UpdateIndependentDiskIOPS instead")
 	}
 	if !strings.Contains(err.Error(), "independent, not dependent") {
 		t.Errorf("error = %v, want it to name the class mismatch", err)

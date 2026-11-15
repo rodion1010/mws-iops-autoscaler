@@ -13,17 +13,13 @@ BOOT_DISK="${VM_NAME}-boot"
 DATA_DISK="${VM_NAME}-data"
 DEVICE_NAME="e2edata"
 # NONAME_DISK carries no deviceName in --storage-disks, so the platform
-# defaults the guest device to mws-{name} instead of mws-{deviceName}
-# (docs/platform-reference.md's "Guest device mapping") — covers that
-# default live, alongside NONAME_ALIAS's explicit deviceName above.
+# defaults the guest device to mws-{name} instead of mws-{deviceName}; this
+# covers that default live, alongside DATA_DISK's explicit deviceName.
 NONAME_DISK="${VM_NAME}-noname"
 NONAME_ALIAS="e2enoname"
-# CHURN_DISK is created but deliberately left unattached — discovery/scope
-# scenarios attach and detach it live via AttachChurnDisk/DetachChurnDisk
-# (e2e/churn.go). Its deviceName is always explicit: leaving it unset would
-# default to mws-{alias}, the exact default NONAME_DISK above already
-# exercises, and two disks on one VM covering that default would make a
-# future failure ambiguous about which one triggered it.
+# CHURN_DISK is created unattached; scenarios attach and detach it live via
+# AttachChurnDisk/DetachChurnDisk. Its deviceName is explicit so that only
+# NONAME_DISK exercises the mws-{alias} default and a failure is unambiguous.
 CHURN_DISK="${VM_NAME}-churn"
 CHURN_DEVICE_NAME="e2echurn"
 
@@ -56,11 +52,9 @@ mws compute disk create "compute/projects/${MWS_PROJECT}/disks/${CHURN_DISK}" \
 # Raw-device fio requires passwordless sudo for the test user.
 USER_DATA=$'#cloud-config\nusers:\n  - name: '"${E2E_SSH_USER}"$'\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n    ssh-authorized-keys:\n      - '"${E2E_SSH_PUBLIC_KEY}"$'\npackage_update: true\npackages:\n  - fio\n  - sysstat\n  - jq'
 
-# Captured (rather than inlined) so they can be echoed verbatim below: the
-# Go side resends the VM's exact known-good --storage-disks list whenever it
-# attaches or detaches the churn disk (mws compute vm update --storage-disks
-# resends the whole list — docs/ci-cd.md), and must not reconstruct these
-# strings independently of the ones provision.sh actually used to create it.
+# Captured so they can be echoed verbatim below: vm update --storage-disks
+# replaces the whole list, so the Go side resends these exact strings when it
+# attaches or detaches the churn disk instead of reconstructing them.
 BOOT_ENTRY="{name: boot, boot: true, deviceName: bootdisk, disk: {ref: \"compute/projects/${MWS_PROJECT}/disks/${BOOT_DISK}\"}}"
 DATA_ENTRY="{name: data, boot: false, deviceName: ${DEVICE_NAME}, disk: {ref: \"compute/projects/${MWS_PROJECT}/disks/${DATA_DISK}\"}}"
 NONAME_ENTRY="{name: ${NONAME_ALIAS}, boot: false, disk: {ref: \"compute/projects/${MWS_PROJECT}/disks/${NONAME_DISK}\"}}"
@@ -69,12 +63,8 @@ NONAME_ENTRY="{name: ${NONAME_ALIAS}, boot: false, disk: {ref: \"compute/project
 # starts out unattached.
 CHURN_ENTRY="{name: churn, boot: false, deviceName: ${CHURN_DEVICE_NAME}, disk: {ref: \"compute/projects/${MWS_PROJECT}/disks/${CHURN_DISK}\"}}"
 
-# --wait-timeout defaults to 5m; observed VM creation taking longer than
-# that against this zone (context deadline exceeded, 2026-10-15) while
-# every other call (list/get) stayed fast, so only this step's own wait
-# needs more room. The shared 15m provisioning context (lifecycle_test.go's
-# ensureFullFixture) still bounds the whole call — disk creation above
-# took seconds, leaving ample slack for a longer VM wait inside it.
+# --wait-timeout defaults to 5m, which VM creation in this zone can exceed.
+# ensureFullFixture's 15m provisioning context still bounds the whole script.
 mws compute virtual-machine create "compute/projects/${MWS_PROJECT}/virtualMachines/${VM_NAME}" \
   --zone "${MWS_ZONE}" \
   --vm-type "${E2E_VM_TYPE}" \
@@ -89,10 +79,9 @@ $(sed 's/^/  /' <<< "$USER_DATA")" \
 
 EXTERNAL_IP=""
 NONAME_DEVICE_NAME=""
-# status.storage.disks[].deviceName is a required response field once the
-# attachment exists (docs/platform-reference.md), but re-fetch a few times
-# rather than assume it (and the external IP) are populated the instant
-# creation returns.
+# status.storage.disks[].deviceName is required once the attachment exists,
+# but it and the external IP may not be populated the instant creation
+# returns, so re-fetch a few times.
 for _ in $(seq 1 6); do
   VM_JSON=$(mws compute virtual-machine get "compute/projects/${MWS_PROJECT}/virtualMachines/${VM_NAME}" -f json)
   EXTERNAL_IP=$(jq -r '.status.network.networkInterfaces[0].addresses[0].oneToOneNat.external.ipAddress' <<< "$VM_JSON")
@@ -113,9 +102,6 @@ if [ -z "$NONAME_DEVICE_NAME" ] || [ "$NONAME_DEVICE_NAME" = "null" ]; then
   echo "provision.sh: could not resolve the server-assigned deviceName for ${VM_NAME}'s ${NONAME_ALIAS} disk" >&2
   exit 1
 fi
-# Target.DeviceName is the exact status.storage.disks[].deviceName value
-# already queried above (docs/design.md §4.1), kept as-is rather than
-# transformed.
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes -i "${E2E_SSH_KEY_PATH:?}")
 
@@ -161,9 +147,8 @@ if [ "$fio_ready" != true ]; then
 fi
 
 echo "vm_name=${VM_NAME}"
-# device_name and churn_device_name are emitted as VM status reports them,
-# to match noname_device_name, which already carries that exact value as
-# queried from the live VM status above.
+# Every *device_name is emitted exactly as status.storage.disks[].deviceName
+# reports it; noname_device_name is read from the live VM status above.
 echo "device_name=mws-${DEVICE_NAME}"
 echo "noname_device_name=${NONAME_DEVICE_NAME}"
 echo "churn_device_name=mws-${CHURN_DEVICE_NAME}"

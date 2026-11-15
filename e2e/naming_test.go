@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// scenarioTestName is docs/testing.md's naming convention:
+// scenarioTestName is the e2e naming convention:
 // Test<Tier>_<Group>_<Scenario>, tier in {Smoke, Full, Regression}. CI
 // selects tests by matching this prefix with -run, so a name that drifts
 // from it is silently dropped from every workflow rather than failing loud.

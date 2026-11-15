@@ -11,11 +11,9 @@ import (
 
 // TestFull_DeviceNaming_NoDeviceNameDefaultsToAlias exercises an attachment
 // with no deviceName set at all: the platform must default the guest device
-// to mws-{alias} instead of mws-{deviceName} (docs/platform-reference.md's
-// "Guest device mapping"), and the agent must resolve and manage it like
-// any other disk. TestFull_Lifecycle_ProvisionScaleUpTeardown's own disk, on
-// the same shared VM, carries an explicit deviceName — between the two,
-// both forms are exercised side by side on one VM.
+// to mws-{alias} instead of mws-{deviceName}, and the agent must resolve and
+// manage it like any other disk. The data disk on the same VM carries an
+// explicit deviceName, so both forms run side by side.
 func TestFull_DeviceNaming_NoDeviceNameDefaultsToAlias(t *testing.T) {
 	target := fullNoDeviceNameTarget(t)
 	project, err := Project()
@@ -32,14 +30,12 @@ func TestFull_DeviceNaming_NoDeviceNameDefaultsToAlias(t *testing.T) {
 		t.Fatalf("build compute client: %v", err)
 	}
 	// The VM is shared with other full-tier tests; Preflight resets any
-	// state a previous test left behind — the same guarantee
-	// TestFull_Lifecycle_ProvisionScaleUpTeardown relies on for the same VM.
+	// state a previous test left behind.
 	if err := Preflight(ctx, client, target); err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
 
 	runAgentScenario(t, ctx, target, project, false, func(agentStarted time.Time) error {
-		// A resolvable guest path is the whole point of this scenario:
 		// DriveLoad targets /dev/disk/by-id/mws-{DeviceName}, which only
 		// exists if the platform really did default it to mws-{alias}.
 		if err := DriveLoad(ctx, target); err != nil {

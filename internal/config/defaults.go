@@ -2,33 +2,32 @@ package config
 
 import "time"
 
-// BillingStepIOPS is platform-fixed and not user-settable (docs/configuration.md §2
-// field notes). It has no corresponding decodable field in AdvancedSpec.
+// BillingStepIOPS is platform-fixed and not user-settable. It has no
+// corresponding decodable field in AdvancedSpec.
 const BillingStepIOPS = 100
 
-// Platform bounds — docs/platform-reference.md "IOPS limits". The VM aggregate cap (3000 × vCPU)
-// is not a config constant: it depends on the VM type and is resolved at
-// discovery time (design.md §4.1), not here.
+// Platform per-disk IOPS bounds. The VM aggregate cap (3000 × vCPU) is not a
+// config constant: it depends on the VM type and is resolved at discovery time.
 const (
 	PlatformMinIOPS = 1000
 	PlatformMaxIOPS = 10000
 )
 
-// DefaultMinIOPS / DefaultMaxIOPS are docs/prd-mws-iops-autoscaler.md §7 defaults,
-// used when policy.limits is omitted entirely.
+// DefaultMinIOPS / DefaultMaxIOPS are used when policy.limits is omitted
+// entirely.
 const (
 	DefaultMinIOPS = PlatformMinIOPS
 	DefaultMaxIOPS = PlatformMaxIOPS
 )
 
 // ResolvedAdvanced is the advanced parameter set with nothing left to
-// inherit. It has no CollectionInterval — that's ResolvedRuntime's alone
-// (docs/design.md §4.2): sampling cadence is process-wide, never per-policy.
+// inherit. It has no CollectionInterval — that's ResolvedRuntime's alone:
+// sampling cadence is process-wide, never per-policy.
 type ResolvedAdvanced struct {
 	ScaleUpWindow   time.Duration
 	ScaleDownWindow time.Duration
 
-	UtilizationThreshold      float64 // gates on IOPS or bandwidth, whichever is higher (docs/design.md §4.4)
+	UtilizationThreshold      float64 // gates on IOPS or bandwidth, whichever is higher
 	QueueDepthThreshold       float64
 	LatencyMode               string
 	LatencyBaselineMultiplier float64
@@ -46,7 +45,7 @@ type ResolvedAdvanced struct {
 	MaxChangesPer24h int
 }
 
-// defaultAdvanced is Phase 1's one built-in parameter set (docs/configuration.md §3).
+// defaultAdvanced is the built-in parameter set.
 var defaultAdvanced = ResolvedAdvanced{
 	ScaleUpWindow:             5 * time.Minute,
 	ScaleDownWindow:           30 * time.Minute,

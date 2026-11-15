@@ -6,12 +6,11 @@ import "testing"
 
 // xfail runs scenario and converts its outcome into an intentionally-red
 // e2e result that never blocks a merge or release: an error is exactly what
-// a known, tracked gap looks like today, so it is reported as t.Skip (still
+// a known, tracked gap looks like, so it is reported as t.Skip (still
 // visible in test output, never a build failure); a nil error means the
-// scenario's design-correct assertion now passes, which this package's
-// convention treats as a signal the fix has already shipped — t.Fatal
-// forces the xfail wrapper to be removed in the same change, rather than
-// silently lingering around a scenario that no longer needs it.
+// scenario's correct assertion passes, so the fix has shipped — t.Fatal
+// forces the xfail wrapper to be removed in the same change rather than
+// left around a scenario that does not need it.
 //
 // scenario must be a plain func() error that never touches *testing.T: Go
 // gives no way to catch a t.Fatalf/t.Errorf raised from inside a test, so a

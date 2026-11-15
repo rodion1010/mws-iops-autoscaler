@@ -1,8 +1,6 @@
-// Package health implements design.md §7.3's two HTTP endpoints:
-// /healthz (process alive) and /readyz (config valid, discovery succeeded,
-// ≥1 metric source reachable, budget healthy). /readyz's body also reports
-// any degraded disks (DegradedDisk) alongside that binary verdict, but
-// never folds them into it — see SetDegradedDisks.
+// Package health serves /healthz (process alive) and /readyz (config valid,
+// discovery succeeded, ≥1 metric source reachable, budget healthy). /readyz
+// also lists degraded disks, which never affect the readiness verdict.
 package health
 
 import (
@@ -11,41 +9,32 @@ import (
 	"sync"
 )
 
-// DegradedDisk names one configured disk (disks.selected or disks.exclude)
-// that could not be resolved against the VM's live disks this cycle, but
-// did not block the rest of the managed set (docs/design.md §4.1's
-// cold-start/runtime distinction; docs/configuration.md §4.2). DeviceName
-// is whatever the operator's config named — it does not necessarily
-// correspond to any live disk.
+// DegradedDisk names one configured disk (disks.policies or disks.exclude)
+// that could not be resolved against the VM's live disks this cycle but did
+// not block the rest of the managed set. DeviceName is the name from the
+// config and need not match any live disk.
 type DegradedDisk struct {
 	DeviceName string `json:"device_name"`
 	Reason     string `json:"reason"`
 }
 
-// Readiness is the mutable state /readyz reports on — set by the caller as
-// each condition becomes true or false across the process's life. Zero
-// value is "not ready" on every dimension, matching a freshly started
-// process that hasn't discovered anything or reached a source yet.
+// Readiness is the mutable state /readyz reports on; it is safe for
+// concurrent use. The zero value is not ready: config, discovery and source
+// are false, while the budget starts healthy.
 type Readiness struct {
 	mu                 sync.RWMutex
 	configValid        bool
 	discoverySucceeded bool
 	sourceReachable    bool
 
-	// budgetUnhealthy is inverted relative to the other three fields
-	// (zero value = healthy) specifically so a freshly zero-valued
-	// Readiness — including every existing `&Readiness{}` construction
-	// site — starts healthy by default, matching state.Tracker's own
-	// default, without requiring a constructor call (issue #10). The
-	// exported surface (SetBudgetHealthy, the JSON body's BudgetHealthy
-	// field) stays framed positively like every other field here; only
-	// the internal storage is inverted.
+	// budgetUnhealthy is stored inverted so a zero-value Readiness starts
+	// budget-healthy, matching state.Tracker's default. The exported surface
+	// stays positive (SetBudgetHealthy, BudgetHealthy).
 	budgetUnhealthy bool
 
-	// degraded is reported alongside the binary verdict below, never folded
-	// into it (docs/design.md §4.1) — a disk named in disks.selected or
-	// disks.exclude that didn't resolve degrades only that disk, once at
-	// least one discovery has already succeeded; it never flips /readyz.
+	// degraded is reported alongside the verdict, never folded into it: an
+	// unresolved configured disk degrades only that disk and never flips
+	// /readyz.
 	degraded []DegradedDisk
 }
 
@@ -67,13 +56,10 @@ func (r *Readiness) SetSourceReachable(v bool) {
 	r.sourceReachable = v
 }
 
-// SetBudgetHealthy reports whether the durable 24h change budget can
-// currently be trusted (issue #10) — false once any budget persistence
-// operation (reserve/confirm/release) has failed, which state.Tracker
-// treats as sticky for the process's lifetime. A process reporting
-// unready for this reason needs a restart (which re-runs LoadBudget and
-// startup reconciliation) to recover, not a wait — matching how the other
-// three conditions here behave.
+// SetBudgetHealthy records whether the durable 24h change budget can be
+// trusted. state.Tracker reports false, stickily for the process lifetime,
+// once any budget persistence operation fails; recovery needs a restart,
+// which reloads the budget and reruns startup reconciliation.
 func (r *Readiness) SetBudgetHealthy(v bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -81,18 +67,16 @@ func (r *Readiness) SetBudgetHealthy(v bool) {
 }
 
 // SetDegradedDisks replaces the full current set of configured-but-
-// unresolved disks reported alongside /readyz's binary verdict. The caller
-// (Agent.discover) passes the complete set every cycle, including empty —
-// that's what lets a disk that resolves again disappear from the body
-// instead of leaving a stale entry behind.
+// unresolved disks reported by /readyz. Callers pass the complete set every
+// cycle, including an empty one, so a disk that resolves again leaves no
+// stale entry.
 func (r *Readiness) SetDegradedDisks(degraded []DegradedDisk) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.degraded = degraded
 }
 
-// Ready reports whether every condition design.md §7.3 requires currently
-// holds.
+// Ready reports whether every readiness condition currently holds.
 func (r *Readiness) Ready() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -106,16 +90,13 @@ type readyzBody struct {
 	SourceReachable    bool `json:"source_reachable"`
 	BudgetHealthy      bool `json:"budget_healthy"`
 
-	// ConfiguredDisksUnmanaged is omitted entirely when empty, so the
-	// healthy-state response stays byte-for-byte what it was before this
-	// field existed.
+	// ConfiguredDisksUnmanaged is omitted when empty.
 	ConfiguredDisksUnmanaged []DegradedDisk `json:"configured_disks_unmanaged,omitempty"`
 }
 
 // ReadyzHandler returns 200 with a breakdown when every condition holds,
-// 503 with the same breakdown otherwise — so an operator (or a load
-// balancer's health-check log) can see *which* condition is failing, not
-// just that something is.
+// 503 with the same breakdown otherwise, so an operator can see which
+// condition is failing.
 func (r *Readiness) ReadyzHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		r.mu.RLock()
@@ -137,8 +118,8 @@ func (r *Readiness) ReadyzHandler() http.Handler {
 	})
 }
 
-// HealthzHandler always reports 200 while the process is up — "process
-// alive" (design.md §7.3) is exactly "this handler got to run at all."
+// HealthzHandler always reports 200: serving the request is the liveness
+// signal.
 func HealthzHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

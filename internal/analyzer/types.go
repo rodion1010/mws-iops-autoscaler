@@ -66,14 +66,14 @@ type Analysis struct {
 	Baseline            LatencyStat // low percentile over the full buffered history
 	BaselineEstablished bool
 
-	WindowFullUp   bool // span ≥ ScaleUpWindow (docs/design.md §4.2)
+	WindowFullUp   bool // span ≥ ScaleUpWindow
 	WindowFullDown bool // span ≥ ScaleDownWindow
 
 	// WindowFill ratios expose span progress; decision logic uses the exact WindowFull booleans.
 	WindowFillUpRatio   float64
 	WindowFillDownRatio float64
 
-	Saturated bool // resource_gate AND (queue/latency/throttle) AND sustained (§4.4); false if !WindowFullUp
+	Saturated bool // resource_gate AND (queue/latency/throttle) AND sustained; false if !WindowFullUp
 	// Underutilized requires every down-window signal, including both resource utilizations,
 	// to remain quiet; bandwidth prevents large-block workloads from appearing idle.
 	Underutilized bool

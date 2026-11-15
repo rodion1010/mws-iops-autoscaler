@@ -179,7 +179,7 @@ func TestValidate_rules(t *testing.T) {
 			// A completed downscale here lands at 0.80 utilization, above
 			// the 0.70 saturation gate — immediately a saturated candidate
 			// again, even though scale_down (0.80) is below scale_up
-			// (0.90) and the old check alone would have passed this.
+			// (0.90).
 			name: "scale_down_utilization above the saturation gate despite being below scale_up_utilization",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
@@ -265,7 +265,7 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "exclude only applies to mode: auto-discovery",
 		},
 		{
-			name: "mode: selected with an empty selected list",
+			name: "mode: selected with an empty policies map",
 			mutate: func(c *Config) {
 				c.Disks.Mode = "selected"
 				c.Disks.Exclude = nil

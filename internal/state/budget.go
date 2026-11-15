@@ -27,7 +27,7 @@ const (
 	StatusPending Status = "pending"
 	// StatusConfirmed is a verified write and continues to count against budget.
 	StatusConfirmed Status = "confirmed"
-	// StatusReleased is a verified non-write and no longer counts against budget.
+	// StatusReleased is a verified non-write and does not count against budget.
 	StatusReleased Status = "released"
 )
 

@@ -60,8 +60,11 @@ design, ADRs and code comments. Link to the canonical document instead.
   readable code already says.
 - Keep comments local and durable. One to three lines is normally enough; longer rationale belongs in
   `docs/design.md` or `docs/platform-reference.md`.
-- Do not put issue or PR chronology, review conversations, acceptance criteria, complete reproduction
-  scenarios or amendment history in production comments.
+- No history in comments, production or test: no issue, PR, user-story or milestone numbers, no
+  review conversations, acceptance criteria, reproduction scenarios or amendment history ("used to",
+  "previously", "after the fix").
+- No references to documents (`docs/*.md`, `§N`) in comments. State the reason itself in one plain
+  sentence; the full rationale lives in the documents, which point to the code, not the other way.
 - Put regression scenarios in descriptive test names and table cases. Use an issue for operational
   impact and reproduction steps.
 - GoDoc on exported declarations describes the public contract, including meaningful error,
@@ -69,7 +72,16 @@ design, ADRs and code comments. Link to the canonical document instead.
   their names.
 - A comment that no longer matches the implementation is a defect: update or remove it in the same
   change.
-- Link to a stable document section when external evidence matters; do not link to line numbers.
+- A comment-only change must not change code: check that each Go file's token stream without
+  comments is identical before and after, and that shell and YAML diffs touch only `#` lines.
+
+## User-visible strings
+
+Error messages, log lines, flag help, Prometheus HELP texts and test failure messages follow the same
+rules as comments: no issue, PR, user-story or milestone numbers, no `docs/*.md` or `§N` references, no
+history. Say what happened and, where useful, what to do. For example, `resolve own VM identity
+(US-002)` becomes `resolve own VM identity`, and `requires PlatformSource, which ships in M7` becomes
+`"platform" is not implemented yet`.
 
 ## ADR policy
 

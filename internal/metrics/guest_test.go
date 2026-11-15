@@ -136,7 +136,7 @@ func TestVerifyPath_unresolvableSymlink(t *testing.T) {
 
 	err := g.VerifyPath(DiskRef{DiskID: "disk-2", DeviceName: "mws-ghost-disk"})
 	if err == nil {
-		t.Fatal("VerifyPath succeeded for a device with no resolvable symlink (issue #4)")
+		t.Fatal("VerifyPath succeeded for a device with no resolvable symlink")
 	}
 }
 
@@ -149,7 +149,7 @@ func TestVerifyPath_deviceMissingFromDiskstats(t *testing.T) {
 
 	err := g.VerifyPath(DiskRef{DiskID: "disk-1", DeviceName: "mws-datadisk"})
 	if err == nil {
-		t.Fatal("VerifyPath succeeded for a kernel device missing from /proc/diskstats (issue #4)")
+		t.Fatal("VerifyPath succeeded for a kernel device missing from /proc/diskstats")
 	}
 }
 

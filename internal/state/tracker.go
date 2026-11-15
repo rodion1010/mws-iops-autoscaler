@@ -18,7 +18,7 @@ type Tracker struct {
 	mu            sync.Mutex
 	disks         map[string]*diskState
 	budget        *Budget
-	budgetHealthy bool // sticky false once any budget persistence op fails (issue #10) — zero-value default is fine since NewTracker sets it true explicitly
+	budgetHealthy bool // sticky false once any budget persistence op fails; NewTracker sets it true
 }
 
 func NewTracker(budget *Budget) *Tracker {

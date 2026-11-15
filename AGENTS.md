@@ -8,7 +8,7 @@ CLAUDE.md defines:
 - the documentation map and the single canonical home of each fact (PRD, design, configuration,
   platform reference, platform dependencies, development, testing, CI/CD, TODO, ADR policy);
 - change discipline (scope, fail-closed invariants, functional/doc-only commit separation);
-- code-comment policy;
+- code-comment and user-visible-string policy (no history, issue numbers or doc references);
 - verification requirements (gofmt, `go test`/`go vet`/`go test -race`, regression tests for bug
   fixes);
 - credential rules (never commit keys, tokens, or live environment identifiers).

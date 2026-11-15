@@ -117,7 +117,7 @@ func TestTracker_budgetSurvivesRestartCooldownDoesNot(t *testing.T) {
 
 	s := tr2.State("disk1", epoch.Add(time.Hour))
 	if s.ChangesInLast24h != 4 {
-		t.Errorf("ChangesInLast24h after restart = %d, want 4 — the budget must survive (docs/design.md §9.4)", s.ChangesInLast24h)
+		t.Errorf("ChangesInLast24h after restart = %d, want 4 — the budget must survive", s.ChangesInLast24h)
 	}
 	if !s.LastChangeUp.IsZero() {
 		t.Errorf("LastChangeUp after restart = %v, want zero — cooldowns are deliberately not persisted", s.LastChangeUp)
@@ -150,7 +150,7 @@ func TestTracker_reserveFailureMarksUnhealthyAndFailsClosed(t *testing.T) {
 
 	s := tr.State("disk1", epoch.Add(time.Minute))
 	if s.ChangesInLast24h < 1_000_000 {
-		t.Errorf("ChangesInLast24h once unhealthy = %d, want a sentinel large enough that budget_exhausted always fires (fail closed, issue #10)", s.ChangesInLast24h)
+		t.Errorf("ChangesInLast24h once unhealthy = %d, want a sentinel large enough that budget_exhausted always fires (fail closed)", s.ChangesInLast24h)
 	}
 }
 

@@ -388,8 +388,7 @@ func bumpEtag(etag string) string {
 }
 
 // writeBadRequest writes a 400 shaped like common.ApiError, classified
-// INVALID_ARGUMENT — see writeNotFound for why the shape and Content-Type
-// matter to the SDK's decoder.
+// INVALID_ARGUMENT; the SDK's error decoder needs that JSON shape.
 func writeBadRequest(w http.ResponseWriter, description string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
@@ -445,8 +444,8 @@ func (f *Fake) handleMetadataName(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(VMName))
 }
 
-// handleMetadataID serves the documented "projects/{project}/virtualMachines/{vm}"
-// resource ID shape (docs/platform-reference.md).
+// handleMetadataID serves the "projects/{project}/virtualMachines/{vm}"
+// resource ID shape.
 func (f *Fake) handleMetadataID(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	_, _ = w.Write([]byte("projects/" + Project + "/virtualMachines/" + VMName))

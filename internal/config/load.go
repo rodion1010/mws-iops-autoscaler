@@ -14,10 +14,9 @@ import (
 const supportedVersion = 1
 
 // Load reads and strictly parses the config file at path. Unknown keys at any
-// nesting level are rejected (docs/configuration.md §8): this is what retires
-// the superseded `device:` / `disk_id:` selectors (docs/design.md §4.1) and the platform-
-// fixed `billing_step_iops` (§2 field notes) as a side effect of strict
-// decoding, without a dedicated check for either.
+// nesting level are rejected, which also rejects unsupported selectors such as
+// `device:` / `disk_id:` and the platform-fixed `billing_step_iops` without a
+// dedicated check for either.
 //
 // Load does not call Validate — callers that need a fully checked config call
 // both, in order, as LoadAndValidate does.
@@ -42,7 +41,7 @@ func Load(path string) (*Config, error) {
 	}
 	if peek.Mode != "local" {
 		return nil, fmt.Errorf(
-			"%s: mode %q is not supported in this build — fleet mode ships in Phase 4 (docs/prd-mws-iops-autoscaler.md §6)",
+			"%s: mode %q is not supported in this build — only local mode is implemented",
 			path, peek.Mode)
 	}
 

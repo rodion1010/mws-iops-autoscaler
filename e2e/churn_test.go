@@ -12,19 +12,13 @@ import (
 )
 
 // setStorageDisks resends vmName's full --storage-disks list via the mws
-// CLI. compute.Client (internal/compute/client.go) deliberately exposes no
-// attach/detach capability — production code never attaches or detaches a
-// disk — so live attach/detach in e2e shells out directly, mirroring
-// provision.sh's own use of the CLI.
+// CLI. compute.Client exposes no attach/detach because production code never
+// attaches or detaches a disk, so e2e shells out like provision.sh does.
 //
-// mws compute vm update --storage-disks resends the whole disk list
-// (docs/platform-reference.md, docs/ci-cd.md): entries must be the complete
-// known-good set, never just the one being added or removed, or the omitted
-// ones are detached. "vm" here, not provision.sh's "virtual-machine" — every
-// documented, verified example of --storage-disks on update
-// (docs/platform-reference.md, docs/ci-cd.md's runbook) uses the "vm" form
-// specifically; provision.sh's "virtual-machine" is only verified for
-// create/get/delete, a separate command shape.
+// vm update --storage-disks replaces the whole disk list: entries must be the
+// complete known-good set, or the omitted disks are detached. The "vm" form is
+// the one verified for update; "virtual-machine" is verified only for
+// create/get/delete.
 func setStorageDisks(ctx context.Context, project, vmName string, entries []string) error {
 	args := []string{"compute", "vm", "update",
 		fmt.Sprintf("compute/projects/%s/virtualMachines/%s", project, vmName),
@@ -53,10 +47,8 @@ func DetachChurnDisk(ctx context.Context, project string, fix fullFixture) error
 	return setStorageDisks(ctx, project, fix.VMName, fix.baseStorageDisks())
 }
 
-// waitForDiskAttached polls until t's device is visible on t's VM, tolerating
-// mws compute vm update --storage-disks's own propagation lag — the same lag
-// provision.sh's initial creation already retries against before reporting
-// the noname disk's deviceName.
+// waitForDiskAttached polls until t's device is visible on t's VM: an
+// attachment made by vm update --storage-disks appears in VM status with a lag.
 func waitForDiskAttached(ctx context.Context, client compute.Client, t Target, timeout, pollInterval time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error

@@ -17,7 +17,7 @@ type StorageDisk struct {
 	Boot  bool
 	// DeviceName is the exact value VM status reports —
 	// status.storage.disks[].deviceName — the same identifier used to
-	// address the device inside Linux (docs/design.md §4.1); empty if the
+	// address the device inside Linux; empty if the
 	// platform has not assigned one. Config selectors must match this
 	// value exactly.
 	DeviceName string
@@ -58,7 +58,7 @@ func (d StorageDisk) IdentityKey() string {
 type VirtualMachine struct {
 	Name   string
 	Etag   string // metadata.etag — required for the dependent write path
-	VMType string // spec.vmType — feeds GetVmType for the VM's IOPS pool (design.md §4.1)
+	VMType string // spec.vmType — feeds GetVmType for the VM's IOPS pool
 	Disks  []StorageDisk
 
 	// VCPUCount comes from a separate VM-type read and determines aggregate IOPS capacity.
@@ -75,7 +75,7 @@ type VmType struct {
 type Disk struct {
 	Name     string
 	SpecIOPS int64  // spec.iops — current provisioned limit
-	Etag     string // metadata.etag — optimistic-concurrency precondition for UpdateDisk (issue #16)
+	Etag     string // metadata.etag — optimistic-concurrency precondition for UpdateDisk
 
 	// Live status IOPS breakdown, currently used only for observability.
 	BaseIOPS, ExtraIOPS, TotalIOPS int64

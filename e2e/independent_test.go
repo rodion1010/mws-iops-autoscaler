@@ -10,11 +10,9 @@ import (
 )
 
 // TestSmoke_Independent_ScaleUpOnSaturation exercises the independent write
-// path (docs/design.md §4.7, disk PATCH) on the persistent PR-tier target's
-// independent disk — the write path
-// TestSmoke_Decisions_ScaleUpOnSaturation's dependent disk cannot exercise.
-// It shares the VM with that test but targets a different, permanently
-// attached disk, so the two never contend for the same resource.
+// path (disk PATCH) on the smoke target's independent disk, which the
+// dependent smoke disk cannot exercise. Both disks share the VM but are
+// separate, permanently attached disks, so the tests never contend.
 func TestSmoke_Independent_ScaleUpOnSaturation(t *testing.T) {
 	target, err := SmokeIndependentTarget()
 	if err != nil {
@@ -60,12 +58,11 @@ func TestSmoke_Independent_ScaleUpOnSaturation(t *testing.T) {
 }
 
 // TestSmoke_Independent_DryRunValidateOnly drives the independent disk to
-// saturation under --dry-run and asserts both halves of US-013's
-// independent-disk contract: the platform's real ValidateOnly verdict is
-// reached — a scale_up decision lands in the journal — while the live disk
-// is never mutated. This is the one place a server-confirmed dry-run
-// verdict can be observed at all: the dependent path has no equivalent
-// (docs/design.md §4.7 — UpdateVirtualMachine has no validateOnly).
+// saturation under --dry-run and asserts both halves of the independent-disk
+// dry-run contract: the platform's ValidateOnly verdict is reached (a
+// scale_up decision lands in the journal) while the live disk is never
+// mutated. The dependent path has no server-confirmed dry run:
+// UpdateVirtualMachine has no validateOnly.
 func TestSmoke_Independent_DryRunValidateOnly(t *testing.T) {
 	target, err := SmokeIndependentTarget()
 	if err != nil {

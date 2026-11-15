@@ -10,7 +10,7 @@ import (
 // newMetadataFake starts an in-process instance metadata service serving
 // exactly the given plain-text key/value pairs, and points
 // MWS_COMPUTE_METADATA_HOST at it for the duration of the test — the same
-// override imds.Client itself already supports (docs/platform-reference.md).
+// override imds.Client itself already supports.
 func newMetadataFake(t *testing.T, values map[string]string) {
 	t.Helper()
 	mux := http.NewServeMux()

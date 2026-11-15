@@ -11,13 +11,9 @@ import (
 
 // TestSmoke_Dependent_DryRunComputedOnly drives the dependent disk to
 // saturation under --dry-run and asserts a scale_up decision lands in the
-// journal while the live disk is never mutated. Unlike the independent
-// path's dry run (TestSmoke_Independent_DryRunValidateOnly), a dependent
-// dry run makes no network round-trip at all — Apply's doc comment
-// (internal/actuator/actuator.go) is explicit that dryRun only has a
-// server-confirmed effect on Target.Class == ClassIndependent; on
-// ClassDependent it reports intent without calling the write endpoint. This
-// scenario is what proves that computed-only path still reaches a decision.
+// journal while the live disk is never mutated. Unlike the independent dry
+// run, a dependent dry run makes no write call at all: Apply reports intent
+// without calling the write endpoint, and the decision is computed only.
 func TestSmoke_Dependent_DryRunComputedOnly(t *testing.T) {
 	target, err := SmokeTarget()
 	if err != nil {

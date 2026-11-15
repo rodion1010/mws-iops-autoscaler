@@ -1,5 +1,5 @@
 // Command mws-iops-autoscaler is the MWS IOPS Autoscaler agent (local mode,
-// bidirectional — docs/prd-mws-iops-autoscaler.md §6).
+// bidirectional scaling).
 package main
 
 import (
@@ -36,7 +36,7 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("mws-iops-autoscaler", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to the config file (required)")
 	validateOnly := fs.Bool("validate-config", false, "parse and validate the config, then exit")
-	dryRun := fs.Bool("dry-run", false, "discover, sample and decide, but apply no change (US-013)")
+	dryRun := fs.Bool("dry-run", false, "discover, sample and decide, but apply no change")
 	stateDir := fs.String("state-dir", "/var/lib/mws-iops-autoscaler", "directory for the durable 24h change budget")
 	journalPath := fs.String("journal", "", "decision journal output path (default: stdout)")
 	listenAddr := fs.String("listen", ":9435", "address for /metrics, /healthz, /readyz")
@@ -60,14 +60,8 @@ func run(args []string) int {
 	return 0
 }
 
-// runAgent builds every pipeline stage (design.md §3.1) and runs the
-// control loop until an interrupt or SIGTERM. It stops short of two
-// things deliberately: no systemd/.deb packaging (a deployment decision,
-// not a code one — matches this project's own TODO.md rule that CI/CD and
-// deployment infrastructure need an explicit decision before building) and
-// no attempt to validate live against the platform (that's a step a human
-// takes with -dry-run against a real environment, not something this
-// function does on its own).
+// runAgent builds every pipeline stage and runs the control loop until an
+// interrupt or SIGTERM.
 func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -77,24 +71,22 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 		return fmt.Errorf("config: %w", err)
 	}
 	if cfg.Mode != "local" {
-		// Already rejected by Load/Validate today (fleet mode ships in
-		// Phase 4), but the check stays here too as a direct statement of
-		// this function's own scope, not a delegated one.
+		// Validation already rejects other modes; this states runAgent's own scope.
 		return fmt.Errorf("mode %q not supported yet", cfg.Mode)
 	}
 	if cfg.Runtime.Metrics.Source == "platform" {
-		return fmt.Errorf("runtime.metrics.source: \"platform\" requires PlatformSource, which ships in M7 — not implemented yet")
+		return fmt.Errorf("runtime.metrics.source: \"platform\" is not implemented yet")
 	}
 	resolved := config.Resolve(cfg)
 
 	identity, err := compute.ResolveSelfIdentity(ctx)
 	if err != nil {
-		return fmt.Errorf("resolve own VM identity (US-002): %w", err)
+		return fmt.Errorf("resolve own VM identity: %w", err)
 	}
 	vmName := identity.VMName
 
-	// NFR-8: at least 30s, never the SDK's 5s default — endpoint discovery
-	// alone was measured at 15s.
+	// At least 30s, never the SDK's 5s default: endpoint discovery alone
+	// can take 15s.
 	sdk, err := mws.Load(ctx, mws.WithDefaultProject(identity.Project), mws.WithDefaultZone(identity.Zone), mws.WithTimeout(30*time.Second))
 	if err != nil {
 		return fmt.Errorf("load MWS SDK credentials: %w", err)
@@ -133,15 +125,10 @@ func runAgent(configPath string, dryRun bool, stateDir, journalPath, listenAddr 
 	readiness := &health.Readiness{}
 	readiness.SetConfigValid(true) // LoadAndValidate above already proved this
 
-	// Freshness bounds (issue #15), derived from the same collection/
-	// discovery cadence the pipeline already runs on rather than hardcoded
-	// or independently configured: a threshold that isn't a multiple of
-	// the interval it's bounding would either trip on ordinary jitter (too
-	// tight) or defeat its own purpose (too loose). 3x tolerates two fully
-	// missed cycles before failing closed; 2x on the gap bound means one
-	// missed cycle inside a window is still tolerated, two is not.
-	// Calibration-pending, same as every other constant of this shape in
-	// this codebase (design.md §8.5).
+	// Freshness bounds are multiples of the interval they bound, so ordinary
+	// jitter never trips them. 3x tolerates two missed cycles before failing
+	// closed; 2x on the gap bound tolerates one missed cycle inside a window.
+	// The multipliers are not yet calibrated.
 	maxSampleAge := 3 * resolved.Runtime.CollectionInterval
 	maxSampleGap := 2 * resolved.Runtime.CollectionInterval
 	maxDiscoveryAge := 3 * resolved.Runtime.DiscoveryInterval

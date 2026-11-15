@@ -326,7 +326,7 @@ func TestReconcile_skipsWhenDiscoveryStale(t *testing.T) {
 	a, act, journalOut := newReconcileTestAgent(t, time.Now().Add(-time.Hour)) // far past maxDiscoveryAge
 	a.reconcile(context.Background())
 	if len(act.calls) != 0 {
-		t.Errorf("Actuator.Apply called %d times, want 0 — a stale discovery snapshot must never reach the Decider (issue #15)", len(act.calls))
+		t.Errorf("Actuator.Apply called %d times, want 0 — a stale discovery snapshot must never reach the Decider", len(act.calls))
 	}
 	assertSingleJournalReason(t, journalOut, "discovery_stale")
 }
@@ -347,7 +347,7 @@ func TestReconcile_proceedsWhenDiscoveryFresh(t *testing.T) {
 		t.Errorf("Actuator.Apply called %d times, want 1 — a fresh discovery snapshot must not be blocked", len(act.calls))
 	}
 	if journalOut.Len() == 0 {
-		t.Error("journal is empty on a normal reconcile — every cycle must emit a record, discovery_stale or otherwise (design.md §4.3)")
+		t.Error("journal is empty on a normal reconcile — every cycle must emit a record, discovery_stale or otherwise")
 	}
 	if strings.Contains(journalOut.String(), `"discovery_stale"`) {
 		t.Error("journal contains a discovery_stale record on a fresh-discovery cycle that reached the Decider")
@@ -432,12 +432,9 @@ func TestReconcile_skipsImmediatelyAfterFatalDiscoveryError(t *testing.T) {
 // discovery cycle apart, after "missing-disk" detaches — the config never
 // changes between the two calls, only the VM's live inventory does. That
 // is what makes the second discover() call here a genuine *runtime*
-// mismatch (docs/design.md §4.1) rather than a cold start: a real process
-// never mutates cfg.Disks mid-run (config hot-reload is out of scope,
-// docs/TODO.md), so a test simulating the mismatch must vary the VM
-// instead — mutating cfg.Disks between two discover() calls, as an earlier
-// version of this test did, cannot happen outside a test and made the test
-// pass for the wrong reason.
+// mismatch rather than a cold start: a real process never mutates cfg.Disks
+// mid-run (there is no config hot-reload), so the test varies the VM
+// instead.
 func vmWithGoodAndMissingDisk() *compute.VirtualMachine {
 	return &compute.VirtualMachine{Name: "vm-1", VMType: "t1", Disks: []compute.StorageDisk{
 		{Alias: "good", DeviceName: "good", Class: compute.ClassIndependent, DiskName: "vm-1-good"},
@@ -491,7 +488,7 @@ func TestReconcile_degradesPartiallyWhenASelectedDiskIsRemovedAtRuntime(t *testi
 		t.Errorf("degraded = %+v, want exactly [{missing-disk %s}]", a.degraded, registry.ReasonSelectedNotFound)
 	}
 
-	// Degradation must never flip the binary verdict (docs/design.md §4.1).
+	// Degradation must never flip the binary verdict.
 	// discover() doesn't own config_valid/source_reachable; set them
 	// directly so Ready() isn't false for an unrelated reason.
 	a.readiness.SetConfigValid(true)
@@ -727,11 +724,10 @@ func TestDiscover_populatesUnmanagedFromDisksOutsideSelection(t *testing.T) {
 	for _, d := range a.unmanaged {
 		gotNames[d.DeviceName] = true
 	}
-	// Before this fix, discover() never retained anything about a disk it
-	// did not select — reconcile() had no way to know churn/noname existed
-	// at all, let alone how much IOPS they were consuming (D4/US-009).
+	// Disks discover() did not select must still be retained so reconcile()
+	// can count their IOPS consumption.
 	if len(a.unmanaged) != 2 || !gotNames["churn"] || !gotNames["noname"] {
-		t.Errorf("unmanaged = %+v, want exactly [churn, noname] — every VM disk outside the managed set (docs/design.md §4.6)", a.unmanaged)
+		t.Errorf("unmanaged = %+v, want exactly [churn, noname] — every VM disk outside the managed set", a.unmanaged)
 	}
 }
 
@@ -758,11 +754,9 @@ func (s fixedOpsSource) Sample(_ context.Context, disks []metrics.DiskRef) ([]me
 }
 func (fixedOpsSource) Kind() metrics.SourceKind { return metrics.SourceGuest }
 
-// TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption is D4/US-009's
-// regression test: docs/design.md §4.6 defines VM headroom from "other
-// disks", not "other managed disks", but until this fix reconcile() only
-// ever analyzed the managed set — an unmanaged sibling doing real, sustained
-// I/O was silently treated as if it consumed zero of the shared pool.
+// TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption asserts that VM
+// headroom subtracts the sustained I/O of an unmanaged sibling, because every
+// disk on the VM shares the same IOPS pool.
 func TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption(t *testing.T) {
 	dataDisk := registry.ManagedDisk{
 		Disk:   compute.StorageDisk{Alias: "data", DeviceName: "data", Class: compute.ClassIndependent, DiskName: "vm-1-data", IOPS: 1000},
@@ -824,11 +818,10 @@ func TestReconcile_vmHeadroomCountsUnmanagedSiblingConsumption(t *testing.T) {
 	if rec.Disk != "vm-1-data" {
 		t.Fatalf("journal record is for %q, want vm-1-data", rec.Disk)
 	}
-	// Before this fix, siblingP95 only ever summed the managed set (one
-	// disk here, itself excluded), so vm_headroom_iops always read the full
-	// 6000 pool no matter how loaded churn was.
+	// The only managed disk is itself excluded from siblingP95, so the
+	// headroom reduction must come from the unmanaged churn disk.
 	if want := int64(6000 - 900); rec.VMHeadroomIOPS != want {
-		t.Errorf("vm_headroom_iops = %d, want %d (6000 pool - 900 unmanaged sibling p95, docs/design.md §4.6)", rec.VMHeadroomIOPS, want)
+		t.Errorf("vm_headroom_iops = %d, want %d (6000 pool - 900 unmanaged sibling p95)", rec.VMHeadroomIOPS, want)
 	}
 }
 
@@ -864,10 +857,10 @@ func buildSaturatedSamples(diskID string, base time.Time, specIOPS float64, queu
 	return out
 }
 
-// TestReconcile_unmeasurableSiblingBlocksScaleUp asserts docs/design.md
-// §4.6 headroom must not substitute zero for a sibling's unmeasured demand.
-// Blocking lands on ActionNoAction, not ActionVMCapReached, so a measurement
-// gap never aliases onto the "add vCPU" signal (design.md §7.3).
+// TestReconcile_unmeasurableSiblingBlocksScaleUp asserts VM headroom does not
+// substitute zero for a sibling's unmeasured demand. Blocking lands on
+// ActionNoAction, not ActionVMCapReached, so a measurement gap never aliases
+// onto the "add vCPU" signal.
 func TestReconcile_unmeasurableSiblingBlocksScaleUp(t *testing.T) {
 	dataDisk := registry.ManagedDisk{
 		Disk:   compute.StorageDisk{Alias: "data", DeviceName: "data", Class: compute.ClassIndependent, DiskName: "vm-1-data", IOPS: 1000},
@@ -975,9 +968,9 @@ func vmWithTwoIndependentDisks() *compute.VirtualMachine {
 }
 
 // TestReconcile_unresolvedGuestPathSiblingBlocksScaleUp covers the same
-// docs/design.md §4.6 invariant as the test above, but drives a sibling
-// into the unmeasured state via a real discover() call (unresolved guest
-// path) instead of a hand-built sample set.
+// invariant as the test above, but drives a sibling into the unmeasured
+// state via a real discover() call (unresolved guest path) instead of a
+// hand-built sample set.
 func TestReconcile_unresolvedGuestPathSiblingBlocksScaleUp(t *testing.T) {
 	client := &stubClient{
 		vm: vmWithTwoIndependentDisks(),
@@ -1119,12 +1112,11 @@ func TestDiscover_unmatchedSelectedDeviceAtColdStartIsFatal(t *testing.T) {
 		"missing-disk": nil,
 	}}
 	if !a.lastDiscoverySuccess.IsZero() {
-		t.Fatal("test setup: lastDiscoverySuccess must be zero — this test is specifically the cold-start case (docs/design.md §4.1)")
+		t.Fatal("test setup: lastDiscoverySuccess must be zero — this test is specifically the cold-start case")
 	}
-	// Start from a previously healthy readiness state, and a managed set
-	// from... somewhere else entirely (this agent never discovered
-	// anything) — proving invalidateManaged leaves whatever was there
-	// untouched is the point, not that it's realistic cold-start state.
+	// Seed a healthy readiness state and a hand-built managed set (this agent
+	// never discovered anything): the test asserts invalidateManaged leaves
+	// that set untouched, not that this is realistic cold-start state.
 	a.readiness.SetConfigValid(true)
 	a.readiness.SetDiscoverySucceeded(true)
 	a.readiness.SetSourceReachable(true)
@@ -1136,7 +1128,7 @@ func TestDiscover_unmatchedSelectedDeviceAtColdStartIsFatal(t *testing.T) {
 
 	err := a.discover(context.Background())
 	if err == nil {
-		t.Fatal("discover succeeded despite an unmatched disks.selected device_name on the first discovery attempt")
+		t.Fatal("discover succeeded despite an unmatched disks.policies device_name on the first discovery attempt")
 	}
 	if !strings.Contains(err.Error(), "missing-disk") {
 		t.Errorf("err = %v, want it to name the unmatched device_name", err)
@@ -1145,7 +1137,7 @@ func TestDiscover_unmatchedSelectedDeviceAtColdStartIsFatal(t *testing.T) {
 		t.Errorf("managed = %+v, want the prior snapshot left untouched, never replaced by a partial one", a.managed)
 	}
 	if a.readiness.Ready() {
-		t.Error("readiness.Ready() = true after a fatal cold-start disks.selected mismatch, want false")
+		t.Error("readiness.Ready() = true after a fatal cold-start disks.policies mismatch, want false")
 	}
 }
 

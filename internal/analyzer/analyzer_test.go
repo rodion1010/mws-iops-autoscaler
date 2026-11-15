@@ -102,7 +102,7 @@ func TestAnalyze_gatePassesButNoSignal_notSaturated(t *testing.T) {
 		t.Fatalf("test setup: IOPSUtilization = %v, want >= threshold", got.IOPSUtilization)
 	}
 	if got.Saturated {
-		t.Error("Saturated = true, want false — a disk at 100% utilization with an empty queue and flat latency is efficient (docs/design.md §4.4)")
+		t.Error("Saturated = true, want false — a disk at 100% utilization with an empty queue and flat latency is efficient")
 	}
 }
 
@@ -121,7 +121,7 @@ func TestAnalyze_queueDepthAloneTriggers(t *testing.T) {
 		t.Fatal("test setup: ThrottleDetected = true, want isolated queue-depth trigger only")
 	}
 	if !got.Saturated {
-		t.Error("Saturated = false, want true — sustained queue depth alone must trigger (§4.4)")
+		t.Error("Saturated = false, want true — sustained queue depth alone must trigger")
 	}
 }
 
@@ -149,7 +149,7 @@ func TestAnalyze_latencyAloneTriggers(t *testing.T) {
 		t.Fatal("test setup: baseline should still be established from cycle 1")
 	}
 	if !got.Saturated {
-		t.Error("Saturated = false, want true — latency sustained above baseline × multiplier must trigger (§4.4)")
+		t.Error("Saturated = false, want true — latency sustained above baseline × multiplier must trigger")
 	}
 }
 
@@ -173,7 +173,7 @@ func TestAnalyze_throttleAloneTriggers(t *testing.T) {
 		t.Fatal("test setup: ThrottleDetected = false, want true")
 	}
 	if !got.Saturated {
-		t.Error("Saturated = false, want true — throttling_detected alone must trigger (§4.4)")
+		t.Error("Saturated = false, want true — throttling_detected alone must trigger")
 	}
 }
 
@@ -204,7 +204,7 @@ func TestAnalyze_baselineEstablishesEvenWhenSaturatedFromStart(t *testing.T) {
 		t.Fatal("test setup: expected this window to be saturated (queue-driven)")
 	}
 	if !got.BaselineEstablished {
-		t.Error("BaselineEstablished = false, want true — establishment must not be blocked by saturation (docs/design.md §4.4)")
+		t.Error("BaselineEstablished = false, want true — establishment must not be blocked by saturation")
 	}
 }
 
@@ -231,7 +231,7 @@ func TestAnalyze_baselineFrozenWhileSaturatedThenResumes(t *testing.T) {
 		t.Fatal("test setup: cycle 2 must still be saturated")
 	}
 	if second.Baseline.P95 != baselineAfterCycle1 {
-		t.Errorf("Baseline.P95 changed from %v to %v while saturated — must be frozen against updates (§4.4)",
+		t.Errorf("Baseline.P95 changed from %v to %v while saturated — must be frozen against updates",
 			baselineAfterCycle1, second.Baseline.P95)
 	}
 
@@ -267,7 +267,7 @@ func TestAnalyze_underutilizedOnSustainedQuiet(t *testing.T) {
 		t.Error("Saturated = true, want false for a fully quiet window")
 	}
 	if !got.Underutilized {
-		t.Error("Underutilized = false, want true — every signal quiet, sustained over ScaleDownWindow (US-010)")
+		t.Error("Underutilized = false, want true — every signal quiet, sustained over ScaleDownWindow")
 	}
 }
 
@@ -320,7 +320,7 @@ func TestAnalyze_servedIOPSAndQueueGrowthRate(t *testing.T) {
 		t.Errorf("QueueGrowthRate = %v, want %v", got.QueueGrowthRate, wantRate)
 	}
 	if !got.QueueGrowthRateValid {
-		t.Error("QueueGrowthRateValid = false, want true — guest samples are always ops-denominated (docs/design.md §4.2)")
+		t.Error("QueueGrowthRateValid = false, want true — guest samples are always ops-denominated")
 	}
 }
 
@@ -479,7 +479,7 @@ func TestAnalyze_staleSamplesNeverSaturate(t *testing.T) {
 		t.Fatal("test setup: Fresh = true, want false (10m age against a 1m MaxSampleAge)")
 	}
 	if got.Saturated {
-		t.Error("Saturated = true, want false — stale evidence must never drive a decision (issue #15)")
+		t.Error("Saturated = true, want false — stale evidence must never drive a decision")
 	}
 }
 
@@ -494,7 +494,7 @@ func TestAnalyze_staleSamplesNeverUnderutilize(t *testing.T) {
 		t.Fatal("test setup: Fresh = true, want false")
 	}
 	if got.Underutilized {
-		t.Error("Underutilized = true, want false — stale evidence must never drive a decision (issue #15)")
+		t.Error("Underutilized = true, want false — stale evidence must never drive a decision")
 	}
 }
 

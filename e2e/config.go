@@ -101,10 +101,9 @@ func SmokeTarget() (Target, error) {
 
 // SmokeIndependentTarget builds the persistent PR-tier target for the
 // independent disk permanently attached to the same VM as SmokeTarget — it
-// is what lets the PR tier exercise the independent write path
-// (docs/design.md §4.7, §8.3) instead of only the full tier's ephemeral
-// disk. SSH access is shared with SmokeTarget since both point at the same
-// VM; only the disk differs.
+// is what lets the PR tier exercise the independent write path instead of
+// only the full tier's ephemeral disk. SSH access is shared with SmokeTarget
+// since both point at the same VM; only the disk differs.
 func SmokeIndependentTarget() (Target, error) {
 	env, err := requiredEnv(
 		"E2E_VM_NAME",

@@ -56,8 +56,8 @@ func TestDecide_vmCapReached(t *testing.T) {
 }
 
 // A disk pinned at its own max_iops while the VM pool has room must not
-// report vm_cap_reached: that action drives the "add vCPU" alert (design.md
-// §7.3), and the fix here is raising max_iops, not the VM.
+// report vm_cap_reached: that action drives the "add vCPU" alert, and the fix
+// here is raising max_iops, not the VM.
 func TestDecide_saturatedAtPolicyMaxWithAmplePoolIsNotVMCap(t *testing.T) {
 	d := NewPolicyDecider()
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 10, QueueGrowthRateValid: true, ServedIOPS: 2000}
@@ -72,16 +72,10 @@ func TestDecide_saturatedAtPolicyMaxWithAmplePoolIsNotVMCap(t *testing.T) {
 	}
 }
 
-// TestDecide_siblingDemandUnknownBlocksScaleUp is issue #56's regression
-// test: a sibling with no reliable sample folds its real consumption into
-// SiblingP95IOPS as zero rather than reporting it as unknown, so ceiling
-// alone can never distinguish "siblings measured idle" from "siblings not
-// measured at all." Even with ample nominal headroom, an unmeasured sibling
-// must block scale-up rather than let it through on an understated ceiling.
-// ActionNoAction, not ActionVMCapReached, is the load-bearing half of this
-// assertion: the latter drives iops_autoscaler_vm_cap_reached, documented as
-// "actionable — add vCPU" (design.md §7.3), which a measurement gap must
-// never alias onto.
+// TestDecide_siblingDemandUnknownBlocksScaleUp: an unmeasured sibling counts
+// as zero in SiblingP95IOPS, so even ample nominal headroom must not let a
+// scale-up through. The action must be ActionNoAction, not
+// ActionVMCapReached: a measurement gap must not raise the "add vCPU" signal.
 func TestDecide_siblingDemandUnknownBlocksScaleUp(t *testing.T) {
 	d := NewPolicyDecider()
 	a := analyzer.Analysis{Saturated: true, QueueGrowthRate: 10, QueueGrowthRateValid: true, ServedIOPS: 900}
@@ -126,9 +120,8 @@ func TestDecide_vmPoolContendedBlocksScaleDown(t *testing.T) {
 	}
 }
 
-// TestDecide_vmPoolSlackAllowsScaleDown confirms the new gate above doesn't
-// regress the ordinary case: ample headroom still lets a genuinely quiet
-// disk scale down.
+// TestDecide_vmPoolSlackAllowsScaleDown: with ample VM headroom a genuinely
+// quiet disk still scales down.
 func TestDecide_vmPoolSlackAllowsScaleDown(t *testing.T) {
 	d := NewPolicyDecider()
 	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}
@@ -139,11 +132,9 @@ func TestDecide_vmPoolSlackAllowsScaleDown(t *testing.T) {
 	}
 }
 
-// TestDecide_atPolicyMaxWithAmplePoolStillScalesDown is the regression for
-// the vm_pool_contended check once wrongly using the policy/platform-capped
-// ceiling instead of raw VM headroom: a disk sitting at its own max_iops
-// has ceiling <= current regardless of VM load, which must never read as
-// contention when the VM pool itself has plenty of room.
+// TestDecide_atPolicyMaxWithAmplePoolStillScalesDown: a disk sitting at its
+// own max_iops has ceiling <= current regardless of VM load, which must not
+// read as VM-pool contention when the pool has plenty of room.
 func TestDecide_atPolicyMaxWithAmplePoolStillScalesDown(t *testing.T) {
 	d := NewPolicyDecider()
 	a := analyzer.Analysis{Underutilized: true, IOPSP95Down: 100, EffectiveDemandP95Down: 100}

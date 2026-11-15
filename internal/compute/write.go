@@ -197,7 +197,6 @@ func UpdateDependentDiskIOPS(ctx context.Context, c Client, vmName, deviceName s
 }
 
 // directionPreserved independently prevents an update from crossing against its intended direction.
-// It remains useful if strict current-IOPS equality is later relaxed.
 func directionPreserved(expectedCurrent, target, live int64) bool {
 	switch {
 	case target > expectedCurrent:

@@ -34,19 +34,19 @@ const e2eScaleUpWindow = 30 * time.Second
 // margin without materially slowing the scale-down scenarios down.
 const e2eScaleDownWindow = 60 * time.Second
 
-// defaultDiscoveryInterval is agentConfigYAML's discovery_interval, unchanged
-// since before DisksSpec existed. Every existing scenario relies on it.
+// defaultDiscoveryInterval is agentConfigYAML's discovery_interval, used by
+// every scenario that does not need to observe rediscovery.
 const defaultDiscoveryInterval = 5 * time.Minute
 
 // discoveryScenarioInterval is for scenarios that must observe rediscovery
 // within a test's lifetime (e.g. an attach picked up without a restart).
 // main.go derives reconcile()'s fail-closed staleness guard, maxDiscoveryAge,
 // as 3x discovery_interval, so this cannot become defaultDiscoveryInterval:
-// doing so would shrink every existing scenario's margin from 15 minutes
-// (never observed to fire) to 90 seconds, risking a spurious failure in the
-// multi-minute P1-P5 load scenarios if any single discovery cycle ever
-// stalled that long. 30s keeps that margin at 90s — ample slack for a single
-// compute-API call — while bounding how long a discovery scenario waits.
+// that would shrink the other scenarios' margin from 15 minutes to 90
+// seconds, risking a spurious failure in the multi-minute load scenarios if
+// one discovery cycle stalled that long. 30s keeps a 90s margin — ample for
+// a single compute-API call — while bounding how long a discovery scenario
+// waits.
 const discoveryScenarioInterval = 30 * time.Second
 
 // DisksSpec configures the generated agent config's disks: block, mirroring
@@ -58,8 +58,8 @@ type DisksSpec struct {
 	Exclude  []string
 }
 
-// SelectedDisksSpec is agentConfigYAML's original, still-default shape: every
-// name in mode: selected.
+// SelectedDisksSpec is agentConfigYAML's default shape: every name in
+// mode: selected.
 func SelectedDisksSpec(deviceNames ...string) DisksSpec {
 	return DisksSpec{Mode: "selected", Selected: deviceNames}
 }
@@ -262,8 +262,7 @@ func Cleanup(ctx context.Context, client compute.Client, t Target) error {
 
 // InstallAgent copies localBinaryPath and a generated config to t's guest OS,
 // selecting exactly t.DeviceName at the production discovery_interval
-// default — the shape every existing scenario relies on, unchanged by
-// InstallAgentWithDisks's addition.
+// default.
 func InstallAgent(ctx context.Context, t Target, localBinaryPath string) error {
 	return InstallAgentWithDisks(ctx, t, localBinaryPath, SelectedDisksSpec(t.DeviceName), defaultDiscoveryInterval)
 }
@@ -300,17 +299,16 @@ func InstallAgentWithDisks(ctx context.Context, t Target, localBinaryPath string
 // agentLogPath is a stable path (unlike RunBackground's auto-derived one) so
 // a scenario that expects the agent to keep running can still read back why
 // it didn't (FetchAgentLog) — e.g. a cold-start-fatal discovery exits the
-// whole process almost immediately (docs/design.md §4.1).
+// whole process almost immediately.
 const agentLogPath = remoteWorkDir + "/agent.log"
 
 // StartAgent confines mutable state to the disposable remote work
-// directory and appends US-013's -dry-run flag when dryRun is set, so the
+// directory and appends the -dry-run flag when dryRun is set, so the
 // process discovers, samples and decides but applies no change.
 //
 // Neither MWS_PROJECT nor MWS_ZONE is forwarded: local mode resolves its
-// own project and zone from the VM's instance metadata, and it no longer
-// reads either variable at all, so forwarding one would only pass an
-// environment override the agent doesn't act on.
+// own project and zone from the VM's instance metadata and does not read
+// either variable.
 func StartAgent(ctx context.Context, t Target, dryRun bool) error {
 	cmd := fmt.Sprintf(
 		"%s/mws-iops-autoscaler -config %s/config.yaml -state-dir %s/state -journal %s/journal.jsonl -listen :9435",
@@ -491,9 +489,8 @@ func FetchJournal(ctx context.Context, t Target) string {
 
 // journalRecord decodes only the journal fields e2e scenarios need to
 // assert on. It mirrors internal/journal.Record's field names rather than
-// importing that type — the journal is an external contract (design.md
-// §7.2, internal/journal.go's own doc comment), so an e2e scenario reads it
-// the same way any other external consumer would.
+// importing that type — the journal is an external contract, so an e2e
+// scenario reads it the same way any other external consumer would.
 type journalRecord struct {
 	Disk           string  `json:"disk"`
 	Action         string  `json:"action"`
@@ -557,9 +554,9 @@ func WaitForJournalRecord(ctx context.Context, t Target, timeout, pollInterval t
 
 // WaitForDecision polls the remote decision journal until a record shows
 // wantAction, or fails at timeout. This is how a dry run's decision is
-// observed: US-013 applies no change, so CurrentIOPS/WaitForScaleUp have
+// observed: dry-run applies no change, so CurrentIOPS/WaitForScaleUp have
 // nothing to detect, but the journal is written unconditionally before
-// actuation (design.md §7.2) whether or not the write itself is real.
+// actuation whether or not the write itself is real.
 func WaitForDecision(ctx context.Context, t Target, timeout, pollInterval time.Duration, wantAction string) error {
 	_, err := WaitForJournalRecord(ctx, t, timeout, pollInterval, func(rec journalRecord) bool {
 		return rec.Action == wantAction
@@ -611,9 +608,9 @@ func countActuatingTransitions(recs []journalRecord) int {
 }
 
 // AssertBoundedFlapping fetches the current journal and fails if the number
-// of alternating scale_up/scale_down actuations exceeds maxTransitions
-// (design.md §8.3's "no flapping" scenario). A point-in-time check, called
-// after a scenario's own load pattern has already run to completion.
+// of alternating scale_up/scale_down actuations exceeds maxTransitions. A
+// point-in-time check, called after a scenario's own load pattern has
+// already run to completion.
 func AssertBoundedFlapping(ctx context.Context, t Target, maxTransitions int) error {
 	recs, err := journalRecords(ctx, t)
 	if err != nil {
@@ -661,7 +658,7 @@ func runAgentScenarioWithDisks(t *testing.T, ctx context.Context, target Target,
 // returning an error instead of calling t.Fatalf — the primitive an xfail
 // scenario needs (see xfail's doc comment), since Go gives no way to catch a
 // *testing.T failure raised from inside a test. runAgentScenarioWithDisks is
-// the *testing.T-facing wrapper every other scenario keeps using unchanged.
+// its *testing.T-facing wrapper.
 func runAgentScenarioWithDisksErr(ctx context.Context, target Target, project string, dryRun bool, disks DisksSpec, discoveryInterval time.Duration, run func(agentStarted time.Time) error) error {
 	binPath, err := BuildAgentBinary(ctx, "..")
 	if err != nil {

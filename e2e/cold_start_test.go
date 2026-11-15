@@ -9,19 +9,13 @@ import (
 	"time"
 )
 
-// TestSmoke_Decisions_ScaleUpFromColdStart drives load against the disk
-// before the agent ever starts, so the agent's very first samples already
-// show saturation with no established baseline yet — the closed-workload
-// branch of demand() (internal/decider.go) requires BaselineEstablished,
-// and internal/analyzer.go's baseline logic only starts forming one once
-// samples begin arriving. This is the one scenario in this package where
-// DriveLoad genuinely precedes runAgentScenario rather than being issued
-// from inside its callback.
+// TestSmoke_Decisions_ScaleUpFromColdStart drives load before the agent
+// starts, so its first samples already show saturation with no established
+// baseline. The closed-workload branch of demand() requires
+// BaselineEstablished, which forms only once samples arrive.
 //
-// Do not move the DriveLoad call below into runAgentScenario's callback:
-// that would start the load after the agent is already running, which is
-// exactly TestSmoke_Decisions_ScaleUpOnSaturation — this scenario exists
-// specifically to exercise the opposite ordering.
+// DriveLoad must stay before runAgentScenario: issuing it inside the callback
+// is TestSmoke_Decisions_ScaleUpOnSaturation's ordering, not this scenario's.
 func TestSmoke_Decisions_ScaleUpFromColdStart(t *testing.T) {
 	target, err := SmokeTarget()
 	if err != nil {

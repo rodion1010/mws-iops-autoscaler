@@ -466,8 +466,8 @@ func TestRegression_Preflight_StopStaleAgentFailsClosedOnBrokenAbsenceCheck(t *t
 
 // TestRegression_Config_SelectedDisksRendersEveryDeviceName guards the
 // disks: selected block InstallAgent's default path relies on — a
-// regression here would silently change what every existing scenario's
-// agent manages.
+// regression here would silently change what every default-config
+// scenario's agent manages.
 func TestRegression_Config_SelectedDisksRendersEveryDeviceName(t *testing.T) {
 	got := disksBlockYAML(SelectedDisksSpec("boot", "data"))
 	want := "disks:\n  mode: selected\n  policies:\n    boot: {}\n    data: {}\n"
@@ -502,7 +502,7 @@ func TestRegression_Config_AutoDiscoveryRendersExcludedNames(t *testing.T) {
 
 // TestRegression_Config_DefaultDiscoveryIntervalUnchangedByDisksSpec pins
 // agentConfigYAML's discovery_interval at defaultDiscoveryInterval — the
-// value main.go's maxDiscoveryAge is derived from for every existing
+// value main.go's maxDiscoveryAge is derived from for every default-config
 // scenario. See discoveryScenarioInterval's comment for why a scenario
 // needing faster rediscovery must opt in via agentConfigYAMLWithDisks
 // instead of this constant changing.
@@ -523,16 +523,14 @@ func TestRegression_Config_DefaultDiscoveryIntervalUnchangedByDisksSpec(t *testi
 // real internal/config.LoadAndValidate — the same call the agent itself
 // makes at startup (cmd/mws-iops-autoscaler/main.go). A config rejected
 // there exits before the process ever reaches discovery, which would fail a
-// scenario relying on it for a reason unrelated to what it's testing —
-// discovery_test.go's disks.exclude cases in particular have never gone
-// through the real validator before this test existed.
+// scenario relying on it for a reason unrelated to what it's testing.
 func TestRegression_Config_GeneratedYAMLPassesLoadAndValidate(t *testing.T) {
 	cases := map[string]struct {
 		disks             DisksSpec
 		discoveryInterval time.Duration
 	}{
 		// InstallAgent's actual default: agentConfigYAML at
-		// defaultDiscoveryInterval, the config every existing scenario
+		// defaultDiscoveryInterval, the config every default-config scenario
 		// ships — not a stand-in built from the *WithDisks primitives.
 		"selected (InstallAgent's default)":              {SelectedDisksSpec("mws-data"), defaultDiscoveryInterval},
 		"auto-discovery, no exclude (A1's shape)":        {AutoDiscoveryDisksSpec(), discoveryScenarioInterval},

@@ -16,11 +16,11 @@ permissions:
 
 jobs:
   full:
-    # Only the private CI repository has the runner and its variables (docs/ci-cd.md, "Public mirror").
+    # Only the private CI repository has the runner and its variables; the public mirror skips this job.
     if: vars.MWS_PROJECT != ''
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
-    # Budget derivation and the job-level-kill/backstop-step split are in
-    # docs/ci-cd.md's "Timeout budgets" — recompute before changing this.
+    # A job-level kill runs no cleanup, so this must exceed the sum of every TestFull_* worst-case
+    # context plus provisioning and teardown, and stay below the sweeper's TTL floor.
     timeout-minutes: 96
     steps:
       # Pin third-party actions because this runner has cloud credentials.
@@ -53,11 +53,11 @@ jobs:
           E2E_SSH_USER: ${{ vars.E2E_SSH_USER }}
           E2E_SSH_KEY_PATH: ${{ runner.temp }}/e2e_ssh_key
         # The harness builds the agent dynamically, so cached test results are unsafe.
-        # -timeout budget: docs/ci-cd.md's "Timeout budgets".
+        # -timeout stays below timeout-minutes so go test, not the job kill, stops a hung suite.
         run: go test -count=1 -timeout=84m -tags e2e ./e2e/... -run 'TestFull|TestRegression' -v
 
       # Backstop for go test's own -timeout killing the binary before
-      # TestMain's teardown runs. See docs/ci-cd.md's "Timeout budgets".
+      # TestMain's teardown runs.
       - name: Backstop teardown (in case go test's own -timeout fired before TestMain's teardown ran)
         timeout-minutes: 8
         if: always()

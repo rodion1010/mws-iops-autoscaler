@@ -7,8 +7,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Duration wraps time.Duration so it can be written in config as "5m", "30s",
-// matching every example in docs/configuration.md, instead of nanoseconds.
+// Duration wraps time.Duration so it can be written in config as "5m", "30s"
+// instead of nanoseconds.
 type Duration time.Duration
 
 func (d Duration) String() string {

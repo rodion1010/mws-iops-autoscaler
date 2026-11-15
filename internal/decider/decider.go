@@ -44,15 +44,10 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 
 	switch {
 	case a.Saturated:
-		// An unmeasurable sibling's real consumption is folded into
-		// SiblingP95IOPS as zero (analyzer.Analysis's zero value), not
-		// reported as unknown, so ceiling itself may already overstate true
-		// headroom — checked ahead of the ceiling comparison below rather
-		// than folded into it. ActionNoAction, not ActionVMCapReached: the
-		// latter drives iops_autoscaler_vm_cap_reached, documented as
-		// "actionable — add vCPU" (design.md §7.3) — a missing/stale
-		// sibling sample is a different remediation (fix that disk's
-		// metrics path) and must not alias onto that signal.
+		// An unmeasurable sibling counts as zero in SiblingP95IOPS, so the
+		// ceiling may overstate headroom. ActionNoAction, not
+		// ActionVMCapReached: vm_cap_reached means "add vCPU", while a
+		// missing sibling sample needs that disk's metrics path fixed.
 		if vm.SiblingDemandUnknown {
 			return withReason(base, ActionNoAction, "sibling_demand_unmeasurable")
 		}
@@ -83,12 +78,9 @@ func (pd *PolicyDecider) Decide(diskID string, current int64, a analyzer.Analysi
 
 	case a.Underutilized:
 		base.Demand = a.EffectiveDemandP95Down
-		// A quiet reading here can be VM-pool contention, not real idleness
-		// (design.md §4.6) — mirrors Saturated's own VM-awareness above.
-		// Raw VM headroom, not the policy/platform-capped ceiling: a disk
-		// already sitting at its own max_iops has ceiling <= current too,
-		// with no VM contention at all — that must not look the same as a
-		// pool a busy sibling has actually exhausted.
+		// A quiet reading can be VM-pool contention, not real idleness.
+		// Raw VM headroom, not ceiling: a disk at its own max_iops has
+		// ceiling <= current without any VM contention.
 		if vm.SiblingDemandUnknown {
 			return withReason(base, ActionNoAction, "sibling_demand_unmeasurable")
 		}

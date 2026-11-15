@@ -97,7 +97,7 @@ func independentManaged() registry.ManagedDisk {
 	}
 }
 
-// The disk-update endpoint 403s for a VM-owned disk (docs/platform-reference.md).
+// The disk-update endpoint returns 403 for a VM-owned disk.
 // A dependent scale-up must never go near it.
 func TestIntegration_DependentWriteNeverCallsDiskUpdateEndpoint(t *testing.T) {
 	f := platformfake.New(t)
@@ -260,7 +260,7 @@ func TestIntegration_ServerSideEtagConflictForcesRediscovery(t *testing.T) {
 			generationAfter := a.generation
 			a.mu.Unlock()
 			if generationAfter == generationBefore {
-				t.Errorf("discovery generation unchanged after a server-side etag conflict — the conflict must force an immediate rediscovery (and thereby abort the rest of the reconcile cycle), not wait for the next scheduled discovery tick (issue #38)")
+				t.Errorf("discovery generation unchanged after a server-side etag conflict — the conflict must force an immediate rediscovery (and thereby abort the rest of the reconcile cycle), not wait for the next scheduled discovery tick")
 			}
 		})
 	}

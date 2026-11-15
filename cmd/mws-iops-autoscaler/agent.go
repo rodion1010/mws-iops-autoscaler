@@ -54,10 +54,10 @@ type Agent struct {
 	mu       sync.Mutex
 	managed  []registry.ManagedDisk
 	degraded []registry.Degradation
-	// unmanaged is every other disk discovered on the VM this cycle — never
-	// decided or actuated on, sampled and analyzed in reconcile() purely so
-	// its measured consumption folds into siblingP95 (design.md §4.6: VM
-	// headroom is "other disks", not "other managed disks" — US-009).
+	// unmanaged is every other disk discovered on the VM this cycle. It is
+	// never decided or actuated on; reconcile samples and analyzes it only so
+	// its consumption counts toward siblingP95, because VM headroom is
+	// reduced by every other disk on the VM, managed or not.
 	unmanaged            []compute.StorageDisk
 	iopsPool             int64
 	lastDiscoverySuccess time.Time
@@ -114,16 +114,15 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // discover refreshes managed disks and invalidates the snapshot on fatal discovery errors.
 //
-// An unresolved disks.selected/disks.exclude name (registry.Degradation) is
+// An unresolved disks.policies/disks.exclude name (registry.Degradation) is
 // fatal only on the very first discovery attempt of this process's life —
 // managing a silently partial set with no prior successful discovery to
-// fall back to would diverge from operator intent with nothing to show for
-// it (docs/design.md §4.1). Once at least one discovery has already
-// succeeded, the same mismatch degrades only the unresolved name: the rest
+// fall back to would diverge from operator intent. Once at least one
+// discovery has succeeded, the same mismatch degrades only the unresolved name: the rest
 // of the managed set keeps being managed, reported via
 // health.Readiness.SetDegradedDisks and the
 // iops_autoscaler_disk_configured_unmanaged gauge, neither of which flips
-// /readyz's binary verdict (docs/configuration.md §4.2).
+// /readyz's binary verdict.
 func (a *Agent) discover(ctx context.Context) error {
 	a.mu.Lock()
 	coldStart := a.lastDiscoverySuccess.IsZero()
@@ -149,7 +148,7 @@ func (a *Agent) discover(ctx context.Context) error {
 	if len(degraded) > 0 && coldStart {
 		a.readiness.SetDiscoverySucceeded(false)
 		a.invalidateManaged()
-		return fmt.Errorf("disks.%s: unresolved device_name(s) on the first discovery attempt: %s — refusing to manage a partial set before any discovery has succeeded (docs/design.md §4.1)",
+		return fmt.Errorf("disks.%s: unresolved device_name(s) on the first discovery attempt: %s — refusing to manage a partial set before any discovery has succeeded",
 			a.cfg.Disks.Mode, joinDegraded(degraded))
 	}
 
@@ -331,7 +330,7 @@ func (a *Agent) reconcile(ctx context.Context) {
 
 	// The age guard also catches a stuck discovery loop whose last call succeeded.
 	if age := now.Sub(lastDiscovery); lastDiscovery.IsZero() || age > a.maxDiscoveryAge {
-		log.Printf("reconcile: discovery snapshot stale (age=%s, max=%s) — skipping this cycle (issue #15)", age, a.maxDiscoveryAge)
+		log.Printf("reconcile: discovery snapshot stale (age=%s, max=%s) — skipping this cycle", age, a.maxDiscoveryAge)
 		a.journalDiscoveryStale(managed, now)
 		return
 	}
@@ -382,12 +381,11 @@ func (a *Agent) reconcile(ctx context.Context) {
 		diskID := m.Disk.DiskName
 		an := analyses[diskID]
 
-		// Sum sibling p95s over every disk on the VM, managed or not
-		// (docs/design.md §4.6: "other disks", not "other managed disks" —
-		// US-009); correlated bursts remain a documented approximation.
+		// Sum sibling p95s over every disk on the VM, managed or not;
+		// treating correlated bursts as additive p95s is an approximation.
 		// A sibling with no fresh sample yet contributes IOPSP95Down's zero
-		// value to the sum rather than its real, unknown consumption
-		// (issue #56) — siblingDemandUnknown flags that gap so Decide can
+		// value to the sum rather than its real, unknown consumption;
+		// siblingDemandUnknown flags that gap so Decide can
 		// fail closed instead of approving scale-up against headroom that
 		// might already be spent.
 		var siblingP95 float64
@@ -454,7 +452,7 @@ func (a *Agent) actuate(ctx context.Context, m registry.ManagedDisk, d decider.D
 
 	if !a.tracker.Healthy() {
 		// Fail closed while durable budget state is unhealthy.
-		log.Printf("actuate %s (%s): refusing to write — the change budget is unhealthy after a prior persistence failure, fail closed until restart (issue #10)", diskID, m.Disk.DeviceName)
+		log.Printf("actuate %s (%s): refusing to write — the change budget is unhealthy after a prior persistence failure, fail closed until restart", diskID, m.Disk.DeviceName)
 		return
 	}
 
@@ -614,7 +612,7 @@ func (a *Agent) reconcilePendingBudget(ctx context.Context) {
 	for _, ev := range pending {
 		m, ok := byIdentity[ev.DiskID]
 		if !ok {
-			log.Printf("reconcile budget: disk %s has a reservation pending from a previous run but is no longer managed — leaving it counted (fail closed, issue #10)", ev.DiskID)
+			log.Printf("reconcile budget: disk %s has a reservation pending from a previous run but is no longer managed — leaving it counted (fail closed)", ev.DiskID)
 			continue
 		}
 

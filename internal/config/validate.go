@@ -15,7 +15,7 @@ func Validate(cfg *Config) error {
 	var errs []error
 
 	if cfg.Mode != "local" {
-		return fmt.Errorf("mode: %q is not supported in this build (fleet mode ships in Phase 4)", cfg.Mode)
+		return fmt.Errorf("mode: %q is not supported in this build — only local mode is implemented", cfg.Mode)
 	}
 
 	errs = append(errs, validateDiskSelection(&cfg.Disks)...)
@@ -203,7 +203,7 @@ func validateAdvancedRanges(path string, a ResolvedAdvanced) []error {
 
 	// Relative latency is the only implemented mode; accepting others would silently misconfigure behavior.
 	if a.LatencyMode != "relative" {
-		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.mode: %q — only \"relative\" is implemented in this phase (design.md §2/§9.4)", path, a.LatencyMode))
+		errs = append(errs, fmt.Errorf("%s.advanced.saturation.latency.mode: %q — only \"relative\" is implemented", path, a.LatencyMode))
 	}
 	if finite("saturation.latency.baseline_multiplier", a.LatencyBaselineMultiplier) && a.LatencyBaselineMultiplier <= 1 {
 		// Values at or below one classify baseline noise as continuously elevated.
@@ -291,7 +291,7 @@ func validateDiskSelection(d *DisksSpec) []error {
 
 // validateDeviceName rejects a kernel device path and anything that is not
 // the exact device_name VM status reports — the same identifier used
-// inside Linux (docs/configuration.md §4.1). Only resolution against a
+// inside Linux. Only resolution against a
 // VM's discovered disks (internal/registry) can catch a value that merely
 // looks plausible but names no live disk.
 func validateDeviceName(name string) error {

@@ -8,11 +8,8 @@ import (
 
 // percentile returns the nearest-rank p-th percentile (p in [0,1]) of
 // values, which need not be pre-sorted — this function sorts a copy.
-// Nearest-rank (not linear interpolation) is chosen for determinism on
-// small windows: design.md's own examples (p95 on a handful of samples)
-// don't have enough points for interpolation to mean much more than
-// nearest-rank already gives, and nearest-rank never invents a value that
-// wasn't actually observed. Empty input returns zero.
+// Nearest-rank (not linear interpolation) is deterministic on small windows
+// and never returns a value that was not observed. Empty input returns zero.
 func percentile(values []time.Duration, p float64) time.Duration {
 	if len(values) == 0 {
 		return 0

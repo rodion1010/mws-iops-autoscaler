@@ -11,8 +11,8 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/compute"
 )
 
-// TestSmoke_Decisions_ScaleDownAfterQuiet covers docs/design.md §8.3's
-// "scale-down after quiet" row. The disk's normal resting baseline already
+// TestSmoke_Decisions_ScaleDownAfterQuiet asserts a scale-down after a quiet
+// period. The disk's normal resting baseline already
 // sits at min_iops, so there is nothing to scale down *from* there — this
 // scenario raises the limit directly first (ResetDiskToBaseline against an
 // elevated value), then starts the agent against a disk that is idle from
@@ -75,9 +75,9 @@ func TestSmoke_Decisions_ScaleDownAfterQuiet(t *testing.T) {
 	})
 }
 
-// TestSmoke_Decisions_NoFlapping covers docs/design.md §8.3's "no flapping"
-// row: alternating bursts around the threshold, assert changes <= expected
-// given hysteresis and cooldown.
+// TestSmoke_Decisions_NoFlapping drives alternating bursts around the
+// threshold and asserts the number of changes stays within what hysteresis
+// and cooldown allow.
 //
 // Each cycle first proves a real scale-up and scale-down happened
 // (proveUpDownCycle) before the transition-count bound is checked — an

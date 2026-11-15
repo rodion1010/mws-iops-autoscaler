@@ -1,8 +1,7 @@
 name: E2E (sweep)
 
 # Deletes e2e-full VMs and disks that outlived their run. It is independent of the test jobs on
-# purpose: a job-level kill or a lost runner never reaches their own teardown
-# (docs/ci-cd.md, "Orphan sweeper").
+# purpose: a job-level kill or a lost runner never reaches their own teardown.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -25,7 +24,7 @@ permissions:
 
 jobs:
   sweep:
-    # Only the private CI repository has the runner and its variables (docs/ci-cd.md, "Public mirror").
+    # Only the private CI repository has the runner and its variables; the public mirror skips this job.
     if: vars.MWS_PROJECT != ''
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     timeout-minutes: 30

@@ -101,7 +101,7 @@ func TestReadyz_configuredDisksUnmanagedReportedButNeverFlipsReady(t *testing.T)
 	r.SetDegradedDisks([]DegradedDisk{{DeviceName: "datadisk", Reason: "selected_not_found"}})
 
 	if !r.Ready() {
-		t.Fatal("Ready() = false with a degraded disk set — /readyz's binary verdict must never fold in degradation (docs/design.md §4.1)")
+		t.Fatal("Ready() = false with a degraded disk set — /readyz's binary verdict must never fold in degradation")
 	}
 
 	rec := httptest.NewRecorder()

@@ -11,8 +11,8 @@ import (
 )
 
 // instanceNameKey, instanceIDKey and instanceZoneKey are the instance
-// metadata keys ResolveSelfIdentity reads (docs/platform-reference.md "VM
-// identity metadata keys"). All three are confirmed against a live VM.
+// metadata keys ResolveSelfIdentity reads. All three are confirmed against
+// a live VM.
 const (
 	instanceNameKey = "instance/name"
 	instanceIDKey   = "instance/id"
@@ -20,12 +20,12 @@ const (
 )
 
 // selfResourceIDPattern matches the documented instance/id shape,
-// "projects/{project}/virtualMachines/{vm}" (docs/platform-reference.md).
+// "projects/{project}/virtualMachines/{vm}".
 var selfResourceIDPattern = regexp.MustCompile(`^projects/([^/]+)/virtualMachines/([^/]+)$`)
 
 // selfZonePattern matches the documented instance/zone shape: a region
 // prefix followed by a single-letter availability-zone suffix, e.g.
-// "ru-central1-a" (docs/platform-reference.md).
+// "ru-central1-a".
 var selfZonePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*-[a-z]$`)
 
 // SelfIdentity is the running VM's own project, zone and name, resolved
@@ -39,7 +39,7 @@ type SelfIdentity struct {
 // ResolveSelfIdentity resolves the running VM's project, zone and own name
 // from the instance metadata service — local mode only, where the agent
 // runs inside the VM it manages; there is no metadata service to ask in
-// fleet mode, where VMs are named in config instead (US-003).
+// fleet mode, where VMs are named in config instead.
 //
 // instance/id's "projects/{project}/virtualMachines/{vm}" is parsed and
 // its VM name must agree with instance/name — an inconsistency between the

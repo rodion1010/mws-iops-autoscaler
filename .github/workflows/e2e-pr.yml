@@ -5,7 +5,7 @@ name: E2E (smoke)
 # loads this file from the base branch, so a PR cannot edit away the origin
 # guard below; fork PRs get a GitHub-hosted notice job and their code is never
 # checked out. vars.MWS_PROJECT exists only in the private CI repository, so the
-# public mirror never queues a job for the runner (docs/ci-cd.md, "PR-tier trust model").
+# public mirror never queues a job for the runner.
 on:
   pull_request_target:
 
@@ -23,13 +23,13 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository && vars.MWS_PROJECT != ''
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     # All smoke runs share one target and must execute serially. queue: max keeps
-    # up to 100 pending runs instead of one, so a new PR no longer cancels another's.
+    # up to 100 pending runs instead of one, so a new PR does not cancel another's.
     concurrency:
       group: e2e-smoke-vm
       cancel-in-progress: false
       queue: max
-    # Budget derivation is in docs/ci-cd.md's "Timeout budgets" — recompute
-    # before shrinking this or adding a TestSmoke_* scenario.
+    # A job-level kill runs no cleanup, so this must exceed the sum of every TestSmoke_*
+    # worst-case context; recompute before shrinking it or adding a scenario.
     timeout-minutes: 73
     steps:
       # Pin third-party actions because this runner has cloud credentials.
@@ -75,8 +75,8 @@ jobs:
           E2E_SSH_USER: ${{ vars.E2E_SSH_USER }}
           E2E_SSH_KEY_PATH: ${{ runner.temp }}/e2e_ssh_key
         # The harness builds the agent dynamically, so cached test results are unsafe.
-        # -timeout budget, and why there's no backstop teardown step here:
-        # docs/ci-cd.md's "Timeout budgets".
+        # -timeout stays below timeout-minutes. No backstop teardown: Preflight resets the shared
+        # target at the start of every scenario.
         run: go test -count=1 -timeout=68m -tags e2e ./e2e/... -run 'TestSmoke|TestRegression' -v
 
       - name: Remove SSH key

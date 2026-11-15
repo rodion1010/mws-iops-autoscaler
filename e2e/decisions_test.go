@@ -11,9 +11,8 @@ import (
 
 // TestSmoke_Decisions_ScaleUpOnSaturation drives the dependent disk on the
 // shared PR-tier target into saturation and asserts a scale-up. It also
-// exercises the dependent write path (docs/design.md §8.3's other covered
-// row) as a side effect of the only real disk this tier has — that combined
-// coverage is deliberate, not a naming accident (docs/testing.md).
+// exercises the dependent write path, deliberately, since that disk is the
+// only dependent disk this tier has.
 func TestSmoke_Decisions_ScaleUpOnSaturation(t *testing.T) {
 	target, err := SmokeTarget()
 	if err != nil {
@@ -60,7 +59,7 @@ func TestSmoke_Decisions_ScaleUpOnSaturation(t *testing.T) {
 }
 
 // TestSmoke_Decisions_NoScaleUpWhenEfficient drives real, sustained I/O that
-// never crosses the saturation gate (docs/design.md §4.4) and asserts the
+// never crosses the saturation gate and asserts the
 // disk is never scaled up. Asserting only "IOPS never changed" would pass
 // vacuously for a dead or crashed agent that never evaluated anything, so
 // this first requires a journal record proving the agent reached a full
@@ -69,7 +68,7 @@ func TestSmoke_Decisions_ScaleUpOnSaturation(t *testing.T) {
 // ones ("no_data", "metrics_stale", "window_not_full") proves that, since
 // every other no_action reason (internal/decider.go's "no_signal" and
 // "scale_down_disabled" alike — a sub-threshold, flat-latency load with
-// scale-down disabled by default in Phase 1 legitimately lands on either)
+// scale-down disabled by default legitimately lands on either)
 // is only reachable once HasData, Fresh and a full window all hold.
 func TestSmoke_Decisions_NoScaleUpWhenEfficient(t *testing.T) {
 	target, err := SmokeTarget()
@@ -180,8 +179,7 @@ func TestSmoke_Decisions_ScaleUpOnBandwidthSaturation(t *testing.T) {
 
 	// Reachable only from decider.go's `case a.Saturated:` branch — includes
 	// vm_headroom_insufficient (a real possibility on a VM with two active
-	// data disks, and itself the P-B/E5 headroom gap already scheduled for a
-	// later stage) and cooldown_scale_up/budget_exhausted (unreachable on
+	// data disks) and cooldown_scale_up/budget_exhausted (unreachable on
 	// this test's fresh state dir, listed anyway so a future change to that
 	// assumption fails loud here instead of as an opaque timeout).
 	saturatedReasons := map[string]bool{

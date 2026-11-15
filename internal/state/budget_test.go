@@ -108,7 +108,7 @@ func TestLoadBudget_survivesRestart(t *testing.T) {
 		t.Fatalf("LoadBudget (after restart): %v", err)
 	}
 	if got := b2.CountSince("disk1", epoch.Add(-time.Hour)); got != 5 {
-		t.Errorf("CountSince after reload = %d, want 5 — a restart must not reset the budget (docs/design.md §9.4)", got)
+		t.Errorf("CountSince after reload = %d, want 5 — a restart must not reset the budget", got)
 	}
 }
 

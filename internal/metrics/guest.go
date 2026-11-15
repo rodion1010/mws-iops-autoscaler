@@ -11,13 +11,11 @@ import (
 
 const defaultProcDiskstatsPath = "/proc/diskstats"
 
-// GuestSource is the `local`-mode MetricSource: primary by default (docs/design.md §4.2),
-// needs no metrics credential, reads /proc/diskstats directly.
+// GuestSource is the `local`-mode MetricSource: the default source, needs no
+// metrics credential, and reads /proc/diskstats directly.
 //
-// It is stateful — Sample computes a delta against the previous call, so the
-// first call for a disk never yields a Sample (cold start, no baseline yet;
-// design.md §4.3's "window_not_full skip" principle applies here too, one
-// level earlier).
+// It is stateful: Sample computes a delta against the previous call, so the
+// first call for a disk never yields a Sample.
 type GuestSource struct {
 	// procDiskstatsPath and resolveSymlink are overridable for tests, so
 	// nothing here needs a real /proc or /dev/disk/by-id to run.
@@ -43,21 +41,10 @@ func NewGuestSource() *GuestSource {
 func (g *GuestSource) Kind() SourceKind { return SourceGuest }
 
 func (g *GuestSource) Sample(_ context.Context, disks []DiskRef) ([]Sample, error) {
-	// Prune the counter baseline for any disk no longer in the managed set
-	// before ever touching /proc/diskstats — deliberately independent of
-	// whether the read below succeeds. A disk that disappeared — detached,
-	// or deleted and recreated under the same name — must not leave stale
-	// cumulative counters behind that a later reattach would compute a
-	// bogus delta against (a huge spike, or a negative that silently
-	// zeroes), and that risk exists precisely as much on a cycle where
-	// /proc/diskstats happens to be unreadable (a transient permissions
-	// glitch, the file momentarily missing) as on any other — this disk's
-	// managed-set membership this cycle is already known regardless of
-	// whether the read succeeds. Keyed by IdentityKey() so a recreated
-	// disk's new IncarnationID is itself a fresh key: the old incarnation's
-	// entry falls out of `keep` and is dropped here, exactly as any other
-	// disk that left the set, and the new incarnation cold starts rather
-	// than deltaing across the replacement boundary.
+	// Prune counters for disks that left the managed set before reading
+	// /proc/diskstats, so pruning happens even when the read fails. Stale
+	// counters would give a reattached disk a bogus delta. Keying by
+	// IdentityKey() makes a recreated disk a new key that cold-starts.
 	keep := make(map[string]bool, len(disks))
 	for _, d := range disks {
 		keep[d.IdentityKey()] = true
@@ -90,8 +77,7 @@ func (g *GuestSource) Sample(_ context.Context, disks []DiskRef) ([]Sample, erro
 	for _, d := range disks {
 		kernelDevice, err := g.resolveSymlink(d.GuestPath())
 		if err != nil {
-			// Unresolvable disk: skipped, not fatal (US-002's same
-			// principle applied to sampling, not just discovery).
+			// An unresolvable disk is skipped, not fatal.
 			continue
 		}
 		curr, ok := raw[kernelDevice]
@@ -118,12 +104,9 @@ func (g *GuestSource) Sample(_ context.Context, disks []DiskRef) ([]Sample, erro
 }
 
 // VerifyPath confirms d's guest device is resolvable and currently present
-// in /proc/diskstats — the same two checks Sample applies silently, per
-// cycle, to decide whether to skip a disk (issue #4). Exposed here so
-// discovery can reject an unmanageable disk once, up front, with a
-// specific reason — instead of admitting it to the managed set and
-// leaving the failure to manifest later as an indistinguishable stream of
-// "no data" cycles with no actionable diagnosis.
+// in /proc/diskstats, the same checks Sample applies silently each cycle.
+// Discovery uses it to reject an unmanageable disk up front with a specific
+// reason instead of a later stream of undiagnosed "no data" cycles.
 func (g *GuestSource) VerifyPath(d DiskRef) error {
 	kernelDevice, err := g.resolveSymlink(d.GuestPath())
 	if err != nil {
@@ -147,8 +130,7 @@ func (g *GuestSource) VerifyPath(d DiskRef) error {
 }
 
 // resolveGuestSymlink follows /dev/disk/by-id/mws-<name> to its kernel
-// device name (e.g. "sdb") — confirmed live in docs/development.md's reference test environment
-// ("/dev/disk/by-id/mws-datadisk → sdb").
+// device name, e.g. /dev/disk/by-id/mws-datadisk → sdb.
 func resolveGuestSymlink(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {

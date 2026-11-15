@@ -13,14 +13,13 @@ import (
 	"github.com/rodion1010/mws-iops-autoscaler/internal/compute"
 )
 
-// TestFull_Discovery_AttachedDiskManagedWithoutRestart is A1
-// (docs/testing.md's discovery/scope scenario list): auto-discovery picks up
-// a disk attached after the agent has already started, within one
-// discovery_interval, with no restart. disks.exclude is left empty rather
-// than naming the VM's other disks: naming them here would duplicate
-// provision.sh's own device-name choices in Go (the exact duplication
-// hazard already designed out for the storage-disks entries themselves by
-// echoing them verbatim), and would make this scenario cold-start-fatal
+// TestFull_Discovery_AttachedDiskManagedWithoutRestart asserts that
+// auto-discovery picks up a disk attached after the agent has already
+// started, within one discovery_interval, with no restart. disks.exclude is
+// left empty rather than naming the VM's other disks: naming them here would
+// duplicate provision.sh's own device-name choices in Go (the storage-disks
+// entries avoid the same hazard by being echoed verbatim), and would make
+// this scenario cold-start-fatal
 // outright if any one of those names ever drifted from what provision.sh
 // actually attaches. The scenario's own assertions only ever read the churn
 // disk's IOPS, so managing the boot/data/noname disks too (nothing drives
@@ -132,12 +131,11 @@ func waitForGuestDevicePath(ctx context.Context, t Target, timeout, pollInterval
 	}
 }
 
-// TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart is E6's
-// cold-start half (docs/testing.md's discovery/scope scenario list):
-// disks.exclude naming a device that has never existed on this VM degrades
-// registry.Select's result, and discover() treats any degraded name as
-// fatal on the very first discovery of the process's life (docs/design.md
-// §4.1) — the agent must refuse to manage anything rather than silently
+// TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart asserts the
+// cold-start case: disks.exclude naming a device that has never existed on
+// this VM degrades registry.Select's result, and discover() treats any
+// degraded name as fatal on the very first discovery of the process's life
+// — the agent must refuse to manage anything rather than silently
 // auto-discover a partial set.
 //
 // Agent.Run calls discover() synchronously before its reconcile loop ever
@@ -153,12 +151,11 @@ func waitForGuestDevicePath(ctx context.Context, t Target, timeout, pollInterval
 // a journal record before crediting "no change" as meaningful rather than
 // a dead agent.
 //
-// E6's other half — an exclude target that resolves at cold start and only
+// The runtime case — an exclude target that resolves at cold start and only
 // disappears later, which must degrade without being fatal — shares
 // discover()'s decision path with
-// TestReconcile_degradesPartiallyWhenASelectedDiskIsRemovedAtRuntime's
-// existing unit coverage and is deferred to a later e2e pass (no new
-// product code path to prove live).
+// TestReconcile_degradesPartiallyWhenASelectedDiskIsRemovedAtRuntime and is
+// not exercised here.
 func TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart(t *testing.T) {
 	target := fullTarget(t)
 	project, err := Project()
@@ -171,7 +168,7 @@ func TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart(t *testing.T) {
 	// attempts, plus building and copying the agent binary, plus the 30s
 	// absence poll below and AssertNoIOPSChange's 15s — 3 minutes leaves
 	// almost no margin against that worst case; 5 keeps the workflow sum
-	// (67 min) under the 70-minute ceiling with no further change needed.
+	// (67 min) under the 70-minute ceiling.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -228,7 +225,7 @@ func TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart(t *testing.T) {
 	}
 	agentLog := FetchAgentLog(ctx, target)
 	if !exited {
-		t.Fatalf("agent still running after starting with an unresolved disks.exclude name at cold start — want it to exit, refusing to manage anything (docs/design.md §4.1)\nagent log:\n%s", agentLog)
+		t.Fatalf("agent still running after starting with an unresolved disks.exclude name at cold start — want it to exit, refusing to manage anything\nagent log:\n%s", agentLog)
 	}
 	// Confirms the process exited *for this reason* — a dead agent alone
 	// (a crash from a bad chmod, a rejected config, a dropped SSH session)

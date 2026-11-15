@@ -1,9 +1,6 @@
-// Package registry is design.md §3.2's "Disk Registry": it applies
-// disks.mode (docs/configuration.md §4.2) against a VM's discovered disks
-// and resolves each selected disk's effective policy — "apply selection
-// strategy → managed set / resolve EffectivePolicy per disk" (design.md
-// §4.1's discovery flow). Rebuilt each discovery cycle; it holds no state
-// of its own between calls.
+// Package registry applies disks.mode against a VM's discovered disks and
+// resolves each selected disk's effective policy. It is rebuilt each
+// discovery cycle and holds no state of its own between calls.
 package registry
 
 import (
@@ -30,8 +27,7 @@ type Degradation struct {
 	Reason     string
 }
 
-// Select's Degradation.Reason categories (docs/design.md §4.1,
-// docs/configuration.md §4.2).
+// Select's Degradation.Reason categories.
 const (
 	ReasonSelectedNotFound      = "selected_not_found"
 	ReasonExcludeTargetNotFound = "exclude_target_not_found"
@@ -39,11 +35,10 @@ const (
 )
 
 // Select applies spec against vm's discovered disks, matching by the exact
-// device_name VM status reports (docs/design.md §4.1), and resolves each
-// one's policy from resolved.DiskPolicies, falling back to
-// resolved.VMPolicy — the inheritance chain docs/configuration.md §5
-// describes, already computed by config.Resolve; this function only
-// decides which disks it applies to.
+// device_name VM status reports, and resolves each one's policy from
+// resolved.DiskPolicies, falling back to resolved.VMPolicy. Inheritance is
+// already computed by config.Resolve; this function only decides which
+// disks it applies to.
 //
 // degraded names every disks.policies or disks.exclude entry that could not
 // be resolved this cycle — Select always returns the managed set it could
@@ -56,8 +51,7 @@ const (
 // baseline to fall back to) or a later cycle after at least one success
 // (runtime: the resolved disks can keep being managed while only the
 // unresolved name degrades) — so it belongs to the caller, Agent.discover,
-// which does have that history (issue #5, reopened; docs/configuration.md
-// §4.2).
+// which does have that history.
 //
 // err is reserved for a structural problem with spec itself (an unknown
 // mode), never for a name that fails to resolve — --validate-config already
@@ -104,7 +98,7 @@ func Select(vm *compute.VirtualMachine, spec config.DisksSpec, resolved *config.
 	case "selected":
 		// byName is built from vm.Disks, which by the time it reaches here
 		// has already had any duplicate device_name attachment excluded
-		// entirely by compute.Discover (issue #4) — so this map can never
+		// entirely by compute.Discover — so this map can never
 		// silently let a second live disk overwrite a first one under the
 		// same key.
 		byName := make(map[string]compute.StorageDisk, len(vm.Disks))
