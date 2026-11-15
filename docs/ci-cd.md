@@ -40,6 +40,12 @@ branch, and a skipped `smoke` satisfies a required status check, so branch prote
 with that review. The runner service account's role set is still broader than the PR tier needs
 (`docs/TODO.md`).
 
+**Documentation-only PRs skip smoke (Product Lead decision, 2026-11-15).** Before `smoke`, the
+GitHub-hosted `changes` job lists the PR's files through the API without checking out PR code. If
+every file, including the old name of a renamed one, matches `*.md`, `docs/**` or `LICENSE`, `smoke`
+is skipped with a notice. Anything else runs it: any other path (`.github/`, `e2e/`, `mirror/`), an API
+error, a list shorter than the PR's `changed_files`, an empty list, or a failed `changes` job.
+
 **Public mirror (Product Lead decision, 2026-11-15):** this repository and its runner stay private.
 The public repository is a mirror of `main` with cleaned history; no runner is registered to it and
 it has none of the variables or the secret below. Every job that targets the self-hosted runner is

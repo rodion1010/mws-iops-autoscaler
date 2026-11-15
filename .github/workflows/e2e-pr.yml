@@ -19,8 +19,47 @@ jobs:
     steps:
       - run: echo "::notice::Live e2e runs only for branches of the private CI repository; a maintainer reviews the change and runs it from a branch there."
 
-  smoke:
+  # Lists the PR's files through the API, without checking out PR code. Any doubt (API error,
+  # incomplete list, no files, a rename out of code) leaves docs_only=false, so smoke runs.
+  changes:
     if: github.event.pull_request.head.repo.full_name == github.repository && vars.MWS_PROJECT != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED: ${{ github.event.pull_request.changed_files }}
+        run: |
+          docs_only=false
+          files="$RUNNER_TEMP/pr-files.tsv"
+          # One line per file: new name, then old name (same for non-renames). Files, not pipes:
+          # under pipefail an early-exiting grep turns SIGPIPE into a false "docs only".
+          if gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | [.filename, (.previous_filename // .filename)] | @tsv' >"$files"; then
+            count=$(grep -c . "$files" || true)
+            tr '\t' '\n' <"$files" >"$files.names"
+            status=0
+            grep -vE '(\.md$|^docs/|^LICENSE$)' "$files.names" >/dev/null || status=$?
+            # Only grep exit 1 (no other path) means docs only; 0 is a code path, >1 an error.
+            if [ "$count" -gt 0 ] && [ "$count" = "$CHANGED" ] && [ "$status" -eq 1 ]; then
+              docs_only=true
+              echo "::notice::Smoke skipped: this PR changes only documentation (*.md, docs/**, LICENSE)."
+            fi
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: changes
+    # !cancelled(), not the default success(): a failed classifier must run smoke, not skip it.
+    if: >-
+      !cancelled() && needs.changes.outputs.docs_only != 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository && vars.MWS_PROJECT != ''
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     # All smoke runs share one target and must execute serially. queue: max keeps
     # up to 100 pending runs instead of one, so a new PR does not cancel another's.
