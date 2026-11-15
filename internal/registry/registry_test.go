@@ -79,10 +79,26 @@ func TestSelect_autoDiscoveryExcludeTargetNotFoundIsDegradedNotFatal(t *testing.
 	}
 }
 
+func TestSelect_autoDiscoveryPolicyForUnknownDiskIsDegraded(t *testing.T) {
+	// A typo in a disks.policies key would otherwise leave the intended disk
+	// on the VM-wide policy with no signal.
+	spec := config.DisksSpec{Mode: "auto-discovery", Policies: map[string]*config.PolicySpec{"logdisk": nil, "no-such-disk": nil}}
+	managed, degraded, err := Select(testVM(), spec, testResolved())
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if len(managed) != 3 {
+		t.Fatalf("managed = %+v, want all 3 disks — a policy never narrows auto-discovery", managed)
+	}
+	if len(degraded) != 1 || degraded[0].DeviceName != "no-such-disk" || degraded[0].Reason != ReasonPolicyTargetNotFound {
+		t.Errorf("degraded = %+v, want exactly [{no-such-disk %s}]", degraded, ReasonPolicyTargetNotFound)
+	}
+}
+
 func TestSelect_selectedReturnsOnlyNamedDisks(t *testing.T) {
-	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
-		{DeviceName: "datadisk"},
-		{DeviceName: "logdisk"},
+	spec := config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{
+		"datadisk": nil,
+		"logdisk":  nil,
 	}}
 	managed, degraded, err := Select(testVM(), spec, testResolved())
 	if err != nil {
@@ -100,9 +116,9 @@ func TestSelect_selectedOneMissingIsReportedAsDegradedButNotFatal(t *testing.T) 
 	// Select itself never decides fatal-vs-degraded (see its doc comment) —
 	// that needs discovery history only the caller has. It always reports
 	// what it could resolve, plus what it couldn't.
-	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
-		{DeviceName: "datadisk"},
-		{DeviceName: "no-such-disk"},
+	spec := config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{
+		"datadisk":     nil,
+		"no-such-disk": nil,
 	}}
 	managed, degraded, err := Select(testVM(), spec, testResolved())
 	if err != nil {
@@ -117,9 +133,9 @@ func TestSelect_selectedOneMissingIsReportedAsDegradedButNotFatal(t *testing.T) 
 }
 
 func TestSelect_selectedAllMissingReturnsEmptyManagedAndEveryNameDegraded(t *testing.T) {
-	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
-		{DeviceName: "no-such-disk-1"},
-		{DeviceName: "no-such-disk-2"},
+	spec := config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{
+		"no-such-disk-1": nil,
+		"no-such-disk-2": nil,
 	}}
 	managed, degraded, err := Select(testVM(), spec, testResolved())
 	if err != nil {
@@ -136,9 +152,9 @@ func TestSelect_selectedAllMissingReturnsEmptyManagedAndEveryNameDegraded(t *tes
 func TestSelect_selectedRecoversOnceVMInventoryIsConsistent(t *testing.T) {
 	// The same selection resolves fully once the missing disk appears in a
 	// later snapshot — degraded goes back to empty, not just non-fatal.
-	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
-		{DeviceName: "datadisk"},
-		{DeviceName: "not-yet-attached"},
+	spec := config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{
+		"datadisk":         nil,
+		"not-yet-attached": nil,
 	}}
 	if _, degraded, err := Select(testVM(), spec, testResolved()); err != nil || len(degraded) != 1 {
 		t.Fatalf("test setup: first Select: degraded = %v, err = %v, want exactly one degraded name and no error", degraded, err)
@@ -162,7 +178,7 @@ func TestSelect_selectedDuplicateLiveDeviceNameNeverSilentlyOverwrites(t *testin
 	// Discover must remove duplicate live device names before Select builds its lookup map.
 	vm := testVM()
 	vm.Disks = append(vm.Disks, compute.StorageDisk{Alias: "datadisk-2", DeviceName: "datadisk"})
-	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "datadisk"}}}
+	spec := config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{"datadisk": nil}}
 
 	managed, _, err := Select(vm, spec, testResolved())
 	if err != nil {
@@ -189,7 +205,7 @@ func vmWithDisks() *compute.VirtualMachine {
 }
 
 func TestResolveSelectedByDeviceName(t *testing.T) {
-	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "mws-datadisk"}}}
+	spec := config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{"mws-datadisk": nil}}
 	managed, degraded, err := Select(vmWithDisks(), spec, testResolved())
 	if err != nil {
 		t.Fatalf("Select: %v", err)
@@ -224,7 +240,7 @@ func TestResolveRawDeviceNameWithMWSPrefix(t *testing.T) {
 		Name:  "vm-1",
 		Disks: []compute.StorageDisk{{Alias: "data", DeviceName: "mws-mws-data", DiskName: "res-data"}},
 	}
-	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "mws-mws-data"}}}
+	spec := config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{"mws-mws-data": nil}}
 	managed, degraded, err := Select(vm, spec, testResolved())
 	if err != nil {
 		t.Fatalf("Select: %v", err)
@@ -242,7 +258,7 @@ func TestResolveRawDeviceNameWithMWSPrefix(t *testing.T) {
 // prefix — is an unresolved name like any other typo, not specially
 // handled.
 func TestResolveDeviceNameRequiresExactMatch(t *testing.T) {
-	spec := config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "datadisk"}}}
+	spec := config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{"datadisk": nil}}
 	managed, degraded, err := Select(vmWithDisks(), spec, testResolved())
 	if err != nil {
 		t.Fatalf("Select: %v", err)

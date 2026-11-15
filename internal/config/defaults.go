@@ -46,86 +46,20 @@ type ResolvedAdvanced struct {
 	MaxChangesPer24h int
 }
 
-// PresetName identifies one entry in the preset registry below. Not a
-// decodable YAML field yet — Phase 1's schema has no `preset:` key, so
-// nothing in this package resolves a PresetName from config. The type and
-// the registry exist now so that exposing presets in Phase 5 is additive
-// (a field, a name→ResolvedAdvanced lookup, and a validation rule) rather
-// than a rework of the resolver. See the deferred presets plan in docs/configuration.md §1.
-type PresetName string
-
-const (
-	PresetBalanced    PresetName = "balanced" // Phase 1's one built-in default
-	PresetPerformance PresetName = "performance"
-	PresetCost        PresetName = "cost"
-)
-
-// DefaultPresetName is what defaultResolvedPolicy resolves to today — the
-// only entry Phase 1 actually uses.
-const DefaultPresetName = PresetBalanced
-
-// presets is the full registry, transcribed from docs/configuration.md §3
-// and docs/configuration.md §1 (performance's values there are already corrected — see that
-// ADR for why the first draft's 2m/3m pair was wrong). Phase 1 reads only
-// presets[DefaultPresetName]; performance and cost sit here unused until
-// Phase 5 exposes a way to select them.
-var presets = map[PresetName]ResolvedAdvanced{
-	PresetBalanced: {
-		ScaleUpWindow:             5 * time.Minute,
-		ScaleDownWindow:           30 * time.Minute,
-		UtilizationThreshold:      0.98,
-		QueueDepthThreshold:       1,
-		LatencyMode:               "relative",
-		LatencyBaselineMultiplier: 1.5,
-		ScaleUpUtilization:        0.85,
-		ScaleDownUtilization:      0.70,
-		CooldownScaleUp:           5 * time.Minute,
-		CooldownScaleDown:         30 * time.Minute,
-		MinChangeIOPS:             200,
-		MaxScaleUpRatio:           2.0,
-		MaxScaleDownRatio:         0.5,
-		MaxChangesPer24h:          48,
-	},
-	PresetPerformance: {
-		ScaleUpWindow:             3 * time.Minute, // docs/configuration.md §1: first draft had 2m, violated §8's cooldown rule
-		ScaleDownWindow:           60 * time.Minute,
-		UtilizationThreshold:      0.95,
-		QueueDepthThreshold:       1,
-		LatencyMode:               "relative",
-		LatencyBaselineMultiplier: 1.25,
-		ScaleUpUtilization:        0.75,
-		ScaleDownUtilization:      0.60,
-		CooldownScaleUp:           3 * time.Minute,
-		CooldownScaleDown:         60 * time.Minute,
-		MinChangeIOPS:             200,
-		MaxScaleUpRatio:           2.0,
-		MaxScaleDownRatio:         0.75,
-		MaxChangesPer24h:          48,
-	},
-	PresetCost: {
-		ScaleUpWindow:             10 * time.Minute,
-		ScaleDownWindow:           20 * time.Minute,
-		UtilizationThreshold:      1.00,
-		QueueDepthThreshold:       2,
-		LatencyMode:               "relative",
-		LatencyBaselineMultiplier: 2.0,
-		ScaleUpUtilization:        0.90,
-		ScaleDownUtilization:      0.80,
-		CooldownScaleUp:           10 * time.Minute,
-		CooldownScaleDown:         20 * time.Minute,
-		MinChangeIOPS:             300,
-		MaxScaleUpRatio:           1.5,
-		MaxScaleDownRatio:         0.5,
-		MaxChangesPer24h:          48,
-	},
+// defaultAdvanced is Phase 1's one built-in parameter set (docs/configuration.md §3).
+var defaultAdvanced = ResolvedAdvanced{
+	ScaleUpWindow:             5 * time.Minute,
+	ScaleDownWindow:           30 * time.Minute,
+	UtilizationThreshold:      0.98,
+	QueueDepthThreshold:       1,
+	LatencyMode:               "relative",
+	LatencyBaselineMultiplier: 1.5,
+	ScaleUpUtilization:        0.85,
+	ScaleDownUtilization:      0.70,
+	CooldownScaleUp:           5 * time.Minute,
+	CooldownScaleDown:         30 * time.Minute,
+	MinChangeIOPS:             200,
+	MaxScaleUpRatio:           2.0,
+	MaxScaleDownRatio:         0.5,
+	MaxChangesPer24h:          48,
 }
-
-// defaultAdvanced is Phase 1's one built-in parameter set — presets[DefaultPresetName].
-// Named presets (performance/cost) are laid out above but not selectable
-// until Phase 5 (docs/configuration.md §1): implementing the cross-field validation in
-// validate.go against the first-draft preset table found "performance"'s
-// own values (2m scale_up_window, 3m cooldown.scale_up) violated the very
-// rule that set of numbers is supposed to satisfy. Rather than keep three
-// preset tables mutually consistent under every future rule this early,
-// Phase 1 resolves against one validated set.
-var defaultAdvanced = presets[DefaultPresetName]

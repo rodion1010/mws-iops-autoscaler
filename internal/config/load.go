@@ -10,18 +10,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// supportedAPIVersion / supportedKindLocal are the only apiVersion/kind
-// values Load accepts for a mode: local document (docs/configuration.md
-// §6.1, §6.2 examples). kind: IOPSAutoScalerFleet exists for mode: fleet
-// (§6.3) but is unreachable here — the mode check above already rejects
-// anything but local — so a mismatched kind on a local-mode document (e.g.
-// mode: local left in place under a copy-pasted fleet kind) is its own,
-// distinct error rather than being caught only incidentally by the mode
-// check.
-const (
-	supportedAPIVersion = "autoscaling.mws.cloud/v1alpha1"
-	supportedKindLocal  = "IOPSAutoScaler"
-)
+// supportedVersion is the only schema version Load accepts.
+const supportedVersion = 1
 
 // Load reads and strictly parses the config file at path. Unknown keys at any
 // nesting level are rejected (docs/configuration.md §8): this is what retires
@@ -40,6 +30,15 @@ func Load(path string) (*Config, error) {
 	var peek modePeek
 	if err := yaml.Unmarshal(data, &peek); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if peek.Version == nil {
+		return nil, fmt.Errorf("%s: version is required — set version: %d", path, supportedVersion)
+	}
+	if v, ok := peek.Version.(int); !ok || v != supportedVersion {
+		return nil, fmt.Errorf("%s: version %v is not supported — expected %d", path, peek.Version, supportedVersion)
+	}
+	if peek.Mode == "" {
+		return nil, fmt.Errorf("%s: mode is required — set mode: local", path)
 	}
 	if peek.Mode != "local" {
 		return nil, fmt.Errorf(
@@ -63,13 +62,6 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("%s: contains more than one YAML document — only one is supported", path)
 		}
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-
-	if cfg.APIVersion != supportedAPIVersion {
-		return nil, fmt.Errorf("%s: apiVersion %q is not supported — expected %q", path, cfg.APIVersion, supportedAPIVersion)
-	}
-	if cfg.Kind != supportedKindLocal {
-		return nil, fmt.Errorf("%s: kind %q is not supported for mode: local — expected %q", path, cfg.Kind, supportedKindLocal)
 	}
 
 	return &cfg, nil

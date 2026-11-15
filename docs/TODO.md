@@ -66,6 +66,22 @@ its signal activates and clears. Two of them have no signal yet: a write failure
 (`iops_autoscaler_decisions_total` is recorded before the write), and the effective ceiling
 (`policy.max_iops` with the headroom clamp) is never published as its own series.
 
+### Named presets
+
+Phase 1 ships one built-in `advanced` parameter set (`docs/configuration.md` §3). A `performance`
+set (earlier up, slower down, more headroom) and a `cost` set (later up, tighter fit, faster down)
+were drafted and removed unused. Reintroducing them is additive: a `preset:` field, a name→values
+lookup, and a check that every preset passes §8's rules (the first `performance` draft did not:
+`cooldown.scale_up: 3m` against `scale_up_window: 2m`). Worth doing once telemetry shows which
+trade-offs operators actually ask for.
+
+### More user-side limits
+
+Ideas not in the schema: a per-VM or per-project spend ceiling, refusing to scale a disk below the IOPS
+it had when the agent started managing it, and maintenance windows during which no change is made.
+The VM-level name `limits.max_iops` is already per disk (`docs/configuration.md` §5), so an aggregate
+cap needs a different name.
+
 ### Config hot-reload
 
 The agent reads its config once, in `LoadAndValidate` at startup: there is no SIGHUP handler and no
@@ -74,7 +90,7 @@ attached *disks* without a restart (`docs/configuration.md` §4.2), which makes 
 miss — what cannot change at runtime is the operator's *intent*, not the inventory.
 
 Noticed while planning e2e discovery scenarios: moving a disk in or out of `disks.exclude`, or adding
-an already-attached disk to `disks.selected`, are ordinary operational actions, and today each costs a
+an already-attached disk to `disks.policies`, are ordinary operational actions, and today each costs a
 restart — which also throws away the sampling windows and in-memory cooldowns the agent needs before
 it can act again. Those scenarios are written against a restart for now; the same tests would cover a
 reload mechanism unchanged, only swapping the restart step.

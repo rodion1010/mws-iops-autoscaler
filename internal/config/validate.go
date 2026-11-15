@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -19,23 +18,14 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("mode: %q is not supported in this build (fleet mode ships in Phase 4)", cfg.Mode)
 	}
 
-	errs = append(errs, validateAdvancedGate("policy.advanced", cfg.Policy.Advanced)...)
 	errs = append(errs, validateDiskSelection(&cfg.Disks)...)
-
-	for i, d := range cfg.Disks.Selected {
-		if d.Policy != nil {
-			path := fmt.Sprintf("disks.selected[%d:%s].policy.advanced", i, d.DeviceName)
-			errs = append(errs, validateAdvancedGate(path, d.Policy.Advanced)...)
-		}
-	}
-
 	errs = append(errs, validateMetricsSource(cfg)...)
 
 	// Cross-field rules use resolved values after inheritance.
 	resolved := Resolve(cfg)
 	errs = append(errs, validateResolvedPolicy("policy", resolved.VMPolicy)...)
-	for name, rp := range resolved.DiskPolicies {
-		errs = append(errs, validateResolvedPolicy(fmt.Sprintf("disks.selected[%s].policy", name), rp)...)
+	for _, name := range cfg.Disks.PolicyNames() {
+		errs = append(errs, validateResolvedPolicy(fmt.Sprintf("disks.policies[%s]", name), resolved.DiskPolicies[name])...)
 	}
 	errs = append(errs, validateResolvedRuntime("runtime", resolved.Runtime)...)
 	errs = append(errs, validateSamplerCapacity(resolved)...)
@@ -95,7 +85,7 @@ func validateCollectionIntervalAgainstWindows(resolved *ResolvedConfig) []error 
 	sort.Strings(names)
 	for _, name := range names {
 		p := resolved.DiskPolicies[name]
-		path := fmt.Sprintf("disks.selected[%s].policy", name)
+		path := fmt.Sprintf("disks.policies[%s]", name)
 		check(path, "scale_up_window", p.Advanced.ScaleUpWindow)
 		check(path, "scale_down_window", p.Advanced.ScaleDownWindow)
 	}
@@ -254,20 +244,6 @@ func validateResolvedRuntime(path string, r ResolvedRuntime) []error {
 	return errs
 }
 
-// validateAdvancedGate rejects advanced sub-blocks unless advanced.enabled is true.
-func validateAdvancedGate(path string, a *AdvancedSpec) []error {
-	if a == nil {
-		return nil
-	}
-	enabled := a.Enabled != nil && *a.Enabled
-	anySet := a.Evaluation != nil || a.Saturation != nil || a.Target != nil ||
-		a.Cooldown != nil || a.Step != nil || a.Budget != nil
-	if anySet && !enabled {
-		return []error{fmt.Errorf("%s: fields are set but advanced.enabled is not true", path)}
-	}
-	return nil
-}
-
 // validateDiskSelection checks the selection strategy, its applicable fields,
 // device-name form, and duplicates.
 func validateDiskSelection(d *DisksSpec) []error {
@@ -275,41 +251,40 @@ func validateDiskSelection(d *DisksSpec) []error {
 
 	switch d.Mode {
 	case "auto-discovery":
-		if len(d.Selected) > 0 {
-			errs = append(errs, fmt.Errorf(
-				"disks: mode is %q but disks.selected is set — selected only applies to mode: selected", d.Mode))
-		}
+		// exclude and policies both apply here.
 	case "selected":
 		if len(d.Exclude) > 0 {
 			errs = append(errs, fmt.Errorf(
 				"disks: mode is %q but disks.exclude is set — exclude only applies to mode: auto-discovery", d.Mode))
 		}
-		if len(d.Selected) == 0 {
-			errs = append(errs, fmt.Errorf("disks.selected: mode is \"selected\" but the list is empty"))
+		if len(d.Policies) == 0 {
+			errs = append(errs, fmt.Errorf("disks.policies: mode is \"selected\" but no disk is listed"))
 		}
 	default:
 		errs = append(errs, fmt.Errorf(
 			"disks.mode: %q is neither \"auto-discovery\" nor \"selected\"", d.Mode))
 	}
 
+	// yaml.v3 already rejects a repeated disks.policies key, so only exclude needs a duplicate check.
 	seen := make(map[string]bool)
-
-	check := func(path, name string) {
+	for i, name := range d.Exclude {
+		path := fmt.Sprintf("disks.exclude[%d]", i)
 		if err := validateDeviceName(name); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", path, err))
-			return
+			continue
 		}
 		if seen[name] {
 			errs = append(errs, fmt.Errorf("%s: device_name %q is listed more than once", path, name))
 		}
 		seen[name] = true
+		if _, ok := d.Policies[name]; ok {
+			errs = append(errs, fmt.Errorf("%s: device_name %q is both excluded and given a policy in disks.policies", path, name))
+		}
 	}
-
-	for i, name := range d.Exclude {
-		check(fmt.Sprintf("disks.exclude[%d]", i), name)
-	}
-	for i, sel := range d.Selected {
-		check(fmt.Sprintf("disks.selected[%d].device_name", i), sel.DeviceName)
+	for _, name := range d.PolicyNames() {
+		if err := validateDeviceName(name); err != nil {
+			errs = append(errs, fmt.Errorf("disks.policies[%s]: %w", name, err))
+		}
 	}
 	return errs
 }
@@ -334,30 +309,15 @@ func validateDeviceName(name string) error {
 	return nil
 }
 
-// validateMetricsSource checks supported mode/source combinations and required platform credentials.
+// validateMetricsSource accepts only the implemented source; "platform" ships
+// with PlatformSource and is rejected until then.
 func validateMetricsSource(cfg *Config) []error {
-	source := cfg.Runtime.Metrics.Source
-	if source == "" {
-		source = defaultMetricsSource
-	}
-	if source != "guest" && source != "platform" {
-		return []error{fmt.Errorf("runtime.metrics.source: %q is neither \"guest\" nor \"platform\"", source)}
-	}
-	if source != "platform" {
+	switch source := cfg.Runtime.Metrics.Source; source {
+	case "", "guest":
 		return nil
+	case "platform":
+		return []error{fmt.Errorf("runtime.metrics.source: \"platform\" is not implemented yet — use \"guest\"")}
+	default:
+		return []error{fmt.Errorf("runtime.metrics.source: %q is not \"guest\"", source)}
 	}
-
-	path := os.Getenv(monitoringAPIKeyPathEnv)
-	if path == "" {
-		return []error{fmt.Errorf(
-			"runtime.metrics.source: \"platform\" requires a monitoring API key; set %s", monitoringAPIKeyPathEnv)}
-	}
-	if _, err := os.Stat(path); err != nil {
-		return []error{fmt.Errorf(
-			"runtime.metrics.source: \"platform\" needs the file named by %s: %w", monitoringAPIKeyPathEnv, err)}
-	}
-	return nil
 }
-
-// monitoringAPIKeyPathEnv names the file containing the monitoring API bearer token.
-const monitoringAPIKeyPathEnv = "MWS_MONITORING_API_KEY_PATH"

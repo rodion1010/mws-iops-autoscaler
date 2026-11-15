@@ -13,7 +13,6 @@ func TestRegressionEveryAcceptedCollectionCadenceCanFillItsWindow(t *testing.T) 
 	cfg := validConfig()
 	cfg.Runtime.Metrics.CollectionInterval = durationPtr("5m")
 	cfg.Policy.Advanced = &AdvancedSpec{
-		Enabled: boolPtr(true),
 		Evaluation: &EvaluationSpec{
 			ScaleUpWindow: durationPtr("5m"),
 		},

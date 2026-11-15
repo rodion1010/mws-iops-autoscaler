@@ -1,5 +1,4 @@
-apiVersion: autoscaling.mws.cloud/v1alpha1
-kind: IOPSAutoScaler
+version: 1
 mode: local
 policy:
   limits:

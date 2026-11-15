@@ -12,13 +12,9 @@ PRD's requirements — it does not define them.
 ## 1. Principles
 
 **One validated default, not a choice of knobs.** Phase 1 ships a single built-in parameter set
-(§3) — there is no preset name to pick. The user-facing surface is limits plus disk selection.
-Controller internals stay adjustable (`advanced`) without breaking anyone's config.
-
-Named presets (`balanced` / `performance` / `cost`) are deferred past the MVP — see §1. This
-section described three from the first draft; the `performance` one turned out to violate the
-`cooldown.scale_up > scale_up_window` rule in §8 once that rule was actually implemented, and rather
-than keep three tables mutually consistent under every future rule, Phase 1 ships one.
+(§3) — there is no preset name to pick; named presets are deferred (`docs/TODO.md`). The
+user-facing surface is limits plus disk selection. Controller internals stay adjustable
+(`advanced`) without breaking anyone's config.
 
 **Inheritance, not repetition.** Policy is declared once and overridden where it differs.
 
@@ -30,7 +26,8 @@ limits.max_iops
 disks (selection)
 ```
 
-Everything under `advanced` is experimental and API-only until telemetry justifies exposing it.
+Everything under `advanced` is experimental: its fields may change before v1, until telemetry
+justifies freezing them. Setting a field under `advanced` is enough to apply it.
 
 ---
 
@@ -43,8 +40,6 @@ policy:
     max_iops: 10000          # never above platform max 10000
 
   advanced:
-    enabled: false           # opt-in; unsupported unless set
-
     evaluation:
       # No collection_interval here — sampling cadence is process-wide,
       # set once by runtime.metrics.collection_interval below (design.md §4.2).
@@ -108,14 +103,8 @@ step:        {min_change_iops: 200, max_scale_up_ratio: 2.0, max_scale_down_rati
 budget:      {max_changes_per_24h: 48}
 ```
 
-This is not user-facing syntax — it is never written under a `presets:` key in a config file. An
-operator overrides individual fields through `policy.advanced` (opt-in, `advanced.enabled: true`),
-not by naming a preset.
-
-A `performance`-leaning set (earlier up, slower down, more headroom) and a `cost`-leaning set (later
-up, tighter fit, faster down) were drafted alongside this one and are recorded in §1 for when
-presets are reintroduced — post-MVP, they are not implemented, and the draft `performance` numbers
-were never valid: `cooldown.scale_up: 3m` against `scale_up_window: 2m` violates §8's own rule.
+This is not user-facing syntax. An operator overrides individual fields through `policy.advanced`
+or a disk's own `advanced` block.
 
 ---
 
@@ -128,7 +117,9 @@ the platform reports in `status.storage.disks[].deviceName`, puts on the `device
 exported metric, and uses for the guest path — copy it from any of those three:
 
 ```yaml
-device_name: mws-datadisk     # correct — the platform-visible form
+disks:
+  policies:
+    mws-datadisk: {}          # correct — the platform-visible form
 ```
 
 `mws-datadisk` here comes from an attach-time `deviceName: datadisk`; the platform always adds the
@@ -137,7 +128,7 @@ the guest path `/dev/disk/by-id/mws-datadisk` all carry it). If the attach-time 
 already started with `mws-` (the platform's schema permits this), its platform-visible form doubles
 the prefix — `deviceName: mws-data` is visible as `mws-mws-data`, and that is the value to write here.
 
-The unprefixed form (`device_name: datadisk`) is rejected by `--validate-config`: it cannot be the
+The unprefixed form (`datadisk`) is rejected by `--validate-config`: it cannot be the
 exact value VM status reports, since the platform always adds `mws-` on the way out.
 
 **Kernel device names (`/dev/vdb`, `/dev/sdb`) must never be used.** They are assigned in discovery
@@ -145,13 +136,17 @@ order, which is not stable across reboots or attach/detach cycles: `/dev/vdb` to
 tomorrow, and the agent would silently apply one disk's policy to another — a config that looks
 correct and is wrong. See design.md §4.1.
 
+**A policy follows the device name, not the disk.** If you detach `mws-wal` and attach a different
+disk as `mws-wal`, the new disk gets the old one's policy. If you move a disk to another VM, its
+policy stays behind in this VM's config.
+
 `deviceName` is unique **within a VM**, not globally. In `local` mode that is sufficient. In `fleet`
 mode disk selectors are always nested under their instance (§6.3), so the effective key is the pair
 `(instance, device_name)`.
 
 ### 4.2 Strategies
 
-Three strategies, available in both modes:
+Two modes, plus an optional per-disk policy in either:
 
 ```yaml
 disks:
@@ -167,18 +162,27 @@ disks:
 
 ```yaml
 disks:
-  mode: selected                # only these, each with an optional policy
-  selected:
-    - device_name: mws-datadisk
-    - device_name: mws-logdisk
-      policy:
-        limits: {min_iops: 3000, max_iops: 10000}
+  mode: auto-discovery          # everything, one disk with its own policy
+  policies:
+    mws-wal:
+      limits: {min_iops: 5000}
 ```
 
-`exclude` is a plain list of device names. `selected` entries are mappings, because each one may
-carry a policy.
+```yaml
+disks:
+  mode: selected                # only these, each with an optional policy
+  policies:
+    mws-datadisk: {}
+    mws-logdisk:
+      limits: {min_iops: 3000, max_iops: 10000}
+```
 
-**`mode: selected` is exhaustive, not best-effort (issue #5, reopened).** Every `device_name` listed is
+`exclude` is a plain list of device names. `policies` maps a device name to a policy override (§5);
+`{}` means no override. In `mode: selected` its keys are the managed set; in `mode: auto-discovery`
+they only override the policy of disks that are managed anyway. `exclude` exists only in
+`mode: auto-discovery`, and a disk cannot be both excluded and given a policy.
+
+**`mode: selected` is exhaustive, not best-effort (issue #5, reopened).** Every device name listed is
 the operator's stated intent, not a best-effort filter — silently managing fewer disks than named would
 make the agent's actual behavior diverge from what was configured, with no signal beyond a log line.
 What happens when one doesn't resolve depends on discovery history, not one fixed rule:
@@ -200,7 +204,12 @@ What happens when one doesn't resolve depends on discovery history, not one fixe
 a typo that leaves a disk the operator meant to exclude managed anyway, and the two cases are otherwise
 indistinguishable. A cold-start mismatch there is fatal the same way; a runtime one degrades the same
 way, only the reported `reason` differs (`exclude_target_not_found` rather than `selected_not_found`
-— see docs/design.md §4.1).
+— see docs/design.md §4.1). A `policies` key in `mode: auto-discovery` that matches no live disk is
+handled the same way too, with `reason` `policy_target_not_found`: a typo would otherwise leave the
+intended disk on the VM-wide policy.
+
+In `fleet` mode an `exclude` above the instance level will be best-effort: one shared list cannot
+expect every VM to carry every listed disk.
 
 Rediscovery runs on an interval, so disks attached after startup are picked up without a restart —
 including recovering from either kind of mismatch once the VM's inventory becomes consistent with the
@@ -237,6 +246,13 @@ disk that doesn't set its own. There is no mechanism, and none is planned, for a
 `min_iops` to mean "at least this much, summed across the VM's disks" — an aggregate reading would just
 need dividing among disks somehow, which reduces to the per-disk override this schema already has.
 
+**`max_iops` is a limit for each disk, not for the VM.** With `policy.limits.max_iops: 5000` and three
+disks, each disk can go up to 5000, so together up to 15000. The VM-wide ceiling is the platform's
+`3000 × vCPU` pool (§7).
+
+**Without `policy.limits`, a disk can go anywhere from 1000 to 10000 IOPS**, the platform's full range.
+Set `max_iops` to cap what the agent may spend, and run with `-dry-run` first to see what it would do.
+
 ---
 
 ## 6. Examples
@@ -244,8 +260,7 @@ need dividing among disks somehow, which reduces to the per-disk override this s
 ### 6.1 Local, auto-discovery
 
 ```yaml
-apiVersion: autoscaling.mws.cloud/v1alpha1
-kind: IOPSAutoScaler
+version: 1
 mode: local
 
 policy:
@@ -258,7 +273,7 @@ disks:
 
 runtime:
   metrics:
-    source: guest              # default in local; 'platform' is opt-in
+    source: guest              # default; 'platform' is not implemented yet
     collection_interval: 10s
   controller:
     reconcile_interval: 30s
@@ -268,8 +283,7 @@ runtime:
 ### 6.2 Local, per-disk policies
 
 ```yaml
-apiVersion: autoscaling.mws.cloud/v1alpha1
-kind: IOPSAutoScaler
+version: 1
 mode: local
 
 policy:
@@ -277,19 +291,16 @@ policy:
 
 disks:
   mode: selected
-  selected:
-    - device_name: mws-datadisk
+  policies:
+    mws-datadisk: {}
 
-    - device_name: mws-logdisk
-      policy:
-        limits: {min_iops: 3000, max_iops: 10000}
+    mws-logdisk:
+      limits: {min_iops: 3000, max_iops: 10000}
 
-    - device_name: mws-backupdisk
-      policy:
-        limits: {min_iops: 1000, max_iops: 6000}
-        advanced:
-          enabled: true
-          step: {min_change_iops: 300}   # cost-sensitive disk: fewer, larger changes
+    mws-backupdisk:
+      limits: {min_iops: 1000, max_iops: 6000}
+      advanced:
+        step: {min_change_iops: 300}   # cost-sensitive disk: fewer, larger changes
 
 runtime:
   metrics:   {source: guest, collection_interval: 10s}
@@ -299,8 +310,7 @@ runtime:
 ### 6.3 Fleet, project → VM → disk
 
 ```yaml
-apiVersion: autoscaling.mws.cloud/v1alpha1
-kind: IOPSAutoScalerFleet
+version: 1
 mode: fleet
 
 project:
@@ -316,11 +326,10 @@ project:
         policy: {limits: {min_iops: 3000}}
         disks:
           mode: selected
-          selected:
-            - device_name: mws-db-data
-            - device_name: mws-db-wal
-              policy:
-                limits: {min_iops: 5000, max_iops: 10000}
+          policies:
+            mws-db-data: {}
+            mws-db-wal:
+              limits: {min_iops: 5000, max_iops: 10000}
 
       - instance: worker-01
         disks:
@@ -331,12 +340,13 @@ project:
         policy:
           limits: {max_iops: 5000}
 
-metrics:
-  source: platform             # only option in fleet
-  collection_interval: 30s     # matches the platform publication interval
-controller:
-  reconcile_interval: 30s
-  discovery_interval: 5m
+runtime:
+  metrics:
+    source: platform           # only option in fleet
+    collection_interval: 30s   # matches the platform publication interval
+  controller:
+    reconcile_interval: 30s
+    discovery_interval: 5m
 ```
 
 ---
@@ -352,34 +362,32 @@ Regardless of the default parameter set or any override:
 - minimum meaningful change
 - protection against concurrent resize of the same disk
 
-Optional user-side limits: per-disk `max_iops`, a budget ceiling, refusal to scale below the original
-value, and maintenance windows.
-
 ---
 
 ## 8. Validation rules
 
 `--validate-config` must reject, with a message naming the field:
 
-- `apiVersion` anything other than `autoscaling.mws.cloud/v1alpha1`
-- `kind` anything other than `IOPSAutoScaler` for `mode: local` (`IOPSAutoScalerFleet` is §6.3's
-  fleet-mode kind, unreachable here since `mode: local` is required in this build)
+- `version` missing or anything other than the integer `1` (`1.0`, `1.9` and `"1"` are rejected).
+  It counts file-format generations, not releases; the format may still change before the agent's 1.0
+  release
+- `mode` missing or anything other than `local` (`fleet` is not implemented in this build)
 - more than one YAML document in the file (a second `---`-separated document is silently dropped by
   a naive single-document decode, not merged or rejected)
 - `disks.mode` anything other than `auto-discovery` or `selected`
-- `mode: auto-discovery` with `disks.selected` set, or `mode: selected` with `disks.exclude` set —
-  each field belongs to exactly one strategy (§4.2)
-- `mode: selected` with an empty `disks.selected` list
+- `mode: selected` with `disks.exclude` set — exclude belongs to `mode: auto-discovery` only (§4.2)
+- `mode: selected` with an empty `disks.policies` map
+- a device name both in `disks.exclude` and a key of `disks.policies`
 - `min_iops < 1000` or `max_iops > 10000`
 - `min_iops > max_iops`
 - any IOPS value not a multiple of 100
 - unknown keys anywhere (typos must fail loudly, not be ignored) — this is what rejects the
-  superseded `device:` and `disk_id:` selectors
+  superseded `device:`, `disk_id:` and `disks.selected` selectors and the removed `apiVersion`, `kind`
+  and `advanced.enabled` fields
 - a disk identified by a kernel device path (`/dev/vdb`, `/dev/sdb`) instead of `device_name`
 - a `device_name` that cannot be the exact value VM status reports (§4.1)
-- the same `device_name` listed twice within one VM's `selected` or `exclude` list
-- `advanced` fields set while `advanced.enabled: false`
-- `mode: local` with `metrics.source: platform` but no API key configured
+- the same device name listed twice in `exclude`, or as a repeated `disks.policies` key
+- `runtime.metrics.source` anything other than `guest` — `platform` is not implemented yet
 - `mode: fleet` with `metrics.source: guest` (impossible — no guest access)
 - `scale_down_window < scale_up_window` (a scale-down faster than scale-up invites flapping)
 - `cooldown.scale_up > scale_up_window` (the agent could never act)

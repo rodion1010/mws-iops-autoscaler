@@ -21,7 +21,7 @@ type ResolvedRuntime struct {
 type ResolvedConfig struct {
 	VMPolicy     ResolvedPolicy
 	Disks        DisksSpec
-	DiskPolicies map[string]ResolvedPolicy // device_name -> resolved policy, "selected" mode only
+	DiskPolicies map[string]ResolvedPolicy // device_name -> resolved policy, one per disks.policies key
 	Runtime      ResolvedRuntime
 }
 
@@ -39,8 +39,8 @@ func Resolve(cfg *Config) *ResolvedConfig {
 	vmPolicy := resolvePolicy(defaultResolvedPolicy(), &cfg.Policy)
 
 	diskPolicies := make(map[string]ResolvedPolicy)
-	for _, d := range cfg.Disks.Selected {
-		diskPolicies[d.DeviceName] = resolvePolicy(vmPolicy, d.Policy)
+	for name, p := range cfg.Disks.Policies {
+		diskPolicies[name] = resolvePolicy(vmPolicy, p)
 	}
 
 	return &ResolvedConfig{

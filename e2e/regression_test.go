@@ -470,7 +470,7 @@ func TestRegression_Preflight_StopStaleAgentFailsClosedOnBrokenAbsenceCheck(t *t
 // agent manages.
 func TestRegression_Config_SelectedDisksRendersEveryDeviceName(t *testing.T) {
 	got := disksBlockYAML(SelectedDisksSpec("boot", "data"))
-	want := "disks:\n  mode: selected\n  selected:\n    - device_name: boot\n    - device_name: data\n"
+	want := "disks:\n  mode: selected\n  policies:\n    boot: {}\n    data: {}\n"
 	if got != want {
 		t.Fatalf("disksBlockYAML(selected) =\n%s\nwant:\n%s", got, want)
 	}
@@ -491,7 +491,7 @@ func TestRegression_Config_AutoDiscoveryOmitsExcludeWhenEmpty(t *testing.T) {
 
 // TestRegression_Config_AutoDiscoveryRendersExcludedNames guards the
 // exclude: list shape — internal/config.DisksSpec.Exclude is []string, a
-// bare name per line, not a device_name: key like Selected.
+// bare name per line, not a policies: map key like Selected.
 func TestRegression_Config_AutoDiscoveryRendersExcludedNames(t *testing.T) {
 	got := disksBlockYAML(AutoDiscoveryDisksSpec("noname"))
 	want := "disks:\n  mode: auto-discovery\n  exclude:\n    - noname\n"

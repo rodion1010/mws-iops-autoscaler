@@ -74,9 +74,9 @@ func disksBlockYAML(spec DisksSpec) string {
 	fmt.Fprintf(&b, "disks:\n  mode: %s\n", spec.Mode)
 	switch spec.Mode {
 	case "selected":
-		b.WriteString("  selected:\n")
+		b.WriteString("  policies:\n")
 		for _, name := range spec.Selected {
-			fmt.Fprintf(&b, "    - device_name: %s\n", name)
+			fmt.Fprintf(&b, "    %s: {}\n", name)
 		}
 	case "auto-discovery":
 		if len(spec.Exclude) > 0 {
@@ -101,14 +101,12 @@ func agentConfigYAML(t Target) string {
 // discovery_interval — see discoveryScenarioInterval's comment for why a
 // caller must not casually pass a value faster than defaultDiscoveryInterval.
 func agentConfigYAMLWithDisks(disks DisksSpec, discoveryInterval time.Duration) string {
-	return fmt.Sprintf(`apiVersion: autoscaling.mws.cloud/v1alpha1
-kind: IOPSAutoScaler
+	return fmt.Sprintf(`version: 1
 mode: local
 
 policy:
   limits: {min_iops: 1000, max_iops: 10000}
   advanced:
-    enabled: true
     evaluation: {scale_up_window: %s, scale_down_window: %s}
     saturation: {utilization_threshold: 0.90, queue_depth_threshold: 0.5}
     cooldown: {scale_up: 10s, scale_down: 20s}

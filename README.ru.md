@@ -127,8 +127,7 @@ go build -o bin/mws-iops-autoscaler ./cmd/mws-iops-autoscaler
 автоматически:
 
 ```yaml
-apiVersion: autoscaling.mws.cloud/v1alpha1
-kind: IOPSAutoScaler
+version: 1
 mode: local
 
 policy:
@@ -155,8 +154,8 @@ runtime:
 ```yaml
 disks:
   mode: selected
-  selected:
-    - device_name: mws-datadisk
+  policies:
+    mws-datadisk: {}
 ```
 
 Правила валидации, лимиты для отдельных дисков и экспериментальные параметры `advanced` описаны в

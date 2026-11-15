@@ -88,7 +88,7 @@ workflow's `-run` filter rather than failing loud — CI would just quietly stop
 | `device_naming_test.go` | `TestFull_DeviceNaming_NoDeviceNameDefaultsToAlias` — the merge tier's second disk, attached with no `deviceName` at all, on the same shared VM as `lifecycle_test.go`'s explicitly-named one; both forms of `docs/platform-reference.md`'s guest-device-mapping default are exercised side by side. Not a `naming_test.go` naming-convention concern — a live platform behavior. |
 | `naming_test.go` | The naming-convention guard described above. |
 | `churn_test.go` | Live attach/detach for the merge tier's churn disk: `setStorageDisks` resends the VM's whole `--storage-disks` list via the `mws` CLI (`compute.Client` deliberately exposes no attach/detach capability — production code never attaches or detaches a disk), since that list is the only way to change one disk's attachment without dropping the others (`docs/ci-cd.md`); `AttachChurnDisk`/`DetachChurnDisk` wrap it with the fixture's own known-good entries; `waitForDiskAttached` polls past the update's propagation lag. |
-| `discovery_test.go` | The `disks.selected`/`disks.exclude` discovery-and-scope scenarios: `TestFull_Discovery_AttachedDiskManagedWithoutRestart` (auto-discovery picks up a disk attached after the agent has already started, within one `discovery_interval`, no restart) and `TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart` (an unresolved `disks.exclude` name refuses to manage anything at cold start — `docs/design.md` §4.1). See "Discovery and scope coverage" below for what's implemented here versus proven only at the unit level so far. |
+| `discovery_test.go` | The `disks.policies`/`disks.exclude` discovery-and-scope scenarios: `TestFull_Discovery_AttachedDiskManagedWithoutRestart` (auto-discovery picks up a disk attached after the agent has already started, within one `discovery_interval`, no restart) and `TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart` (an unresolved `disks.exclude` name refuses to manage anything at cold start — `docs/design.md` §4.1). See "Discovery and scope coverage" below for what's implemented here versus proven only at the unit level so far. |
 | `headroom_test.go` | `TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap` (E5) — an unmanaged sibling doing real, sustained I/O must still count toward a managed disk's VM headroom (`docs/design.md` §4.6, D4/US-009). Runs unconditionally as an ordinary required scenario (see "VM headroom coverage" below); no longer `xfail`-wrapped. |
 | `vmcap_test.go` | `TestSmoke_Decisions_VMCapReachedUnderAggregateLoad` — §8.3's VM cap detection: both managed smoke disks loaded together past the VM's pool (`isVMPoolCapRecord` is the record predicate, covered by `TestRegression_VMCap_*`). The second disk's fio logs to its own path via `driveLoadToLog`, since `DriveLoad`'s log is already in use. |
 | `xfail.go` | `xfail(t, issueURL, scenario)` — converts a `func() error` scenario's outcome into a non-blocking `t.Skip` on error (a known, tracked gap) or a forced `t.Fatal` on nil (the fix shipped; remove this wrapper). The scenario it wraps must never call a `*testing.T` failure method itself — Go cannot catch one raised from inside a test — so it is built from `runAgentScenarioWithDisksErr` and the package's other error-returning primitives, never `runAgentScenarioWithDisks` or a bare `t.Fatalf`. Currently unused — available for a future scenario that covers a known, tracked gap. |
@@ -144,7 +144,7 @@ the production flag flip itself).
 
 ### Discovery and scope coverage — what's actually implemented today
 
-`docs/design.md` §4.1's cold-start-vs-runtime degradation model (an unresolved `disks.selected` or
+`docs/design.md` §4.1's cold-start-vs-runtime degradation model (an unresolved `disks.policies` or
 `disks.exclude` name is fatal on the very first discovery of the process's life, degrades only that
 name afterward) is fully covered at the unit level
 (`internal/registry/registry_test.go`, `cmd/mws-iops-autoscaler/agent_test.go`). `discovery_test.go`
@@ -156,13 +156,13 @@ can catch:
 |---|---|
 | Auto-discovery picks up a live-attached disk within one `discovery_interval`, no restart | Implemented (`TestFull_Discovery_AttachedDiskManagedWithoutRestart`) |
 | An unresolved `disks.exclude` name is fatal at cold start | Implemented (`TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart`) |
-| An unresolved `disks.exclude`/`disks.selected` name degrades without being fatal once at least one discovery has already succeeded | Proven at the unit level only (`TestReconcile_degradesPartiallyWhenASelectedDiskIsRemovedAtRuntime`) — shares `discover()`'s decision path with the cold-start case above, so no new product code path needs live proof yet |
+| An unresolved `disks.exclude`/`disks.policies` name degrades without being fatal once at least one discovery has already succeeded | Proven at the unit level only (`TestReconcile_degradesPartiallyWhenASelectedDiskIsRemovedAtRuntime`) — shares `discover()`'s decision path with the cold-start case above, so no new product code path needs live proof yet |
 | Auto-discovery drops a live-detached disk, other managed disks keep scaling | Not implemented |
 | An excluded disk being attached or detached has no effect on the managed set | Not implemented |
-| Moving a disk into or out of `disks.exclude`/`disks.selected` (config change, requires a restart — `docs/TODO.md`'s config hot-reload item) | Not implemented |
+| Moving a disk into or out of `disks.exclude`/`disks.policies` (config change, requires a restart — `docs/TODO.md`'s config hot-reload item) | Not implemented |
 | `n+1` disks attached, `n` selected → exactly `n` managed | Not implemented |
-| A `disks.selected` disk never attached at cold start → fatal, nothing managed | Proven at the unit level only (`TestDiscover_unmatchedSelectedDeviceAtColdStartIsFatal`) — same reasoning as the exclude row above: the exclude scenario already exercises this code path live, and `selected` shares it |
-| Adding an already-attached disk to `disks.selected` (config change, requires a restart) | Not implemented |
+| A `disks.policies` disk never attached at cold start → fatal, nothing managed | Proven at the unit level only (`TestDiscover_unmatchedSelectedDeviceAtColdStartIsFatal`) — same reasoning as the exclude row above: the exclude scenario already exercises this code path live, and `selected` shares it |
+| Adding an already-attached disk to `disks.policies` (config change, requires a restart) | Not implemented |
 
 The unimplemented rows all reuse `churn_test.go`'s attach/detach plumbing and `discovery_test.go`'s
 `DisksSpec`-parameterized config; nothing further needs building in the harness itself to add them.
@@ -172,7 +172,7 @@ The unimplemented rows all reuse `churn_test.go`'s attach/detach plumbing and `d
 `docs/design.md` §4.6 defines VM headroom from "other disks", not "other **managed** disks" — the
 VM's shared IOPS pool is consumed by every attached disk, whether or not this agent happens to manage
 it. `TestFull_Headroom_UnmanagedSiblingCountsTowardVMCap` (`headroom_test.go`, E5 in the test-plan
-shorthand, [issue #54][issue-54]) asserts exactly that: `disks.selected` names only the managed disk,
+shorthand, [issue #54][issue-54]) asserts exactly that: `disks.policies` names only the managed disk,
 an unmanaged sibling (the churn disk) is driven with sustained load, and the managed disk's own
 `vm_headroom_iops` journal field must fall meaningfully below the VM's full pool.
 

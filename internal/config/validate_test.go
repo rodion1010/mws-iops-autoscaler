@@ -9,9 +9,8 @@ import (
 
 func validConfig() *Config {
 	return &Config{
-		APIVersion: "autoscaling.mws.cloud/v1alpha1",
-		Kind:       "IOPSAutoScaler",
-		Mode:       "local",
+		Version: 1,
+		Mode:    "local",
 		Policy: PolicySpec{
 			Limits: &LimitsSpec{MinIOPS: intPtr(1000), MaxIOPS: intPtr(10000)},
 		},
@@ -38,7 +37,7 @@ func TestValidateDeviceNameAcceptsPlatformVisibleName(t *testing.T) {
 	c := validConfig()
 	c.Disks.Mode = "selected"
 	c.Disks.Exclude = nil
-	c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "mws-datadisk"}}
+	c.Disks.Policies = map[string]*PolicySpec{"mws-datadisk": nil}
 
 	if err := Validate(c); err != nil {
 		t.Fatalf("Validate(platform-visible device_name) = %v, want nil", err)
@@ -55,7 +54,7 @@ func TestValidateDeviceNameRejectsNonPlatformVisibleForm(t *testing.T) {
 		c := validConfig()
 		c.Disks.Mode = "selected"
 		c.Disks.Exclude = nil
-		c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}}
+		c.Disks.Policies = map[string]*PolicySpec{"datadisk": nil}
 
 		err := Validate(c)
 		if err == nil || !strings.Contains(err.Error(), "is not the exact value VM status reports") {
@@ -109,37 +108,11 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "not a multiple of",
 		},
 		{
-			name: "advanced fields set without advanced.enabled",
-			mutate: func(c *Config) {
-				c.Policy.Advanced = &AdvancedSpec{
-					Step: &StepSpec{MinChangeIOPS: intPtr(500)},
-				}
-			},
-			wantSub: "advanced.enabled is not true",
-		},
-		{
-			name: "advanced fields set with advanced.enabled: false",
-			mutate: func(c *Config) {
-				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(false),
-					Step:    &StepSpec{MinChangeIOPS: intPtr(500)},
-				}
-			},
-			wantSub: "advanced.enabled is not true",
-		},
-		{
-			name: "advanced.enabled: true with no fields set is fine",
-			mutate: func(c *Config) {
-				c.Policy.Advanced = &AdvancedSpec{Enabled: boolPtr(true)}
-			},
-			wantSub: "",
-		},
-		{
 			name: "device_name as a kernel device path",
 			mutate: func(c *Config) {
 				c.Disks.Mode = "selected"
 				c.Disks.Exclude = nil
-				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "/dev/vdb"}}
+				c.Disks.Policies = map[string]*PolicySpec{"/dev/vdb": nil}
 			},
 			wantSub: "kernel device path",
 		},
@@ -148,18 +121,9 @@ func TestValidate_rules(t *testing.T) {
 			mutate: func(c *Config) {
 				c.Disks.Mode = "selected"
 				c.Disks.Exclude = nil
-				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "mws-datadisk"}}
+				c.Disks.Policies = map[string]*PolicySpec{"mws-datadisk": nil}
 			},
 			wantSub: "",
-		},
-		{
-			name: "duplicate device_name within selected",
-			mutate: func(c *Config) {
-				c.Disks.Mode = "selected"
-				c.Disks.Exclude = nil
-				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "mws-datadisk"}, {DeviceName: "mws-datadisk"}}
-			},
-			wantSub: "listed more than once",
 		},
 		{
 			name: "duplicate device_name within exclude",
@@ -169,17 +133,16 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "listed more than once",
 		},
 		{
-			name: "platform source in local mode without an API key configured",
+			name: "platform source is not implemented",
 			mutate: func(c *Config) {
 				c.Runtime.Metrics.Source = "platform"
 			},
-			wantSub: "requires a monitoring API key",
+			wantSub: "not implemented yet",
 		},
 		{
 			name: "scale_down_window shorter than scale_up_window",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
 					Evaluation: &EvaluationSpec{
 						ScaleUpWindow:   durationPtr("10m"),
 						ScaleDownWindow: durationPtr("5m"),
@@ -192,7 +155,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "scale_down_utilization not below scale_up_utilization",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
 					Target: &TargetSpec{
 						ScaleUpUtilization:   floatPtr(0.70),
 						ScaleDownUtilization: floatPtr(0.70),
@@ -205,7 +167,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "scale_down_utilization above scale_up_utilization",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
 					Target: &TargetSpec{
 						ScaleUpUtilization:   floatPtr(0.70),
 						ScaleDownUtilization: floatPtr(0.85),
@@ -222,7 +183,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "scale_down_utilization above the saturation gate despite being below scale_up_utilization",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(0.70)},
 					Target: &TargetSpec{
 						ScaleUpUtilization:   floatPtr(0.90),
@@ -236,7 +196,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "scale_up_utilization at or above the saturation gate",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(0.90)},
 					Target: &TargetSpec{
 						ScaleUpUtilization:   floatPtr(0.90),
@@ -250,7 +209,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "cooldown.scale_up longer than scale_up_window",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
 					Evaluation: &EvaluationSpec{
 						ScaleUpWindow: durationPtr("5m"),
 					},
@@ -265,7 +223,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "cooldown.scale_down longer than scale_down_window",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
 					Evaluation: &EvaluationSpec{
 						ScaleDownWindow: durationPtr("30m"),
 					},
@@ -292,17 +249,17 @@ func TestValidate_rules(t *testing.T) {
 			wantSub: "neither \"auto-discovery\" nor \"selected\"",
 		},
 		{
-			name: "mode: auto-discovery with selected populated",
+			name: "mode: auto-discovery with a policy for an excluded disk",
 			mutate: func(c *Config) {
-				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}}
+				c.Disks.Policies = map[string]*PolicySpec{"mws-bootdisk": nil}
 			},
-			wantSub: "selected only applies to mode: selected",
+			wantSub: "both excluded and given a policy",
 		},
 		{
 			name: "mode: selected with exclude set",
 			mutate: func(c *Config) {
 				c.Disks.Mode = "selected"
-				c.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}}
+				c.Disks.Policies = map[string]*PolicySpec{"datadisk": nil}
 				// validConfig already excludes bootdisk.
 			},
 			wantSub: "exclude only applies to mode: auto-discovery",
@@ -313,13 +270,12 @@ func TestValidate_rules(t *testing.T) {
 				c.Disks.Mode = "selected"
 				c.Disks.Exclude = nil
 			},
-			wantSub: "mode is \"selected\" but the list is empty",
+			wantSub: "mode is \"selected\" but no disk is listed",
 		},
 		{
 			name: "negative scale_up_window",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Evaluation: &EvaluationSpec{ScaleUpWindow: negativeDurationPtr(t, "5m")},
 				}
 			},
@@ -329,7 +285,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "negative cooldown.scale_down",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:  boolPtr(true),
 					Cooldown: &CooldownSpec{ScaleDown: negativeDurationPtr(t, "5m")},
 				}
 			},
@@ -339,7 +294,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "utilization_threshold of zero",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(0)},
 				}
 			},
@@ -349,7 +303,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "utilization_threshold above 1",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(1.5)},
 				}
 			},
@@ -359,8 +312,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "scale_up_utilization of zero",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Target:  &TargetSpec{ScaleUpUtilization: floatPtr(0)},
+					Target: &TargetSpec{ScaleUpUtilization: floatPtr(0)},
 				}
 			},
 			wantSub: "target.scale_up_utilization",
@@ -369,7 +321,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "negative queue_depth_threshold",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(-1)},
 				}
 			},
@@ -379,7 +330,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "unknown latency.mode",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{Latency: &LatencySpec{Mode: strPtr("eventual")}},
 				}
 			},
@@ -389,7 +339,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "zero latency.baseline_multiplier",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{Latency: &LatencySpec{BaselineMultiplier: floatPtr(0)}},
 				}
 			},
@@ -399,8 +348,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "min_change_iops not a multiple of 100",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Step:    &StepSpec{MinChangeIOPS: intPtr(150)},
+					Step: &StepSpec{MinChangeIOPS: intPtr(150)},
 				}
 			},
 			wantSub: "step.min_change_iops",
@@ -409,8 +357,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "zero min_change_iops",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Step:    &StepSpec{MinChangeIOPS: intPtr(0)},
+					Step: &StepSpec{MinChangeIOPS: intPtr(0)},
 				}
 			},
 			wantSub: "step.min_change_iops",
@@ -419,8 +366,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "max_scale_up_ratio at or below 1",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Step:    &StepSpec{MaxScaleUpRatio: floatPtr(1)},
+					Step: &StepSpec{MaxScaleUpRatio: floatPtr(1)},
 				}
 			},
 			wantSub: "step.max_scale_up_ratio",
@@ -429,8 +375,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "max_scale_down_ratio at or above 1",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Step:    &StepSpec{MaxScaleDownRatio: floatPtr(1)},
+					Step: &StepSpec{MaxScaleDownRatio: floatPtr(1)},
 				}
 			},
 			wantSub: "step.max_scale_down_ratio",
@@ -439,8 +384,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "zero max_changes_per_24h",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Budget:  &BudgetSpec{MaxChangesPer24h: intPtr(0)},
+					Budget: &BudgetSpec{MaxChangesPer24h: intPtr(0)},
 				}
 			},
 			wantSub: "budget.max_changes_per_24h",
@@ -456,7 +400,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "latency.mode absolute is rejected (not implemented)",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{Latency: &LatencySpec{Mode: strPtr("absolute")}},
 				}
 			},
@@ -466,7 +409,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "NaN utilization_threshold rejected as non-finite, not silently passed",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{UtilizationThreshold: floatPtr(math.NaN())},
 				}
 			},
@@ -476,8 +418,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "+Inf scale_up_utilization rejected as non-finite",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Target:  &TargetSpec{ScaleUpUtilization: floatPtr(math.Inf(1))},
+					Target: &TargetSpec{ScaleUpUtilization: floatPtr(math.Inf(1))},
 				}
 			},
 			wantSub: "not a finite number",
@@ -486,7 +427,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "NaN queue_depth_threshold rejected as non-finite",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(math.NaN())},
 				}
 			},
@@ -496,7 +436,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "queue_depth_threshold of exactly zero rejected — gate must not degenerate to always-true",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(0)},
 				}
 			},
@@ -506,7 +445,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "queue_depth_threshold just above zero is valid",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{QueueDepthThreshold: floatPtr(0.1)},
 				}
 			},
@@ -516,7 +454,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "latency.baseline_multiplier of exactly 1 rejected — threshold would equal the baseline itself",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{Latency: &LatencySpec{BaselineMultiplier: floatPtr(1)}},
 				}
 			},
@@ -526,7 +463,6 @@ func TestValidate_rules(t *testing.T) {
 			name: "latency.baseline_multiplier just above 1 is valid",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled:    boolPtr(true),
 					Saturation: &SaturationSpec{Latency: &LatencySpec{BaselineMultiplier: floatPtr(1.01)}},
 				}
 			},
@@ -536,8 +472,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "NaN max_scale_up_ratio rejected as non-finite",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Step:    &StepSpec{MaxScaleUpRatio: floatPtr(math.NaN())},
+					Step: &StepSpec{MaxScaleUpRatio: floatPtr(math.NaN())},
 				}
 			},
 			wantSub: "not a finite number",
@@ -546,8 +481,7 @@ func TestValidate_rules(t *testing.T) {
 			name: "Inf max_scale_down_ratio rejected as non-finite",
 			mutate: func(c *Config) {
 				c.Policy.Advanced = &AdvancedSpec{
-					Enabled: boolPtr(true),
-					Step:    &StepSpec{MaxScaleDownRatio: floatPtr(math.Inf(-1))},
+					Step: &StepSpec{MaxScaleDownRatio: floatPtr(math.Inf(-1))},
 				}
 			},
 			wantSub: "not a finite number",
@@ -571,9 +505,6 @@ func TestValidate_rules(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Keep the platform-key case independent of the ambient environment.
-			t.Setenv(monitoringAPIKeyPathEnv, "")
-
 			cfg := validConfig()
 			tc.mutate(cfg)
 
@@ -595,21 +526,18 @@ func TestValidate_rules(t *testing.T) {
 	}
 }
 
-func TestValidate_perDiskAdvancedGate(t *testing.T) {
+// A per-disk advanced override takes effect on its own; there is no separate
+// opt-in flag to repeat at every level.
+func TestValidate_perDiskAdvancedOverrideNeedsNoOptIn(t *testing.T) {
 	cfg := validConfig()
-	cfg.Disks.Mode = "selected"
-	cfg.Disks.Exclude = nil
-	cfg.Disks.Selected = []SelectedDiskSpec{
-		{
-			DeviceName: "mws-datadisk",
-			Policy: &PolicySpec{
-				Advanced: &AdvancedSpec{Step: &StepSpec{MinChangeIOPS: intPtr(500)}},
-			},
-		},
+	cfg.Disks.Policies = map[string]*PolicySpec{
+		"mws-datadisk": {Advanced: &AdvancedSpec{Step: &StepSpec{MinChangeIOPS: intPtr(500)}}},
 	}
-	err := Validate(cfg)
-	if err == nil || !strings.Contains(err.Error(), "advanced.enabled is not true") {
-		t.Fatalf("Validate() = %v, want a per-disk advanced.enabled violation", err)
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+	if got := Resolve(cfg).DiskPolicies["mws-datadisk"].Advanced.MinChangeIOPS; got != 500 {
+		t.Errorf("resolved min_change_iops = %d, want 500", got)
 	}
 }
 
@@ -738,16 +666,17 @@ func TestValidateCollectionIntervalAgainstWindows_strictlyShorterThanWindowIsVal
 	}
 }
 
-func TestValidate_platformSourceWithKeyConfigured(t *testing.T) {
-	dir := t.TempDir()
-	keyPath := dir + "/monitoring-key"
+// --validate-config must not accept a source the agent refuses at startup,
+// whatever the environment holds.
+func TestValidate_platformSourceRejectedEvenWithKeyConfigured(t *testing.T) {
+	keyPath := t.TempDir() + "/monitoring-key"
 	writeFile(t, keyPath, "fake-api-key")
-	t.Setenv(monitoringAPIKeyPathEnv, keyPath)
+	t.Setenv("MWS_MONITORING_API_KEY_PATH", keyPath)
 
 	cfg := validConfig()
 	cfg.Runtime.Metrics.Source = "platform"
 
-	if err := Validate(cfg); err != nil {
-		t.Fatalf("Validate() = %v, want nil once %s points to an existing file", err, monitoringAPIKeyPathEnv)
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "not implemented yet") {
+		t.Fatalf("Validate() = %v, want \"platform\" rejected as not implemented", err)
 	}
 }

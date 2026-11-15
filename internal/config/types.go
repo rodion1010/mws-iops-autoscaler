@@ -4,28 +4,28 @@
 // project/instance layer is not implemented here yet.
 package config
 
+import "sort"
+
 // Config is the top-level local-mode document (docs/configuration.md §6.1, §6.2).
 type Config struct {
-	APIVersion string      `yaml:"apiVersion"`
-	Kind       string      `yaml:"kind"`
-	Mode       string      `yaml:"mode"`
-	Policy     PolicySpec  `yaml:"policy"`
-	Disks      DisksSpec   `yaml:"disks"`
-	Runtime    RuntimeSpec `yaml:"runtime"`
+	Version int         `yaml:"version"`
+	Mode    string      `yaml:"mode"`
+	Policy  PolicySpec  `yaml:"policy"`
+	Disks   DisksSpec   `yaml:"disks"`
+	Runtime RuntimeSpec `yaml:"runtime"`
 }
 
-// modePeek decodes just enough of the document to route it: local-mode
-// documents are parsed strictly against Config; anything else is rejected
-// before a field-by-field decode is attempted.
+// modePeek decodes just enough of the document to route it: a local-mode
+// version-1 document is parsed strictly against Config; anything else is
+// rejected before a field-by-field decode is attempted.
 type modePeek struct {
-	Mode string `yaml:"mode"`
+	// any, not int: yaml.v3 truncates 1.9 to 1 when decoding into an int.
+	Version any    `yaml:"version"`
+	Mode    string `yaml:"mode"`
 }
 
 // PolicySpec is a partial policy override. Every field is a pointer so the
 // resolver (resolve.go) can tell "not set, inherit" apart from a zero value.
-//
-// Phase 1 ships one built-in default parameter set — no preset field. Named
-// presets (balanced/performance/cost) are deferred; see docs/configuration.md §1.
 type PolicySpec struct {
 	Limits   *LimitsSpec   `yaml:"limits"`
 	Advanced *AdvancedSpec `yaml:"advanced"`
@@ -36,13 +36,10 @@ type LimitsSpec struct {
 	MaxIOPS *int `yaml:"max_iops"`
 }
 
-// AdvancedSpec is opt-in (advanced.enabled must be true for any of it to take
-// effect — docs/configuration.md §8) and API-only until telemetry justifies
-// exposing it. billing_step_iops is deliberately absent: it is platform-fixed
-// and not user-settable, so it is not a decodable field at all — an attempt
-// to set it is rejected by strict decoding as an unknown key.
+// AdvancedSpec holds experimental controller parameters (docs/configuration.md §2).
+// billing_step_iops is deliberately absent: it is platform-fixed, so strict
+// decoding rejects it as an unknown key.
 type AdvancedSpec struct {
-	Enabled    *bool           `yaml:"enabled"`
 	Evaluation *EvaluationSpec `yaml:"evaluation"`
 	Saturation *SaturationSpec `yaml:"saturation"`
 	Target     *TargetSpec     `yaml:"target"`
@@ -100,18 +97,13 @@ type BudgetSpec struct {
 }
 
 // DisksSpec is the disk selection strategy (docs/configuration.md §4).
+// Policies is keyed by device_name — the exact value VM status reports,
+// never a kernel device path (docs/design.md §4.1). In selected mode its keys
+// are the managed set; in auto-discovery mode they override single disks.
 type DisksSpec struct {
-	Mode     string             `yaml:"mode"` // auto-discovery | selected
-	Exclude  []string           `yaml:"exclude"`
-	Selected []SelectedDiskSpec `yaml:"selected"`
-}
-
-// SelectedDiskSpec names one disk by device_name — the exact value VM
-// status reports, never a kernel device path (docs/design.md §4.1) — with
-// an optional per-disk policy override.
-type SelectedDiskSpec struct {
-	DeviceName string      `yaml:"device_name"`
-	Policy     *PolicySpec `yaml:"policy"`
+	Mode     string                 `yaml:"mode"` // auto-discovery | selected
+	Exclude  []string               `yaml:"exclude"`
+	Policies map[string]*PolicySpec `yaml:"policies"`
 }
 
 type RuntimeSpec struct {
@@ -129,4 +121,15 @@ type MetricsSpec struct {
 type ControllerSpec struct {
 	ReconcileInterval *Duration `yaml:"reconcile_interval"`
 	DiscoveryInterval *Duration `yaml:"discovery_interval"`
+}
+
+// PolicyNames returns the keys of Policies in sorted order, so selection and
+// diagnostics do not depend on map iteration order.
+func (d DisksSpec) PolicyNames() []string {
+	names := make([]string, 0, len(d.Policies))
+	for name := range d.Policies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

@@ -20,7 +20,7 @@ type ManagedDisk struct {
 	Policy config.ResolvedPolicy
 }
 
-// Degradation names one disks.selected or disks.exclude entry that could
+// Degradation names one disks.policies or disks.exclude entry that could
 // not be resolved against vm's live disks this cycle. DeviceName is
 // whatever the operator's config named — for ExcludeTargetNotFound it does
 // not correspond to any live disk at all. Reason is one of Select's two
@@ -30,11 +30,12 @@ type Degradation struct {
 	Reason     string
 }
 
-// Select's two Degradation.Reason categories (docs/design.md §4.1,
+// Select's Degradation.Reason categories (docs/design.md §4.1,
 // docs/configuration.md §4.2).
 const (
 	ReasonSelectedNotFound      = "selected_not_found"
 	ReasonExcludeTargetNotFound = "exclude_target_not_found"
+	ReasonPolicyTargetNotFound  = "policy_target_not_found"
 )
 
 // Select applies spec against vm's discovered disks, matching by the exact
@@ -44,7 +45,7 @@ const (
 // describes, already computed by config.Resolve; this function only
 // decides which disks it applies to.
 //
-// degraded names every disks.selected or disks.exclude entry that could not
+// degraded names every disks.policies or disks.exclude entry that could not
 // be resolved this cycle — Select always returns the managed set it could
 // actually build (never nil on a mismatch) alongside it, because Select has
 // no memory of prior cycles (see the package doc) and therefore cannot
@@ -87,6 +88,17 @@ func Select(vm *compute.VirtualMachine, spec config.DisksSpec, resolved *config.
 				degraded = append(degraded, Degradation{DeviceName: name, Reason: ReasonExcludeTargetNotFound})
 			}
 		}
+		// Same reasoning for a per-disk policy: a typo would silently leave
+		// the intended disk on the VM-wide policy.
+		live := make(map[string]bool, len(vm.Disks))
+		for _, d := range vm.Disks {
+			live[d.DeviceName] = true
+		}
+		for _, name := range spec.PolicyNames() {
+			if !live[name] {
+				degraded = append(degraded, Degradation{DeviceName: name, Reason: ReasonPolicyTargetNotFound})
+			}
+		}
 		return managed, degraded, nil
 
 	case "selected":
@@ -99,13 +111,13 @@ func Select(vm *compute.VirtualMachine, spec config.DisksSpec, resolved *config.
 		for _, d := range vm.Disks {
 			byName[d.DeviceName] = d
 		}
-		for _, sel := range spec.Selected {
-			d, ok := byName[sel.DeviceName]
+		for _, name := range spec.PolicyNames() {
+			d, ok := byName[name]
 			if !ok {
-				degraded = append(degraded, Degradation{DeviceName: sel.DeviceName, Reason: ReasonSelectedNotFound})
+				degraded = append(degraded, Degradation{DeviceName: name, Reason: ReasonSelectedNotFound})
 				continue
 			}
-			managed = append(managed, ManagedDisk{Disk: d, Policy: policyFor(sel.DeviceName, resolved)})
+			managed = append(managed, ManagedDisk{Disk: d, Policy: policyFor(name, resolved)})
 		}
 		return managed, degraded, nil
 

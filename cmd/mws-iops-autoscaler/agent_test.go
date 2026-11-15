@@ -464,8 +464,9 @@ func TestReconcile_degradesPartiallyWhenASelectedDiskIsRemovedAtRuntime(t *testi
 	a.maxDiscoveryAge = time.Hour
 	a.decider = fixedDecider{action: decider.ActionScaleUp, target: 2000}
 	a.analyzer = analyzer.NewWindowAnalyzer()
-	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
-		{DeviceName: "good"}, {DeviceName: "missing-disk"},
+	a.cfg.Disks = config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{
+		"good":         nil,
+		"missing-disk": nil,
 	}}
 
 	if err := a.discover(context.Background()); err != nil {
@@ -712,7 +713,7 @@ func TestDiscover_populatesUnmanagedFromDisksOutsideSelection(t *testing.T) {
 		},
 	}
 	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
-	a.cfg = &config.Config{Disks: config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "data"}}}}
+	a.cfg = &config.Config{Disks: config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{"data": nil}}}
 	a.resolved = &config.ResolvedConfig{Disks: a.cfg.Disks, VMPolicy: testResolvedPolicy()}
 
 	if err := a.discover(context.Background()); err != nil {
@@ -1113,8 +1114,9 @@ func TestDiscover_unmatchedSelectedDeviceAtColdStartIsFatal(t *testing.T) {
 		},
 	}
 	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
-	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{
-		{DeviceName: "good"}, {DeviceName: "missing-disk"},
+	a.cfg.Disks = config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{
+		"good":         nil,
+		"missing-disk": nil,
 	}}
 	if !a.lastDiscoverySuccess.IsZero() {
 		t.Fatal("test setup: lastDiscoverySuccess must be zero — this test is specifically the cold-start case (docs/design.md §4.1)")
@@ -1156,7 +1158,7 @@ func TestDiscover_selectedSucceedsWhenEveryDeviceMatches(t *testing.T) {
 		},
 	}
 	a := newDiscoverableTestAgent(t, &recordingActuator{}, client)
-	a.cfg.Disks = config.DisksSpec{Mode: "selected", Selected: []config.SelectedDiskSpec{{DeviceName: "good"}}}
+	a.cfg.Disks = config.DisksSpec{Mode: "selected", Policies: map[string]*config.PolicySpec{"good": nil}}
 
 	if err := a.discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)

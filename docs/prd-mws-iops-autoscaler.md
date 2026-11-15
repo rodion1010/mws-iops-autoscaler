@@ -53,7 +53,7 @@ reproducible and reviewable.
 
 **Acceptance Criteria:**
 - [ ] YAML config with schema validation; unknown keys are an error, not silently ignored
-- [ ] `apiVersion`/`kind` are checked against the values this build supports, and a second
+- [ ] `version` and `mode` are checked against the values this build supports, and a second
       `---`-separated document in the same file is rejected rather than silently dropped
 - [ ] Every tunable in FR-13 is settable; omitted values fall back to documented defaults
 - [ ] `--validate-config` exits non-zero with a human-readable message on invalid input
@@ -457,7 +457,7 @@ needs, per mode, so that I do not have to grant it broad rights.
 - FR-5: Discovery must run continuously on an interval, so disks attached after startup enter
   management without a restart.
 - FR-5a: The agent must never decide or write against a managed snapshot a fatal discovery error has
-  invalidated (including an unmatched `disks.selected` device_name) — invalidated the instant the error
+  invalidated (including an unmatched `disks.policies` device_name) — invalidated the instant the error
   happens, not only once the snapshot's age exceeds `max_discovery_age` (issue #15's time-based bound
   remains as an independent, complementary guard for discovery having simply stopped running at all;
   pre-merge review).

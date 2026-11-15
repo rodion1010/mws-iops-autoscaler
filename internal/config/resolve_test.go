@@ -9,7 +9,7 @@ func TestResolve_diskInheritsVMPolicyWhenNoOverride(t *testing.T) {
 	cfg := validConfig()
 	cfg.Disks.Mode = "selected"
 	cfg.Disks.Exclude = nil
-	cfg.Disks.Selected = []SelectedDiskSpec{{DeviceName: "datadisk"}}
+	cfg.Disks.Policies = map[string]*PolicySpec{"datadisk": nil}
 
 	resolved := Resolve(cfg)
 	got := resolved.DiskPolicies["datadisk"]
@@ -22,10 +22,9 @@ func TestResolve_diskOverridesOnlyLimitsInheritsAdvanced(t *testing.T) {
 	cfg := validConfig() // vm-level: [1000, 10000], the one built-in advanced set
 	cfg.Disks.Mode = "selected"
 	cfg.Disks.Exclude = nil
-	cfg.Disks.Selected = []SelectedDiskSpec{{
-		DeviceName: "logdisk",
-		Policy:     &PolicySpec{Limits: &LimitsSpec{MinIOPS: intPtr(3000)}},
-	}}
+	cfg.Disks.Policies = map[string]*PolicySpec{
+		"logdisk": &PolicySpec{Limits: &LimitsSpec{MinIOPS: intPtr(3000)}},
+	}
 
 	resolved := Resolve(cfg)
 	got := resolved.DiskPolicies["logdisk"]
@@ -45,13 +44,12 @@ func TestResolve_diskOverridesLimitsAndAdvanced(t *testing.T) {
 	cfg := validConfig()
 	cfg.Disks.Mode = "selected"
 	cfg.Disks.Exclude = nil
-	cfg.Disks.Selected = []SelectedDiskSpec{{
-		DeviceName: "backupdisk",
-		Policy: &PolicySpec{
+	cfg.Disks.Policies = map[string]*PolicySpec{
+		"backupdisk": &PolicySpec{
 			Limits:   &LimitsSpec{MaxIOPS: intPtr(6000)},
-			Advanced: &AdvancedSpec{Enabled: boolPtr(true), Step: &StepSpec{MinChangeIOPS: intPtr(300)}},
+			Advanced: &AdvancedSpec{Step: &StepSpec{MinChangeIOPS: intPtr(300)}},
 		},
-	}}
+	}
 
 	resolved := Resolve(cfg)
 	got := resolved.DiskPolicies["backupdisk"]
@@ -70,11 +68,24 @@ func TestResolve_diskOverridesLimitsAndAdvanced(t *testing.T) {
 	}
 }
 
+// auto-discovery keeps managing every disk while one of them carries its own policy.
+func TestResolve_autoDiscoveryAcceptsPerDiskPolicy(t *testing.T) {
+	cfg := validConfig() // auto-discovery, excludes mws-bootdisk
+	cfg.Disks.Policies = map[string]*PolicySpec{
+		"mws-wal": {Limits: &LimitsSpec{MinIOPS: intPtr(5000)}},
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+	if got := Resolve(cfg).DiskPolicies["mws-wal"].MinIOPS; got != 5000 {
+		t.Errorf("mws-wal MinIOPS = %d, want 5000", got)
+	}
+}
+
 func TestResolve_advancedOverrideAppliesOnTopOfDefault(t *testing.T) {
 	cfg := validConfig()
 	cfg.Policy.Advanced = &AdvancedSpec{
-		Enabled: boolPtr(true),
-		Step:    &StepSpec{MinChangeIOPS: intPtr(999)},
+		Step: &StepSpec{MinChangeIOPS: intPtr(999)},
 	}
 
 	resolved := Resolve(cfg)

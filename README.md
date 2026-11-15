@@ -106,8 +106,7 @@ Save the following as `config.yaml`. The example excludes the boot disk with `de
 manages every other supported disk attached to the VM:
 
 ```yaml
-apiVersion: autoscaling.mws.cloud/v1alpha1
-kind: IOPSAutoScaler
+version: 1
 mode: local
 
 policy:
@@ -134,8 +133,8 @@ To manage only named disks, use explicit selection instead:
 ```yaml
 disks:
   mode: selected
-  selected:
-    - device_name: mws-datadisk
+  policies:
+    mws-datadisk: {}
 ```
 
 See the [configuration reference](docs/configuration.md) for validation rules, per-disk limits and the

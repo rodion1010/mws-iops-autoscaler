@@ -197,7 +197,7 @@ contain the complete contracts, edge cases and failure behaviour.
 Discovery is idempotent and rebuilds the registry wholesale. A disk that changed class, was detached,
 or was resized externally is picked up here.
 
-A `disks.selected` or `disks.exclude` entry that doesn't resolve against the VM's live disks
+A `disks.policies` or `disks.exclude` entry that doesn't resolve against the VM's live disks
 (`registry.Degradation`) is handled differently depending on discovery history, not treated as one
 fixed outcome — `registry.Select` itself has no memory of prior cycles (it is rebuilt wholesale every
 time, per above) and always returns the managed set it could build plus the unresolved names; deciding
@@ -1039,8 +1039,8 @@ exposing them.
 |---|---|
 | Metrics unavailable | Mark disks "no data" — reason `no_data` if never sampled at all (`Analysis.HasData = false`), `metrics_stale` if sampled before but now too old (`Analysis.Fresh = false`, issue #15, pre-merge review) — take no action, alert after `n` cycles |
 | Compute API unavailable | Retry with backoff; decisions queue but never stack up (latest wins). Once the last successful discovery exceeds `max_discovery_age` (3× `discovery_interval`), reconcile skips every disk for that cycle rather than keep acting on a snapshot that may no longer reflect reality (issue #15) |
-| Discovery fails outright (Compute API error, or an unmatched `disks.selected`/`disks.exclude` name at cold start, issue #5 reopened) | The managed snapshot is invalidated the instant the failure happens (`Agent.managedValid`), not merely once `max_discovery_age` eventually elapses — a fatal error and staleness-by-age are two independent, both-checked gates (pre-merge review) |
-| An unmatched `disks.selected`/`disks.exclude` name at runtime (≥1 prior successful discovery, §4.1) | Not fatal — only that name degrades (`registry.Degradation`); every other disk keeps being managed, reported via `/readyz`'s body and a gauge, never the binary verdict |
+| Discovery fails outright (Compute API error, or an unmatched `disks.policies`/`disks.exclude` name at cold start, issue #5 reopened) | The managed snapshot is invalidated the instant the failure happens (`Agent.managedValid`), not merely once `max_discovery_age` eventually elapses — a fatal error and staleness-by-age are two independent, both-checked gates (pre-merge review) |
+| An unmatched `disks.policies`/`disks.exclude` name at runtime (≥1 prior successful discovery, §4.1) | Not fatal — only that name degrades (`registry.Degradation`); every other disk keeps being managed, reported via `/readyz`'s body and a gauge, never the binary verdict |
 | Write returns non-2xx | Log with full request context, back off, do not update state |
 | Write succeeds but value differs | Treat as failure, re-read, reconcile on next cycle |
 | Write call itself errors (network) | Reservation resolved from a fresh live read, never released on the error alone — the platform may have applied it before the response arrived (pre-merge review; see §9.4's budget crash-safety note) |
@@ -1135,7 +1135,7 @@ Those three are added when their producing subsystem exists.
 autoscaler delivers (or costs) is measurable rather than asserted.
 
 `disk_configured_unmanaged{device_name,reason}` is the one gauge here whose label set is unbounded and
-operator-controlled rather than fixed in advance — `device_name` is whatever a `disks.selected`/
+operator-controlled rather than fixed in advance — `device_name` is whatever a `disks.policies`/
 `disks.exclude` entry named, which may not correspond to any live disk at all (§4.1). It is therefore
 the one metric in this file that is *deleted*, not set to 0, once resolved
 (`telemetry.SyncDiskConfiguredUnmanaged`): a `GaugeVec` series set to 0 would still enumerate in
@@ -1213,7 +1213,7 @@ its own: an operator seeing `/readyz` fail for this reason specifically knows th
 "wait for the network to come back."
 
 `/readyz`'s JSON body also carries `configured_disks_unmanaged` — every currently-degraded
-`disks.selected`/`disks.exclude` name (§4.1), as `{device_name, reason}` — but this field is reported
+`disks.policies`/`disks.exclude` name (§4.1), as `{device_name, reason}` — but this field is reported
 *alongside* the binary verdict above, never folded into it: a degraded disk at runtime does not make
 `/readyz` unready. The field is omitted entirely when nothing is degraded, so the healthy-state
 response is byte-for-byte what it was before this field existed.
@@ -1241,7 +1241,8 @@ its own fleet.
 - *Severity:* warning; the fix should land within one business day. For `selected_not_found` the disk
   keeps its last applied IOPS limit and is not scaled, so the cost is missed autoscaling. For
   `exclude_target_not_found` the risk is the opposite: a disk the operator meant to leave alone is
-  scaled, and spends change budget.
+  scaled, and spends change budget. For `policy_target_not_found` the intended disk is managed under the
+  VM-wide policy instead of its own.
 - *Owner:* the team that deploys the agent on that VM. The names come from its configuration, so only
   it can say whether the name or the attachment is wrong.
 - *Recovery:* automatic only when the disk comes back under the same `device_name`: the series is
