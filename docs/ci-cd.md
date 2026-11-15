@@ -67,7 +67,8 @@ actually runs on and whose disk gets scaled. They need separate credentials — 
 Exactly one self-hosted runner exists for now. GitHub Actions runs at most one job at a time on a given
 runner, which is what makes reusing one shared persistent smoke VM safe without a locking mechanism.
 The PR-tier workflow also sets an explicit `concurrency` group so this stays true even if a second
-runner is added later without updating this assumption. See `docs/TODO.md` for what scaling beyond one
+runner is added later without updating this assumption. It sets `queue: max`, so pending smoke runs
+wait in order (up to 100) instead of the newest cancelling the older one. See `docs/TODO.md` for what scaling beyond one
 runner would require.
 
 ## Service accounts

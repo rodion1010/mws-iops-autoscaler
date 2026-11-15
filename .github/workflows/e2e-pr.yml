@@ -22,11 +22,12 @@ jobs:
   smoke:
     if: github.event.pull_request.head.repo.full_name == github.repository && vars.MWS_PROJECT != ''
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
-    # All smoke runs share one target and must execute serially. Job-level, so the
-    # fork notice job never takes the group's single pending slot from a smoke run.
+    # All smoke runs share one target and must execute serially. queue: max keeps
+    # up to 100 pending runs instead of one, so a new PR no longer cancels another's.
     concurrency:
       group: e2e-smoke-vm
       cancel-in-progress: false
+      queue: max
     # Budget derivation is in docs/ci-cd.md's "Timeout budgets" — recompute
     # before shrinking this or adding a TestSmoke_* scenario.
     timeout-minutes: 73
