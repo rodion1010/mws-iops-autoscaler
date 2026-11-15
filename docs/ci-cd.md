@@ -40,6 +40,24 @@ branch, and a skipped `smoke` satisfies a required status check, so branch prote
 with that review. The runner service account's role set is still broader than the PR tier needs
 (`docs/TODO.md`).
 
+**Public mirror (Product Lead decision, 2026-11-15):** this repository and its runner stay private.
+The public repository is a mirror of `main` with cleaned history; no runner is registered to it and
+it has none of the variables or the secret below. Every job that targets the self-hosted runner is
+guarded by `vars.MWS_PROJECT != ''`, so in the mirror those jobs are skipped instead of queueing, and
+nothing a public PR changes in `.github/` can reach the runner. A maintainer ports a public PR to a
+branch here, runs the tiers, and publishes the result with the next mirror update
+(`SRC=<private URL> DST=<mirror URL> mirror/publish.sh`). The script strips itself and
+`docs/platform-dependencies.md` from the mirror, refuses unless `SRC` is private and `DST` is a
+different, public repository, and fails closed if a replaced string survives in any commit's tree or
+message or the scan itself fails; `mirror/publish_test.sh` covers those refusals against local
+repositories.
+
+**Attack paths and residual risk.** Code that runs on the runner gets the runner SA's token from the
+runner's IMDS with no secret, and `E2E_SSH_PRIVATE_KEY` gives it a shell on target VMs, whose own IMDS
+hands out the agent-under-test SA's token. Only someone who can push a branch here can start such a
+run, and today that is the maintainer alone. Before anyone else gets write access, narrow the runner's
+role set or move to ephemeral per-job runners (`docs/TODO.md`).
+
 ## Runner vs. target VM — two different machines
 
 The **runner** executes pipeline steps and issues MWS API calls; it is never the thing under test. The
@@ -250,16 +268,15 @@ right now. Provisioned by hand via the `mws` CLI, in this order:
    - **Plan limitation:** branch protection is not available to this private repository on the
      current GitHub plan — the API answers 403, "Upgrade to GitHub Pro or make this repository
      public to enable this feature" (verified 2026-09-06). Upgrade to a plan that supports branch
-     protection. Do **not** make the repository public to obtain it: that would expose the repo
-     before the runner's role set is narrowed.
+     protection. Do **not** make this repository public to obtain it: publication goes through the
+     public mirror (see the PR-tier trust model above), and this repository keeps the runner.
    - **Trust model:** decided (same-repository branches only, see the PR-tier trust model above).
-     Narrow the runner's role set (`docs/TODO.md`) before making `smoke` a required check.
-   Once both are resolved: upgrade the plan, then configure `verify` and `smoke` as required
-   status checks.
+   Once the plan allows it, configure `verify` and `smoke` as required status checks.
 9. **Confirm GitHub's fork-approval requirement is active** for workflow runs from outside contributors
    (default: first-time contributors need approval). Approval only permits execution. `e2e-pr.yml` is
    `pull_request_target` and skips fork PRs by design, so an approved fork PR never reaches the
-   credentialed runner — see the PR-tier trust model above.
+   credentialed runner — see the PR-tier trust model above. Never register the runner, or copy the
+   variables and the secret, to the public mirror.
 
 Every full-tier run additionally creates and attaches `ci-agent-sa` to its own freshly created VM as part
 of the workflow itself (not a one-time step) — see step 3 above's per-run analogue in
