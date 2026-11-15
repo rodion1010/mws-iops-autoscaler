@@ -58,8 +58,6 @@ These were identified during design/review but explicitly deferred, not solved:
   key reaches target VMs (which themselves expose an SA through their own IMDS). Remaining work:
   narrow the runner's role set (next item), and consider ephemeral per-job runners if external
   committers are ever added.
-- **One of `docs/design.md` §8.3's ten e2e scenarios is not implemented: VM cap detection.** See
-  `docs/testing.md`'s coverage table for the honest per-scenario status of the other nine.
 
 ### Alerting contract for the remaining `docs/design.md` §7.3 conditions
 

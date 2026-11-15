@@ -344,7 +344,7 @@ func StopAgent(ctx context.Context, t Target) error {
 // expected saturation/demand never shows up can tell whether fio actually
 // ran for its full --runtime=600 or died immediately (e.g. a bad guest path)
 // — FetchLoadLog reads it back. All three Drive*Load functions share it:
-// only one load generator runs at a time per scenario.
+// a scenario loading a second disk concurrently gives it its own log (driveLoadToLog).
 const loadLogPath = remoteWorkDir + "/load.log"
 
 // FetchLoadLog returns the fio job's captured stdout/stderr — diagnostic
@@ -359,8 +359,14 @@ func FetchLoadLog(ctx context.Context, t Target) string {
 
 // DriveLoad tags its root-owned fio process for scoped cleanup.
 func DriveLoad(ctx context.Context, t Target) error {
+	return driveLoadToLog(ctx, t, loadLogPath)
+}
+
+// driveLoadToLog is DriveLoad with its own log path, for a scenario that
+// loads a second disk on the same VM while DriveLoad's log is in use.
+func driveLoadToLog(ctx context.Context, t Target, logPath string) error {
 	guestPath := (compute.StorageDisk{DeviceName: t.DeviceName}).GuestPath()
-	return t.RunBackgroundToLog(ctx, deepLoadCmd(guestPath, "4k"), loadLogPath)
+	return t.RunBackgroundToLog(ctx, deepLoadCmd(guestPath, "4k"), logPath)
 }
 
 // deepLoadCmd names libaio explicitly: fio's default engine is synchronous and ignores
@@ -491,6 +497,7 @@ func FetchJournal(ctx context.Context, t Target) string {
 // §7.2, internal/journal.go's own doc comment), so an e2e scenario reads it
 // the same way any other external consumer would.
 type journalRecord struct {
+	Disk           string  `json:"disk"`
 	Action         string  `json:"action"`
 	Reason         string  `json:"reason"`
 	CurrentIOPS    int64   `json:"current_iops"`

@@ -124,7 +124,7 @@ backstop teardown step — rather than by the job-level kill.
 
 | Workflow | `go test -timeout` | Worst-case test budget | `timeout-minutes` |
 |---|---|---|---|
-| `e2e-pr.yml` (smoke) | 58m | ~54m (nine `TestSmoke_*` scenarios; seven at 5–6m, `TestSmoke_Decisions_NoFlapping` at 12m for its two full up/down proof cycles) | 63 |
+| `e2e-pr.yml` (smoke) | 68m | ~64m (ten `TestSmoke_*` scenarios; seven at 5–6m, `TestSmoke_Decisions_VMCapReachedUnderAggregateLoad` at 10m for two disks' preflight and elevation, `TestSmoke_Decisions_NoFlapping` at 12m for its two full up/down proof cycles) | 73 |
 | `e2e-full.yml` (full) | 84m | ~83m (shared fixture's 15m provisioning context, paid once, + each `TestFull_*` test's own context + `TestMain`'s dedicated 8-minute teardown budget) | 96 |
 
 `timeout-minutes` must also stay below the orphan sweeper's TTL floor (see "Orphan sweeper"). Recompute
