@@ -3,7 +3,25 @@
 Repository instructions for coding agents. This file defines how to work in the repository; it is
 not an architecture or platform reference.
 
-## Read before changing code
+## Repositories
+
+Development happens in the private repository `rodion1010/mws-iops-autoscaler-private`: all branches,
+pull requests, CI and the self-hosted runner live there. The public `rodion1010/mws-iops-autoscaler` is
+a generated mirror of its `main` with cleaned history ([docs/ci-cd.md](docs/ci-cd.md), "Public mirror").
+
+- Never push, branch or open a pull request in the public repository; never force-push it.
+- Publish only after a change is merged to private `main`, from a checkout whose `HEAD` equals the
+  remote `main` (compare SHAs after fetching):
+  `SRC=https://github.com/rodion1010/mws-iops-autoscaler-private.git DST=https://github.com/rodion1010/mws-iops-autoscaler.git mirror/publish.sh`.
+  Then clone the public repository and check its history before announcing the publish.
+- A string that must not be public (internal host, ticket, project ID, personal email) goes into
+  `mirror/replacements.txt`, and an author identity into `mirror/mailmap`, before the next publish.
+  Both apply to the whole history.
+- `mirror/` and `docs/platform-dependencies.md` never reach the mirror; public documents must not link
+  to them.
+- A public pull request is ported by hand to a private branch, verified there and published with the
+  next mirror update.
+
 
 - Product requirements and MVP scope: [docs/prd-mws-iops-autoscaler.md](docs/prd-mws-iops-autoscaler.md)
 - Accepted architecture and safety invariants: [docs/design.md](docs/design.md)
