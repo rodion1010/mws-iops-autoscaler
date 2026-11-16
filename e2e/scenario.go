@@ -660,11 +660,11 @@ func runAgentScenarioWithDisks(t *testing.T, ctx context.Context, target Target,
 // *testing.T failure raised from inside a test. runAgentScenarioWithDisks is
 // its *testing.T-facing wrapper.
 func runAgentScenarioWithDisksErr(ctx context.Context, target Target, project string, dryRun bool, disks DisksSpec, discoveryInterval time.Duration, run func(agentStarted time.Time) error) error {
-	binPath, err := BuildAgentBinary(ctx, "..")
+	binPath, cleanupBin, err := BuildAgentBinary(ctx, "..")
 	if err != nil {
 		return fmt.Errorf("build agent binary: %w", err)
 	}
-	defer os.Remove(binPath)
+	defer cleanupBin()
 
 	if err := InstallAgentWithDisks(ctx, target, binPath, disks, discoveryInterval); err != nil {
 		return fmt.Errorf("install agent: %w", err)
@@ -699,14 +699,29 @@ func runAgentScenarioWithDisksErr(ctx context.Context, target Target, project st
 	return nil
 }
 
-// BuildAgentBinary cross-compiles the agent for the target's guest OS
-// (linux/amd64 — every MWS VM shape this project targets) into a temp file
-// and returns its path. The caller is responsible for removing it.
-func BuildAgentBinary(ctx context.Context, moduleDir string) (string, error) {
-	out := filepath.Join(os.TempDir(), "mws-iops-autoscaler-e2e")
-	cmd := buildCommand(ctx, moduleDir, out)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("e2e: build agent binary: %w: %s", err, output)
+// agentBinaryEnv names a prebuilt agent binary. Parallel scenario jobs share one build of the code
+// under test through it instead of each compiling its own.
+const agentBinaryEnv = "E2E_AGENT_BINARY"
+
+// BuildAgentBinary returns a linux/amd64 agent binary and a func that removes it. A binary named
+// by E2E_AGENT_BINARY is used as is and never removed; otherwise the agent is built into a private
+// temp directory, so concurrent scenarios on one machine never overwrite each other's binary.
+func BuildAgentBinary(ctx context.Context, moduleDir string) (string, func(), error) {
+	if prebuilt := os.Getenv(agentBinaryEnv); prebuilt != "" {
+		if _, err := os.Stat(prebuilt); err != nil {
+			return "", nil, fmt.Errorf("e2e: %s: %w", agentBinaryEnv, err)
+		}
+		return prebuilt, func() {}, nil
 	}
-	return out, nil
+	dir, err := os.MkdirTemp("", "mws-iops-autoscaler-e2e-")
+	if err != nil {
+		return "", nil, fmt.Errorf("e2e: build agent binary: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+	out := filepath.Join(dir, "mws-iops-autoscaler")
+	if output, err := buildCommand(ctx, moduleDir, out).CombinedOutput(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("e2e: build agent binary: %w: %s", err, output)
+	}
+	return out, cleanup, nil
 }

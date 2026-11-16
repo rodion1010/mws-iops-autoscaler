@@ -52,7 +52,7 @@ Two tiers, sharing one set of scenario steps, differing only in where the target
 
 | Test | Tier | Target VM |
 |---|---|---|
-| `TestSmoke_Decisions_ScaleUpOnSaturation` | PR-tier ("smoke") | Reuses one persistent VM+disk |
+| `TestSmoke_Decisions_ScaleUpOnSaturation` | PR-tier ("smoke") | Its own ephemeral VM (one dependent, one independent data disk), one per scenario job |
 | `TestFull_Lifecycle_ProvisionScaleUpTeardown` | Merge-tier ("full") | Provisions a fresh VM+disk, tears it down after |
 
 ### Test files group by subject, not by tier
@@ -80,9 +80,9 @@ workflow's `-run` filter rather than failing loud — CI would just quietly stop
 | `reset.go` | Builds the compute-API client (`NewComputeClient`) and discovers/verifies/resets a disk (`AssertDiskClass`, `ResetDiskToBaseline`, `CurrentIOPS`) — shared by both tiers' preflight and cleanup. |
 | `scenario.go` | The actual scenario steps: `Preflight`, `InstallAgent`/`InstallAgentWithDisks`, `StartAgent`, `FetchAgentLog`, `StopAgent`, `DriveLoad`/`DriveRateLimitedLoad`/`DriveBandwidthLoad`, `WaitForScaleUp`, `WaitForDecision`/`WaitForJournalRecord`, `AssertNoIOPSChange`, and `runAgentScenario`/`runAgentScenarioWithDisks` (build+install+start+stop, wrapping `run(agentStarted)` with journal-on-failure diagnostics). **This is where "what a test does" lives** — every test assembles these in the same order. `InstallAgent`/`runAgentScenario` are thin wrappers over the `*WithDisks` forms, defaulting to `SelectedDisksSpec(target.DeviceName)` at `defaultDiscoveryInterval` — today's exact original behavior, unchanged by `DisksSpec`'s addition. `runAgentScenarioWithDisks` is itself a thin `*testing.T`-facing wrapper over `runAgentScenarioWithDisksErr`, which returns an error instead of calling `t.Fatalf` — the primitive an `xfail`-wrapped scenario needs, since Go cannot catch a `*testing.T` failure raised from inside a test. The agent's stdout/stderr is captured at the stable path `StartAgent` passes to `RunBackgroundToLog` (`FetchAgentLog` reads it back), not at `RunBackground`'s auto-derived one. |
 | `build.go` | Cross-compiles the agent binary for the target's guest OS (linux/amd64) regardless of what the runner itself is. |
-| `decisions_test.go` | Scale-up/scale-down decision scenarios against the persistent VM's dependent disk: `TestSmoke_Decisions_ScaleUpOnSaturation` (also exercises the dependent write path as a side effect — see the coverage table below), `TestSmoke_Decisions_NoScaleUpWhenEfficient` (a light, sustained, sub-threshold load, gated on a liveness-proving journal record before crediting "no change" as meaningful — see below), `TestSmoke_Decisions_ScaleUpOnBandwidthSaturation` (a bandwidth-bound, ops-light load; asserts saturation was *detected*, not that a scale-up necessarily follows). |
+| `decisions_test.go` | Scale-up/scale-down decision scenarios against the scenario VM's dependent disk: `TestSmoke_Decisions_ScaleUpOnSaturation` (also exercises the dependent write path as a side effect — see the coverage table below), `TestSmoke_Decisions_NoScaleUpWhenEfficient` (a light, sustained, sub-threshold load, gated on a liveness-proving journal record before crediting "no change" as meaningful — see below), `TestSmoke_Decisions_ScaleUpOnBandwidthSaturation` (a bandwidth-bound, ops-light load; asserts saturation was *detected*, not that a scale-up necessarily follows). |
 | `cold_start_test.go` | `TestSmoke_Decisions_ScaleUpFromColdStart` — load is driven *before* the agent starts, so its first samples already show saturation with no established baseline; the one scenario where `DriveLoad` deliberately precedes `runAgentScenario` rather than living inside its callback. |
-| `independent_test.go` | The independent write path on the PR tier: `TestSmoke_Independent_ScaleUpOnSaturation` (write path) and `TestSmoke_Independent_DryRunValidateOnly` (US-013's server-confirmed dry-run verdict), both against the persistent VM's second, independent disk (`SmokeIndependentTarget`). |
+| `independent_test.go` | The independent write path on the PR tier: `TestSmoke_Independent_ScaleUpOnSaturation` (write path) and `TestSmoke_Independent_DryRunValidateOnly` (US-013's server-confirmed dry-run verdict), both against the scenario VM's independent disk (`SmokeIndependentTarget`). |
 | `dependent_test.go` | `TestSmoke_Dependent_DryRunComputedOnly` — the dependent disk's dry-run counterpart to `independent_test.go`'s: no server-side validation exists for this write path (§4.7), so this asserts the decision is still reached and the disk is still never mutated. |
 | `lifecycle_test.go` | Provisioning and teardown: `TestFull_Lifecycle_ProvisionScaleUpTeardown`, the merge-tier entry point, plus `provision()`/`runScript()` wrapping `scripts/provision.sh`/`teardown.sh`, the lazy `fullFixture` (`ensureFullFixture`/`fullTarget`/`fullNoDeviceNameTarget`) that provisions the merge tier's shared ephemeral VM and its three disks — one explicitly named, one left unnamed to default, one (churn) created but left unattached for `churn_test.go`'s live attach/detach scenarios — once per process (`sync.Once`) no matter how many full-tier tests ask for one, and the package's `TestMain`, which tears that fixture down exactly once after every test has run. |
 | `device_naming_test.go` | `TestFull_DeviceNaming_NoDeviceNameDefaultsToAlias` — the merge tier's second disk, attached with no `deviceName` at all, on the same shared VM as `lifecycle_test.go`'s explicitly-named one; both forms of `docs/platform-reference.md`'s guest-device-mapping default are exercised side by side. Not a `naming_test.go` naming-convention concern — a live platform behavior. |
@@ -113,12 +113,10 @@ things sharing one fixture buys, both necessary once more than one full-tier sce
 
 - A `-run` selecting only some full-tier tests never pays for provisioning it doesn't need — the
   fixture is created on first actual use, not eagerly.
-- Multiple full-tier tests share one VM instead of one each, the same economy the smoke tier already
-  gets for free from its persistent target.
+- Multiple full-tier tests share one VM instead of one each.
 
 Isolation between full-tier tests sharing that VM comes from `Preflight`, not from a fresh VM per
-test — the identical guarantee the smoke tier's shared persistent target already relies on (see
-below). Teardown itself stays unconditional on `E2E_RUN_ID` (set once per workflow run, not generated
+test (see below). The smoke tier gives every scenario its own VM instead. Teardown itself stays unconditional on `E2E_RUN_ID` (set once per workflow run, not generated
 per test), so it still recovers a partially provisioned run exactly as it did before this fixture
 existed.
 
@@ -130,8 +128,8 @@ class asserted (`AssertDiskClass`) rather than trusted from a naming convention:
 | §8.3 scenario | Status |
 |---|---|
 | Scale-up on saturation | Implemented, both tiers |
-| Dependent write path | Implemented, smoke tier — the persistent VM's dependent disk (`docs/design.md` §4.7); class asserted by `Preflight` (`AssertDiskClass`), not trusted from the device-name convention |
-| Independent write path | Implemented, both tiers — the persistent VM's second, permanently attached independent disk on the smoke tier (`TestSmoke_Independent_ScaleUpOnSaturation`), the ephemeral disk on the full tier; class asserted at scenario start either way |
+| Dependent write path | Implemented, smoke tier — the scenario VM's dependent disk (`docs/design.md` §4.7); class asserted by `Preflight` (`AssertDiskClass`), not trusted from the device-name convention |
+| Independent write path | Implemented, both tiers — the scenario VM's independent disk on the smoke tier (`TestSmoke_Independent_ScaleUpOnSaturation`), the ephemeral disk on the full tier; class asserted at scenario start either way |
 | Dry run | Implemented for both disk classes, smoke tier — `TestSmoke_Independent_DryRunValidateOnly` observes the platform's real `ValidateOnly` verdict; `TestSmoke_Dependent_DryRunComputedOnly` observes the same `scale_up` journal record on the class with no server-side validation to confirm against (§4.7). Both confirm zero mutation via repeated fresh reads |
 | No scale-up when efficient | Implemented, smoke tier (`TestSmoke_Decisions_NoScaleUpWhenEfficient`) — a real, sustained, sub-threshold load. Asserting only "IOPS never changed" would pass vacuously for a dead or crashed agent, so this first requires a `no_action`/`no_signal` journal record proving a full evaluation window was reached before crediting the no-change observation |
 | Cold start | Implemented, smoke tier (`TestSmoke_Decisions_ScaleUpFromColdStart`) — load is already present when the agent starts, so its first samples show saturation with no established baseline yet |
@@ -198,18 +196,19 @@ neither carries the "not yet run against live infrastructure" caveat anymore.
 ### Why preflight matters more than cleanup
 
 The agent's 24-hour change budget (`internal/state/budget.go`) is deliberately durable across
-restarts — a safety invariant, not a bug (see `docs/design.md` for why). Reusing one persistent VM
-across every PR's smoke run would let one PR's scale-up events exhaust the next PR's budget or trigger
-its cooldown, failing a run for reasons unrelated to the code under test.
+restarts — a safety invariant, not a bug (see `docs/design.md` for why). Tests that share a VM — the
+full tier's scenarios on its one fixture — would otherwise let one test's scale-up events exhaust the
+next test's budget or trigger its cooldown, failing it for reasons unrelated to the code under test.
+A smoke scenario runs on a VM nobody used before, so this only matters for the full tier, but
+`Preflight` runs the same way on both.
 
-The fix is not to weaken that invariant — it's to give each run its own state. The smoke test starts
-the agent with `-state-dir` pointed at a fresh, run-specific directory
-(`/tmp/mws-iops-e2e` on the shared VM, wiped by `Preflight` before each run), so every run's budget
-file starts empty.
+The fix is not to weaken that invariant — it's to give each test its own state. The harness starts
+the agent with `-state-dir` pointed at a run-specific directory (`/tmp/mws-iops-e2e` on the VM,
+wiped by `Preflight` before each test), so every test's budget file starts empty.
 
 What still needs explicit handling is process/disk state left behind by a **crashed or cancelled**
-prior run — this is why `Preflight` (not just `Cleanup`) is the actual correctness guarantee for the
-shared persistent VM:
+earlier test on the same VM — this is why `Preflight` (not just `Cleanup`) is the actual correctness
+guarantee for a shared VM:
 
 1. Stop any leftover agent process from a previous run — and verify it is actually gone: a kill command
    alone proves nothing (the agent handles SIGTERM and may take a moment to exit — or not exit on it at
@@ -264,16 +263,15 @@ failure or unrecognized check output), with injectable polling intervals and clo
 in milliseconds. The
 regression tests are infrastructure-free and run in three places: the GitHub-hosted `CI` verify job on
 every PR (`-run '^TestRegression_'` — harness correctness is checked even when the live smoke tier
-cannot run, e.g. fork PRs without secrets), and alongside the live scenarios in both e2e workflows.
+cannot run, e.g. fork PRs without secrets), and alongside the live scenarios in the full workflow.
 
 `Cleanup` mirrors the same steps, attempts every one of them even after an earlier one fails, and
 returns the aggregated error — which the tests fail on (`t.Errorf` from the defer), so a green check
-never leaves the shared VM dirty. What "always runs" honestly means here is bounded: it runs via Go
-`defer`, which covers ordinary test failures and panics, but not hard cancellation or runner loss —
-the smoke workflow has no `if: always()` infrastructure-cleanup step, and the full workflow's backstop
-teardown only covers `go test`'s own `-timeout`. A run killed that way can still leak processes or a raised disk, which is
-exactly the gap the orphan sweeper (`docs/ci-cd.md`) does not cover, since it only deletes full-tier VMs and disks; the next run's `Preflight` — not this
-run's `Cleanup` — is what actually has to work for the shared VM to stay usable.
+never leaves a shared VM dirty. `Cleanup` runs via Go `defer`, which covers ordinary test failures and
+panics, but not hard cancellation or runner loss. For the smoke tier that does not matter: the
+scenario job's `if: always()` teardown deletes the VM, and the orphan sweeper (`docs/ci-cd.md`) deletes
+whatever a lost runner leaves. On the full tier, the next test's `Preflight` is what keeps the shared
+fixture usable.
 
 ### Why the harness supervises the agent process directly
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,7 +28,7 @@ func TestRegression_Teardown_ParallelDiskDeletesAggregateFailures(t *testing.T) 
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+":"+os.Getenv("PATH"),
 		"MWS_PROJECT=test-project",
-		"E2E_RUN_ID=test-run",
+		"E2E_RUN_ID=4242",
 	)
 
 	start := time.Now()
@@ -45,7 +46,7 @@ func TestRegression_Teardown_ParallelDiskDeletesAggregateFailures(t *testing.T) 
 		t.Fatalf("teardown.sh took %s for four disk deletes with a %s stub delay each — looks sequential, not parallel\noutput:\n%s", elapsed, perCallDelay, out)
 	}
 
-	for _, disk := range []string{"e2e-full-test-run-boot", "e2e-full-test-run-data", "e2e-full-test-run-churn", "e2e-full-test-run-noname"} {
+	for _, disk := range []string{"e2e-full-4242-boot", "e2e-full-4242-data", "e2e-full-4242-churn", "e2e-full-4242-noname"} {
 		marker := filepath.Join(dir, "ran-"+disk)
 		if _, statErr := os.Stat(marker); statErr != nil {
 			t.Errorf("disk %s was never attempted (marker missing): %v\noutput:\n%s", disk, statErr, out)
@@ -79,5 +80,70 @@ exit 2
 	path := filepath.Join(dir, "mws")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write stub mws: %v", err)
+	}
+}
+
+// writeRecordingMWS writes a fake mws CLI that records every delete and answers NOT_FOUND for the
+// names listed in missing.
+func writeRecordingMWS(t *testing.T, dir string, missing ...string) {
+	t.Helper()
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+ref="$4"; name="${ref##*/}"
+echo "$2 $name" >>"%s/calls"
+for m in %s; do
+  [ "$name" = "$m" ] && { echo "ERROR: api error. Code: 404. Status: NOT_FOUND" >&2; exit 1; }
+done
+exit 0
+`, dir, strings.Join(missing, " "))
+	if err := os.WriteFile(filepath.Join(dir, "mws"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub mws: %v", err)
+	}
+}
+
+func runTeardown(t *testing.T, dir string, env ...string) ([]byte, error) {
+	t.Helper()
+	cmd := exec.Command("bash", "teardown.sh")
+	cmd.Dir = "scripts"
+	cmd.Env = append(append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "MWS_PROJECT=test-project"), env...)
+	return cmd.CombinedOutput()
+}
+
+func TestRegression_Teardown_SmokeTierDeletesItsVMAndDisks(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordingMWS(t, dir)
+	out, err := runTeardown(t, dir, "E2E_TIER=smoke", "E2E_RUN_ID=4242", "E2E_RUN_ATTEMPT=2", "E2E_SCENARIO_ID=7")
+	if err != nil {
+		t.Fatalf("teardown.sh: %v\n%s", err, out)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	calls := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(calls) != 3 || calls[0] != "virtual-machine e2e-smoke-4242-2-s7" {
+		t.Fatalf("calls = %q, want the VM first, then its boot and indep disks", calls)
+	}
+	for _, want := range []string{"disk e2e-smoke-4242-2-s7-boot", "disk e2e-smoke-4242-2-s7-indep"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("calls = %q, missing %q", calls, want)
+		}
+	}
+}
+
+// A provision that failed partway leaves some names never created; tearing it down must succeed.
+func TestRegression_Teardown_AlreadyDeletedResourcesCountAsDeleted(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordingMWS(t, dir, "e2e-smoke-4242-1-s0", "e2e-smoke-4242-1-s0-indep")
+	out, err := runTeardown(t, dir, "E2E_TIER=smoke", "E2E_RUN_ID=4242", "E2E_RUN_ATTEMPT=1", "E2E_SCENARIO_ID=0")
+	if err != nil {
+		t.Fatalf("teardown.sh failed on NOT_FOUND resources: %v\n%s", err, out)
+	}
+}
+
+func TestRegression_Teardown_RefusesMalformedIdentity(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordingMWS(t, dir)
+	if out, err := runTeardown(t, dir, "E2E_TIER=smoke", "E2E_RUN_ID=4242", "E2E_RUN_ATTEMPT=x", "E2E_SCENARIO_ID=0"); err == nil {
+		t.Fatalf("teardown.sh accepted a non-numeric attempt\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "calls")); err == nil {
+		t.Error("teardown.sh issued deletes for a malformed identity")
 	}
 }

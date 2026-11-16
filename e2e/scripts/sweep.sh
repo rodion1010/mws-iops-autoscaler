@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Deletes e2e-full VMs and disks that outlived their run (cancelled job, lost runner).
+# Deletes e2e-full and e2e-smoke VMs and disks that outlived their run (cancelled job, lost runner).
 #
-# Ownership is the run-scoped name provision.sh gives its resources: e2e-full-<numeric run id> for the
-# VM and a fixed suffix per disk. Age comes from the API's metadata.createTime, so the sweep needs
+# Ownership is the run-scoped name provision.sh gives its resources (e2e/scripts/names.sh): the VM
+# name and a fixed suffix per disk. A smoke VM's dependent data disk is named by the platform from
+# its "data" attachment, and goes away with the VM. Age comes from the API's metadata.createTime, so the sweep needs
 # nothing written by the test itself. Anything else is never touched; a name that looks like ours but
 # does not match exactly, or an unreadable age, is reported and fails the run instead of being guessed.
 #
@@ -11,8 +12,8 @@ set -uo pipefail
 
 : "${MWS_PROJECT:?}"
 TTL_HOURS="${SWEEP_TTL_HOURS:-3}"
-# The floor keeps the TTL above e2e-full.yml's 96-minute timeout-minutes; a smaller or malformed value
-# could age a live run's resources out, so refuse it instead of guessing.
+# The floor keeps the TTL above the longest job that owns resources (e2e-full.yml's timeout-minutes);
+# a smaller or malformed value could age a live run's resources out, so refuse it instead of guessing.
 if ! [[ $TTL_HOURS =~ ^[0-9]+$ ]] || ((10#$TTL_HOURS < 2)); then
   echo "sweep: SWEEP_TTL_HOURS must be a whole number of at least 2, got '${TTL_HOURS}'" >&2
   exit 2
@@ -20,8 +21,8 @@ fi
 TTL_HOURS=$((10#$TTL_HOURS))
 NOW="${SWEEP_NOW:-$(date +%s)}"
 CUTOFF=$((NOW - TTL_HOURS * 3600))
-VM_RE='^e2e-full-[0-9]+$'
-DISK_RE='^e2e-full-[0-9]+-(boot|data|noname|churn)$'
+VM_RE='^(e2e-full-[0-9]+|e2e-smoke-[0-9]+-[0-9]+-s[0-9]+)$'
+DISK_RE='^(e2e-full-[0-9]+-(boot|data|noname|churn)|e2e-smoke-[0-9]+-[0-9]+-s[0-9]+-(boot|indep|mza3njax))$'
 
 status=0
 
@@ -49,7 +50,7 @@ sweep() {
     return
   fi
   while IFS=$'\t' read -r name created; do
-    [[ $name == e2e-full-* ]] || continue
+    [[ $name == e2e-full-* || $name == e2e-smoke-* ]] || continue
     if ! [[ $name =~ $re ]]; then
       printf 'SKIP-AMBIGUOUS-NAME\t%s\t%s\t-\n' "$kind" "$name"
       status=1

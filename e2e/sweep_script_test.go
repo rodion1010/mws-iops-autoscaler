@@ -310,3 +310,40 @@ func TestRegression_Sweep_RefusesATTLBelowTheFloor(t *testing.T) {
 		})
 	}
 }
+
+func TestRegression_Sweep_SmokeResourcesFollowTheSameOwnershipRules(t *testing.T) {
+	f := newSweepFixture(t)
+	f.resources("virtual-machine", "virtualMachines", map[string]any{
+		"e2e-smoke-111-1-s3": 5 * time.Hour,
+		"e2e-smoke-222-2-s0": 30 * time.Minute, // a scenario still running
+	})
+	f.resources("disk", "disks", map[string]any{
+		"e2e-smoke-111-1-s3-boot":     5 * time.Hour,
+		"e2e-smoke-111-1-s3-indep":    5 * time.Hour,
+		"e2e-smoke-222-2-s0-boot":     30 * time.Minute,
+		"e2e-smoke-222-2-s0-mza3njax": 30 * time.Minute, // the live VM's dependent data disk
+		"e2e-smoke-333-s1-boot":       5 * time.Hour,    // no attempt number
+		"e2e-smoke-444-1-s1-extra":    5 * time.Hour,    // unknown suffix
+	})
+
+	out, err, calls := f.run(true)
+	if err == nil {
+		t.Fatalf("sweep.sh succeeded, want a failing exit for ambiguous smoke names\n%s", out)
+	}
+	want := map[string]bool{"virtual-machine e2e-smoke-111-1-s3 --wait-timeout 5m": true,
+		"disk e2e-smoke-111-1-s3-boot --purge --wait-timeout 2m":  true,
+		"disk e2e-smoke-111-1-s3-indep --purge --wait-timeout 2m": true}
+	if len(calls) != len(want) {
+		t.Fatalf("delete calls = %q, want exactly %d\n%s", calls, len(want), out)
+	}
+	for _, c := range calls {
+		if !want[c] {
+			t.Errorf("unexpected delete call %q\n%s", c, out)
+		}
+	}
+	for _, line := range []string{"KEEP-YOUNG\tdisk\te2e-smoke-222-2-s0-mza3njax", "SKIP-AMBIGUOUS-NAME\tdisk\te2e-smoke-333-s1-boot", "SKIP-AMBIGUOUS-NAME\tdisk\te2e-smoke-444-1-s1-extra"} {
+		if !strings.Contains(out, line) {
+			t.Errorf("report is missing %q:\n%s", line, out)
+		}
+	}
+}

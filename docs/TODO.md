@@ -100,21 +100,6 @@ usual atomic-rename discipline); what happens to sampling windows and cooldowns 
 scope across a reload; whether an invalid new config is rejected while the old one keeps running, and
 how that state is surfaced.
 
-### Second CI runner, split by tier, and a second persistent smoke VM
-
-Today one self-hosted runner serves both e2e tiers, so a merge-tier full run (~20 min) blocks every
-PR's smoke run behind it, and all smoke runs are additionally serialized on one shared persistent VM
-(`concurrency: e2e-smoke-vm`) regardless of runner count. A second runner also lets the orphan sweeper
-(`docs/ci-cd.md`) overlap a re-run job that reuses old resource names; take its age from the later of
-`createTime` and `updateTime` first, once an update is confirmed to bump `updateTime`.
-
-Two independent moves, worth separating:
-- A second runner dedicated to one tier (e.g. runner A = PR smoke only, runner B = merge full only)
-  removes the tier-vs-tier queueing with no new cloud resources.
-- A second persistent smoke VM would let PR smoke runs parallelize across PRs, but only pays off
-  once the PR-tier suite is large enough that queueing on a single VM is the actual bottleneck —
-  decide after the real per-suite timing measurement from the growing e2e scenario set.
-
 ### Validating scale-down's defaults against real traffic
 
 Scale-down is live (no capability gate — decided while the agent still has no real users, so there
@@ -125,9 +110,9 @@ rather than a launch gate:
 
 - **Soak and chaos don't exist as a CI tier for any scenario today** (design.md §8.4: 24h diurnal-load
   soak, 20%-fault-injection chaos, both local-mode). A 24h job cannot fit either existing workflow's
-  timeout model (`docs/ci-cd.md`'s "Timeout budgets") and would occupy this project's one self-hosted
-  runner for its entire duration, blocking every PR/merge e2e run unless a second runner exists first
-  (the item above) or it is scheduled off-hours. Chaos additionally needs a fault-injection layer
+  timeout model (`docs/ci-cd.md`'s "Timeout budgets") and would hold one of the runner VM's five runner
+  processes and its VMs' share of the project quota for its entire duration, so it competes with PR and
+  merge e2e runs unless it is scheduled off-hours. Chaos additionally needs a fault-injection layer
   nothing in `internal/platformfake` or `e2e/` has today. This needs its own decision (new runner vs.
   scheduled `workflow_dispatch` job vs. accepting the gap) before anyone builds it — a candidate for an
   ADR rather than a quiet bump.

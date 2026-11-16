@@ -71,8 +71,8 @@ func parseBaselineIOPS(envVar string) (int64, error) {
 	return v, nil
 }
 
-// SmokeTarget builds the persistent PR-tier target for the dependent disk
-// from the environment.
+// SmokeTarget builds the PR-tier target for the scenario VM's dependent disk
+// from the environment the scenario job sets from provision.sh's output.
 func SmokeTarget() (Target, error) {
 	env, err := requiredEnv(
 		"E2E_VM_NAME",
@@ -99,11 +99,10 @@ func SmokeTarget() (Target, error) {
 	}, nil
 }
 
-// SmokeIndependentTarget builds the persistent PR-tier target for the
-// independent disk permanently attached to the same VM as SmokeTarget — it
-// is what lets the PR tier exercise the independent write path instead of
-// only the full tier's ephemeral disk. SSH access is shared with SmokeTarget
-// since both point at the same VM; only the disk differs.
+// SmokeIndependentTarget builds the PR-tier target for the independent disk
+// attached to the same scenario VM as SmokeTarget, so the PR tier exercises
+// the independent write path too. SSH access is shared with SmokeTarget since
+// both point at the same VM; only the disk differs.
 func SmokeIndependentTarget() (Target, error) {
 	env, err := requiredEnv(
 		"E2E_VM_NAME",

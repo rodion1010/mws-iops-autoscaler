@@ -1,7 +1,7 @@
 name: E2E (smoke)
 
-# The smoke tier reuses one persistent target and runs PR code on a credentialed
-# runner, so it runs only for branches of this repository. pull_request_target
+# The smoke tier runs each TestSmoke_* scenario on its own ephemeral VM, in parallel, and runs PR
+# code on a credentialed runner, so it runs only for branches of this repository. pull_request_target
 # loads this file from the base branch, so a PR cannot edit away the origin
 # guard below; fork PRs get a GitHub-hosted notice job and their code is never
 # checked out. vars.MWS_PROJECT exists only in the private CI repository, so the
@@ -54,29 +54,23 @@ jobs:
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
 
-  smoke:
+  # Builds the agent once from the PR merge commit and lists the scenarios. GitHub-hosted: it holds
+  # no credentials, so PR code compiled here reaches nothing.
+  build:
     needs: changes
     # !cancelled(), not the default success(): a failed classifier must run smoke, not skip it.
     if: >-
       !cancelled() && needs.changes.outputs.docs_only != 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository && vars.MWS_PROJECT != ''
-    runs-on: [self-hosted, mws-iops-autoscaler-runner]
-    # All smoke runs share one target and must execute serially. queue: max keeps
-    # up to 100 pending runs instead of one, so a new PR does not cancel another's.
-    concurrency:
-      group: e2e-smoke-vm
-      cancel-in-progress: false
-      queue: max
-    # A job-level kill runs no cleanup, so this must exceed the sum of every TestSmoke_*
-    # worst-case context; recompute before shrinking it or adding a scenario.
-    timeout-minutes: 73
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      scenarios: ${{ steps.meta.outputs.scenarios }}
     steps:
-      # Pin third-party actions because this runner has cloud credentials.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # pull_request_target checks out the base branch by default. Test the PR merged into
-          # it, as pull_request did; the guard on this job makes the PR head a branch of this
-          # repository.
+          # it; the guard on this job makes the PR head a branch of this repository.
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 2
           persist-credentials: false
@@ -94,30 +88,167 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # No cache: under pull_request_target a cache written from PR code could reach base runs.
+          cache: false
+
+      - name: Build the agent
+        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "${RUNNER_TEMP}/agent/mws-iops-autoscaler" ./cmd/mws-iops-autoscaler
+
+      - id: meta
+        name: List scenarios
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          names=$(go test -tags e2e -list '^TestSmoke_' ./e2e/ | grep '^TestSmoke_')
+          [ -n "$names" ] || { echo "::error::no TestSmoke_* scenarios found"; exit 1; }
+          echo "scenarios=$(jq -R -s -c 'split("\n") | map(select(length > 0)) | to_entries | map({id: .key, name: .value})' <<<"$names")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent
+          path: ${{ runner.temp }}/agent/mws-iops-autoscaler
+          retention-days: 1
+
+  # One job per scenario: provision a VM, run the scenario, tear the VM down.
+  scenario:
+    needs: build
+    if: needs.build.result == 'success'
+    name: ${{ matrix.name }}
+    runs-on: [self-hosted, mws-iops-autoscaler-runner]
+    strategy:
+      fail-fast: false
+      # Caps one PR's concurrent VMs to what the project quota holds next to other runs.
+      max-parallel: ${{ fromJSON(vars.E2E_SMOKE_MAX_PARALLEL || '4') }}
+      matrix:
+        include: ${{ fromJSON(needs.build.outputs.scenarios) }}
+    # A job-level kill runs no cleanup, so this exceeds the provision, test and teardown step
+    # timeouts combined and stays below the sweeper's TTL floor.
+    timeout-minutes: 50
+    env:
+      MWS_PROJECT: ${{ vars.MWS_PROJECT }}
+      MWS_ZONE: ${{ vars.MWS_ZONE }}
+      E2E_TIER: smoke
+      E2E_RUN_ID: ${{ github.run_id }}
+      E2E_RUN_ATTEMPT: ${{ github.run_attempt }}
+      E2E_SCENARIO_ID: ${{ matrix.id }}
+      E2E_SSH_USER: ${{ vars.E2E_SSH_USER }}
+    steps:
+      # Pin third-party actions because this runner has cloud credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The exact merge commit the agent was built from, even if the merge ref has moved since.
+          ref: ${{ needs.build.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
           # The persistent runner already retains its module cache.
           cache: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agent
+          path: ${{ runner.temp }}/agent
 
       - name: Write SSH key
         run: |
           umask 077
           printf '%s\n' "${{ secrets.E2E_SSH_PRIVATE_KEY }}" > "${RUNNER_TEMP}/e2e_ssh_key"
           chmod 600 "${RUNNER_TEMP}/e2e_ssh_key"
+          chmod +x "${RUNNER_TEMP}/agent/mws-iops-autoscaler"
 
-      - name: Run smoke e2e
+      - id: provision
+        name: Provision the scenario VM
+        timeout-minutes: 20
         env:
-          MWS_PROJECT: ${{ vars.MWS_PROJECT }}
-          MWS_ZONE: ${{ vars.MWS_ZONE }}
-          E2E_VM_NAME: ${{ vars.E2E_SMOKE_VM_NAME }}
-          E2E_DEVICE_NAME: ${{ vars.E2E_SMOKE_DEVICE_NAME }}
-          E2E_SMOKE_INDEPENDENT_DEVICE_NAME: ${{ vars.E2E_SMOKE_INDEPENDENT_DEVICE_NAME }}
-          E2E_SSH_HOST: ${{ vars.E2E_SMOKE_SSH_HOST }}
-          E2E_SSH_USER: ${{ vars.E2E_SSH_USER }}
+          E2E_SUBNET_ID: ${{ vars.E2E_SUBNET_ID }}
+          E2E_BOOT_IMAGE: ${{ vars.E2E_BOOT_IMAGE }}
+          E2E_VM_TYPE: ${{ vars.E2E_SMOKE_VM_TYPE || 'compute/vmTypes/base-2-4' }}
+          E2E_AGENT_SA: ${{ vars.E2E_AGENT_SA }}
+          E2E_SSH_PUBLIC_KEY: ${{ vars.E2E_SSH_PUBLIC_KEY }}
           E2E_SSH_KEY_PATH: ${{ runner.temp }}/e2e_ssh_key
-        # The harness builds the agent dynamically, so cached test results are unsafe.
-        # -timeout stays below timeout-minutes. No backstop teardown: Preflight resets the shared
-        # target at the start of every scenario.
-        run: go test -count=1 -timeout=68m -tags e2e ./e2e/... -run 'TestSmoke|TestRegression' -v
+        run: |
+          start=$(date +%s)
+          rc=0
+          out=$(bash e2e/scripts/provision.sh) || rc=$?
+          echo "provision_seconds=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -eq 3 ]; then
+            echo "::error::project quota exhausted; nothing retried, teardown removes what was created"
+            exit 1
+          fi
+          [ "$rc" -eq 0 ] || exit "$rc"
+          # Map provision.sh's keys onto the variables SmokeTarget reads.
+          while IFS='=' read -r key value; do
+            case "$key" in
+              vm_name) echo "E2E_VM_NAME=$value" ;;
+              device_name) echo "E2E_DEVICE_NAME=$value" ;;
+              independent_device_name) echo "E2E_SMOKE_INDEPENDENT_DEVICE_NAME=$value" ;;
+              ssh_host) echo "E2E_SSH_HOST=$value" ;;
+            esac
+          done <<<"$out" >> "$GITHUB_ENV"
+
+      - id: test
+        name: Run ${{ matrix.name }}
+        timeout-minutes: 16
+        env:
+          E2E_AGENT_BINARY: ${{ runner.temp }}/agent/mws-iops-autoscaler
+          E2E_SSH_KEY_PATH: ${{ runner.temp }}/e2e_ssh_key
+          SCENARIO: ${{ matrix.name }}
+        # The agent comes from the build job, so cached test results are unsafe. -timeout stays
+        # below the step timeout.
+        run: |
+          start=$(date +%s)
+          rc=0
+          go test -count=1 -timeout=15m -tags e2e ./e2e/... -run "^${SCENARIO}\$" -v || rc=$?
+          echo "test_seconds=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - id: teardown
+        name: Tear down the scenario VM
+        if: always()
+        timeout-minutes: 8
+        run: |
+          start=$(date +%s)
+          rc=0
+          bash e2e/scripts/teardown.sh || rc=$?
+          echo "teardown_seconds=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Report
+        if: always()
+        env:
+          SCENARIO: ${{ matrix.name }}
+          SHA: ${{ needs.build.outputs.sha }}
+          IMAGE: ${{ vars.E2E_BOOT_IMAGE }}
+          RESULT: ${{ steps.provision.outcome }}/${{ steps.test.outcome }}/${{ steps.teardown.outcome }}
+          T_PROVISION: ${{ steps.provision.outputs.provision_seconds }}
+          T_TEST: ${{ steps.test.outputs.test_seconds }}
+          T_TEARDOWN: ${{ steps.teardown.outputs.teardown_seconds }}
+        run: |
+          {
+            echo "| scenario | provision s | test s | teardown s | provision/test/teardown | run/attempt/id | commit | image |"
+            echo "|---|---|---|---|---|---|---|---|"
+            echo "| ${SCENARIO} | ${T_PROVISION:--} | ${T_TEST:--} | ${T_TEARDOWN:--} | ${RESULT} | ${E2E_RUN_ID}/${E2E_RUN_ATTEMPT}/${E2E_SCENARIO_ID} | ${SHA:0:7} | ${IMAGE##*/} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove SSH key
         if: always()
         run: rm -f "${RUNNER_TEMP}/e2e_ssh_key"
+
+  # One stable check for the PR: every scenario passed, or smoke legitimately did not apply.
+  smoke:
+    needs: [changes, build, scenario]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          CHANGES: ${{ needs.changes.result }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          BUILD: ${{ needs.build.result }}
+          SCENARIOS: ${{ needs.scenario.result }}
+        run: |
+          # changes is skipped only for fork PRs and the public mirror, which never run live e2e.
+          if [ "$CHANGES" = skipped ]; then exit 0; fi
+          if [ "$DOCS_ONLY" = true ]; then echo "Documentation only: smoke skipped."; exit 0; fi
+          echo "build: $BUILD, scenarios: $SCENARIOS"
+          [ "$BUILD" = success ] && [ "$SCENARIOS" = success ]

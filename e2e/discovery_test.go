@@ -5,7 +5,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -180,11 +179,11 @@ func TestFull_Discovery_ExcludeUnresolvedNameIsFatalAtColdStart(t *testing.T) {
 		t.Fatalf("preflight: %v", err)
 	}
 
-	binPath, err := BuildAgentBinary(ctx, "..")
+	binPath, cleanupBin, err := BuildAgentBinary(ctx, "..")
 	if err != nil {
 		t.Fatalf("build agent binary: %v", err)
 	}
-	defer os.Remove(binPath)
+	defer cleanupBin()
 
 	// Never a real device on this VM (boot/data/noname/churn all use their
 	// own fixed names) — auto-discovery's exclude can never resolve it.

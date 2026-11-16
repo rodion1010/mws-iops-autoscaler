@@ -13,7 +13,7 @@ the runner's own environment, not the repository.
 | Tier | Runs on | Triggers | What it proves |
 |---|---|---|---|
 | **Fast checks** | GitHub-hosted (`ubuntu-latest`) | Every PR, push to `main` | `gofmt`, `go vet`, `go test ./...`, `go test -race ./...`, plus the `docs/design.md` §8.2 integration suite against `internal/platformfake`. No cloud credentials involved. Implemented in `.github/workflows/ci.yml`. |
-| **PR-tier e2e ("smoke")** | Self-hosted runner | `pull_request_target`, running only for same-repository branches — the origin guard lives in workflow code loaded from the base branch; see below | The agent, built from the PR's code, actually raises a real disk's IOPS limit on a real MWS VM. Reuses one persistent test VM+disk. |
+| **PR-tier e2e ("smoke")** | Self-hosted runner | `pull_request_target`, running only for same-repository branches — the origin guard lives in workflow code loaded from the base branch; see below | The agent, built once from the PR's merge commit, actually changes real disks' IOPS limits on real MWS VMs. Each `TestSmoke_*` scenario runs in its own job on its own ephemeral VM (one dependent and one independent data disk), in parallel. |
 | **Merge-tier e2e ("full")** | Self-hosted runner | Push to `main`, `workflow_dispatch` | Same scenario as smoke, but provisions a fresh VM+disk from scratch and tears it down — the only tier that exercises create/destroy. |
 
 Fast checks and PR-tier e2e are **intended** to be required status checks on `main`'s branch
@@ -69,15 +69,26 @@ role set or move to ephemeral per-job runners (`docs/TODO.md`).
 ## Runner vs. target VM — two different machines
 
 The **runner** executes pipeline steps and issues MWS API calls; it is never the thing under test. The
-**target VM** (the persistent smoke VM, or a freshly created full-tier VM) is what the agent under test
+**target VM** (an ephemeral smoke or full-tier VM) is what the agent under test
 actually runs on and whose disk gets scaled. They need separate credentials — see below.
 
-Exactly one self-hosted runner exists for now. GitHub Actions runs at most one job at a time on a given
-runner, which is what makes reusing one shared persistent smoke VM safe without a locking mechanism.
-The PR-tier workflow also sets an explicit `concurrency` group so this stays true even if a second
-runner is added later without updating this assumption. It sets `queue: max`, so pending smoke runs
-wait in order (up to 100) instead of the newest cancelling the older one. See `docs/TODO.md` for what scaling beyond one
-runner would require.
+**Runner processes.** The runner VM (`base-4-16`) hosts five self-hosted runner processes, `ci-runner`
+and `ci-runner-2`…`ci-runner-5`, each in its own directory under the same user and with the same
+label, so up to five jobs run at once. GitHub Actions gives each process one job at a time. Smoke
+scenarios share no target, so no concurrency group serializes them; the matrix's `max-parallel`
+(repository variable `E2E_SMOKE_MAX_PARALLEL`, default 4) caps one PR's concurrent VMs. The full tier
+keeps its `e2e-full` concurrency group. Running out of project quota is an expected infrastructure
+failure, not a test failure: `provision.sh` exits 3, the job fails with "project quota exhausted",
+nothing is retried, and teardown removes what was created.
+
+**Network.** Test VMs get internal addresses only. The runner is in the same subnet and reaches them
+over SSH at that address, so no test VM needs an external IP. Their outbound traffic (cloud-init's
+package install, the agent's MWS API calls) leaves through the Egress NAT `e2e-egress` on the test
+subnet, behind one external address. The runner VM keeps its own one-to-one NAT address.
+
+**Naming.** `e2e/scripts/names.sh` derives every run-scoped name, and `provision.sh`, `teardown.sh` and
+the sweeper's patterns follow it: a smoke VM is `e2e-smoke-<run id>-<run attempt>-s<scenario index>`,
+so a re-run never reuses an earlier attempt's VM or disks.
 
 ## Service accounts
 
@@ -87,7 +98,7 @@ privileges:
 | Service account | Attached to | Roles | Why |
 |---|---|---|---|
 | **runner/provisioner SA** | The runner VM (via Instance Metadata Service — see below) | `compute.editor`, `vpc.editor`, `iam.serviceAccount.admin` (resource-scoped on the agent-under-test SA) | Needs to create/delete VMs and disks (full tier) and reserve networking resources (address/NAT allocation falls under `vpc.editor`; there is no narrower address-only role in MWS's IAM catalog). Also runs the e2e test harness itself (Preflight/Cleanup, resetting the target disk), which is a VM PATCH on a VM with the agent-under-test SA attached — see the `iam.serviceAccount.admin` row below for why that needs its own separate grant. |
-| **agent-under-test SA** | Every target VM (persistent smoke VM, and each full-tier VM at creation) | `compute.editor`, `iam.serviceAccount.admin` (resource-scoped on itself) | The agent calls the compute API to read its own identity and raise its disk's IOPS limit. Updating a dependent disk goes through a VM PATCH (design.md §4.7), and a VM that has this SA attached silently requires **whichever identity performs the PATCH** — not just the attached SA itself — to separately hold `iam.serviceAccount.admin` on that attached SA's resource. `.user` (the role MWS's own docs describe as sufficient for "using" an existing SA) does not work for either identity; confirmed cleanly twice, once per caller — see `docs/platform-dependencies.md` #6. Broader than intended — treat as a platform bug, not a design choice. |
+| **agent-under-test SA** | Every target VM, attached at creation | `compute.editor`, `iam.serviceAccount.admin` (resource-scoped on itself) | The agent calls the compute API to read its own identity and raise its disk's IOPS limit. Updating a dependent disk goes through a VM PATCH (design.md §4.7), and a VM that has this SA attached silently requires **whichever identity performs the PATCH** — not just the attached SA itself — to separately hold `iam.serviceAccount.admin` on that attached SA's resource. `.user` (the role MWS's own docs describe as sufficient for "using" an existing SA) does not work for either identity; confirmed cleanly twice, once per caller — see `docs/platform-dependencies.md` #6. Broader than intended — treat as a platform bug, not a design choice. |
 
 Neither account is Project Admin. `monitoring.metricExporter` is deliberately not granted to either —
 the first e2e scenario verifies the IOPS change by reading the compute API directly, not platform
@@ -114,7 +125,7 @@ kept as a GitHub Actions encrypted secret and injected only for the duration of 
 pattern rather than inventing per-run key rotation — see `docs/TODO.md` for that as a future hardening
 step.
 
-See `docs/testing.md` for why the shared smoke VM's state is reset the way it is, what each tier
+See `docs/testing.md` for how a scenario's target state is checked and reset, what each tier
 actually covers today, and how the agent process is supervised — that's test-behavior detail, not
 pipeline configuration.
 
@@ -126,12 +137,12 @@ their environment from GitHub repository variables (non-secret) and one secret:
 | Name | Kind | Used by |
 |---|---|---|
 | `MWS_PROJECT`, `MWS_ZONE` | variable | smoke, full (sweep uses only `MWS_PROJECT`) |
-| `E2E_SMOKE_VM_NAME`, `E2E_SMOKE_DEVICE_NAME`, `E2E_SMOKE_SSH_HOST` | variable | smoke |
-| `E2E_SMOKE_INDEPENDENT_DEVICE_NAME` | variable | smoke — the second, independent disk permanently attached to the same persistent VM (`E2E_SMOKE_VM_NAME`), used for the independent write path and dry-run scenarios |
-| `E2E_SUBNET_ID`, `E2E_BOOT_IMAGE`, `E2E_VM_TYPE`, `E2E_AGENT_SA`, `E2E_SSH_PUBLIC_KEY` | variable | full |
-| `E2E_SSH_USER` | variable | both |
+| `E2E_SUBNET_ID`, `E2E_BOOT_IMAGE`, `E2E_AGENT_SA`, `E2E_SSH_PUBLIC_KEY`, `E2E_SSH_USER` | variable | smoke, full |
+| `E2E_VM_TYPE` | variable | full |
+| `E2E_SMOKE_VM_TYPE` | variable, optional | smoke — scenario VM type, default `compute/vmTypes/base-2-4` (2 vCPU keeps the 6000-IOPS pool the VM cap scenario relies on) |
+| `E2E_SMOKE_MAX_PARALLEL` | variable, optional | smoke — concurrent scenario jobs per PR, default 4; raise it with the project quota |
 | `E2E_SWEEP_APPLY` | variable | sweep — `true` lets the scheduled run delete; any other value reports only (see "Orphan sweeper") |
-| `E2E_SSH_PRIVATE_KEY` | **secret** | both — written to a `runner.temp` file for the job's duration, removed in an `if: always()` step |
+| `E2E_SSH_PRIVATE_KEY` | **secret** | smoke, full — written to a `runner.temp` file for the job's duration, removed in an `if: always()` step |
 
 None of these are MWS API credentials — those come from IMDS, never from a GitHub secret (see
 Service accounts above). `E2E_SSH_PRIVATE_KEY` is the one genuine secret this pipeline holds. It
@@ -151,12 +162,13 @@ backstop teardown step — rather than by the job-level kill.
 
 | Workflow | `go test -timeout` | Worst-case test budget | `timeout-minutes` |
 |---|---|---|---|
-| `e2e-pr.yml` (smoke) | 68m | ~64m (ten `TestSmoke_*` scenarios; seven at 5–6m, `TestSmoke_Decisions_VMCapReachedUnderAggregateLoad` at 10m for two disks' preflight and elevation, `TestSmoke_Decisions_NoFlapping` at 12m for its two full up/down proof cycles) | 73 |
+| `e2e-pr.yml` (smoke), per scenario job | 15m (test step, itself capped at 16m) | the longest single scenario's context, 12m (`TestSmoke_Decisions_NoFlapping`); plus a 20m provision step and an 8m teardown step | 50 |
 | `e2e-full.yml` (full) | 84m | ~83m (shared fixture's 15m provisioning context, paid once, + each `TestFull_*` test's own context + `TestMain`'s dedicated 8-minute teardown budget) | 96 |
 
 `timeout-minutes` must also stay below the orphan sweeper's TTL floor (see "Orphan sweeper"). Recompute
 the relevant worst-case sum before shrinking either `timeout-minutes` value, and again
-whenever a `TestSmoke_*`/`TestFull_*` test is added. The full tier's margin is already thin enough
+whenever a `TestFull_*` test is added, or a `TestSmoke_*` scenario gets a longer context than the
+longest one. Adding a smoke scenario adds a job, not time to an existing one. The full tier's margin is already thin enough
 that the next addition should probably trigger the "split by subject" idea (`docs/TODO.md`) rather
 than another bump.
 
@@ -165,24 +177,26 @@ the case where `go test`'s own `-timeout` fires and kills the test binary before
 `TestMain`'s post-`m.Run()` teardown call runs (`e2e/lifecycle_test.go`). It does not cover the
 job-level kill — the orphan sweeper below covers that. On an ordinary
 pass or failure, `TestMain`'s own teardown has already run, so this step reports "not found" for
-every resource — expected noise, not a signal. The smoke tier has no equivalent step: the shared
-target's hard-cleanup guarantee is Preflight, not teardown (`docs/testing.md`), so the next run
-resets the target regardless of how the previous one ended.
+every resource — expected noise, not a signal. Each smoke scenario job's teardown step runs
+`if: always()`, including when the run is cancelled; a resource that is already gone counts as
+deleted, so a provision that failed partway tears down cleanly.
 
 ## Orphan sweeper
 
 `.github/workflows/e2e-sweep.yml` runs `e2e/scripts/sweep.sh` daily (03:17 UTC) and on manual dispatch,
 independently of the test jobs, so it still works after a job-level kill or a lost runner.
 
-- **Ownership.** Only the names `provision.sh` gives the full tier: a VM `e2e-full-<numeric run id>` and
-  disks `e2e-full-<run id>-boot|data|noname|churn`. Anything not starting with `e2e-full-` is never
-  considered. A name that starts with it but does not match exactly, or a missing or unparseable
+- **Ownership.** Only the names `e2e/scripts/names.sh` gives: a full-tier VM `e2e-full-<numeric run id>`
+  with disks `e2e-full-<run id>-boot|data|noname|churn`, and a smoke VM
+  `e2e-smoke-<run id>-<attempt>-s<index>` with disks `…-boot|indep` plus its dependent data disk, which the
+  platform names `…-mza3njax` from the `data` attachment and deletes with the VM. Anything not starting
+  with `e2e-full-` or `e2e-smoke-` is never considered. A name that starts with it but does not match exactly, or a missing or unparseable
   `metadata.createTime`, is reported as `SKIP-AMBIGUOUS-*`, deleted never, and fails the run.
 - **Age.** `metadata.createTime` from the API, at least `ttl_hours` (default 3) old. The TTL must stay
-  above `e2e-full.yml`'s `timeout-minutes` (96): a younger resource may belong to a live run, and
-  `sweep.sh` refuses a TTL under 2 hours. That protection also relies on there being one runner. A
-  re-run job keeps its `run_id`, so it reuses the same names and keeps the old `createTime`; with a
-  second runner it could overlap a sweep (`docs/TODO.md`, runner scaling).
+  above the longest job that owns resources, `e2e-full.yml`'s `timeout-minutes` (96): a younger
+  resource may belong to a live run, and `sweep.sh` refuses a TTL under 2 hours. A re-run of the full
+  job keeps its `run_id`, so it reuses the same names and the old `createTime`; smoke names carry the
+  run attempt, so a smoke re-run never does.
 - **Order.** VMs first, then disks with `--purge`, as `teardown.sh` does. Every candidate is attempted and
   a failure only flips the exit status, so one stuck delete does not shield the rest.
 - **Report.** One line per resource, `ACTION<TAB>kind<TAB>name<TAB>age_hours`, with `ACTION` one of
@@ -198,13 +212,11 @@ independently of the test jobs, so it still works after a job-level kill or a lo
   rerun. For `SKIP-AMBIGUOUS-*` delete or rename the resource by hand; the sweeper will not. A failed
   list deletes nothing of that kind.
 
-The persistent smoke target is not swept: it is reset by `Preflight`, not deleted.
-
 ## Provisioning runbook
 
-No Terraform — four persistent resources (runner VM, agent-under-test SA attachment on the persistent
-test VM, the two service accounts, their role bindings) is not enough to justify the extra toolchain
-right now. Provisioned by hand via the `mws` CLI, in this order:
+No Terraform — a handful of persistent resources (the runner VM and its runner processes, the two
+service accounts and their role bindings, the test subnet's Egress NAT) is not enough to justify the
+extra toolchain right now. Provisioned by hand via the `mws` CLI, in this order:
 
 1. **Create the two service accounts:**
    ```
@@ -236,8 +248,8 @@ right now. Provisioned by hand via the `mws` CLI, in this order:
    runner-registration flow (Settings → Actions → Runners → New self-hosted runner), labeling it so
    workflows can target it specifically (e.g. `mws-iops-autoscaler-runner`).
 5. **Install the `mws` CLI and `jq` on the runner VM** — `e2e/scripts/provision.sh`/`teardown.sh`
-   (the full-tier test) shell out to `mws` directly, and provision.sh parses the created VM's
-   external IP with `jq`; neither is part of the Go toolchain:
+   shell out to `mws` directly, and provision.sh parses the created VM's internal address with
+   `jq`; neither is part of the Go toolchain:
    ```
    curl -sSL https://storage.mwsapis.ru/mws-cli/install.sh | bash
    sudo ln -sf ~/.local/bin/mws /usr/local/bin/mws   # GitHub Actions runs non-interactive
@@ -248,29 +260,21 @@ right now. Provisioned by hand via the `mws` CLI, in this order:
    `--vm-sa` authenticates via the runner's own attached service account through IMDS — same "no key
    file" model as the Go SDK, confirmed live (`mws profile list` shows the resulting profile with no
    `SUBJECT` shown, since it's resolved fresh from IMDS on each call rather than stored).
-6. **Create the persistent PR-tier test VM+disks**, per `docs/development.md`'s reference topology
-   (Ubuntu 24.04, ≥2 vCPU, NBS-PL2 boot disk + one dependent data disk + one independent data disk,
-   all at 1000 IOPS — matching `docs/design.md` §8.3's `iops-test-vm`), and attach `ci-agent-sa`.
-   The dependent disk is defined inline in the VM's own `--storage-disks` at creation; the independent
-   one is created standalone and attached afterward. `mws compute vm update --storage-disks` **resends
-   the VM's whole disk list** (`docs/platform-reference.md`) — omitting an already-attached disk from
-   it detaches that disk, so the attach step must re-list the existing boot and dependent-data entries
-   alongside the new one, not just add it:
+6. **Create the test subnet's Egress NAT** so test VMs without external addresses can reach the
+   internet (package mirrors, the MWS API):
    ```
-   mws compute disk create <independent-data-disk> \
-     --zone <zone> --disk-type compute/diskTypes/nbs-pl2 --size 20GB --iops 1000
-
-   mws compute vm update <test-vm> --service-account ci-agent-sa \
-     --storage-disks '<existing boot disk entry, unchanged>' \
-     --storage-disks '<existing dependent data disk entry, unchanged>' \
-     --storage-disks 'name: indep, boot: false, deviceName: <independent-device-name>, disk: {ref: "compute/projects/<project>/disks/<independent-data-disk>"}'
+   mws vpc external-address create vpc/projects/<project>/externalAddresses/e2e-egress --region regions/<region>
+   mws vpc egress-nat create vpc/projects/<project>/networks/<network>/egressNats/e2e-egress \
+     --network <network> --internal-subnets vpc/projects/<project>/networks/<network>/subnets/<subnet> \
+     --external-addresses 'ref: vpc/projects/<project>/externalAddresses/e2e-egress'
    ```
-   The VM's cloud-init must install `fio` and configure passwordless sudo for the CI SSH user —
-   `DriveLoad` (e2e/scenario.go) runs fio under sudo because the guest user does not own the raw
-   block device; provision.sh gives the full tier's ephemeral VMs the same user-data, so this step
-   mirrors it for the persistent one.
-7. **Bake the CI SSH public key** into the persistent test VM's cloud-init at creation (see Guest access
-   above); store the matching private key as a GitHub Actions encrypted secret.
+7. **Add runner processes** for parallel scenario jobs: on the runner VM, for each extra process,
+   unpack the runner tarball into its own directory and register it with the same label
+   (`./config.sh --unattended --url <repo URL> --token <registration token> --name ci-runner-<n>
+   --labels mws-iops-autoscaler-runner`, then `sudo ./svc.sh install <user> && sudo ./svc.sh start`).
+   A registration token comes from `POST /repos/<owner>/<repo>/actions/runners/registration-token`.
+   Store the CI SSH private key as the `E2E_SSH_PRIVATE_KEY` secret and its public key as
+   `E2E_SSH_PUBLIC_KEY`; `provision.sh` bakes the public key into every test VM's cloud-init.
 8. **Configure branch protection on `main`** requiring the `verify` (fast-checks) and `smoke`
    (PR-tier e2e) jobs as required status checks — blocked by two independent things, both of which
    must be resolved first:
@@ -287,6 +291,5 @@ right now. Provisioned by hand via the `mws` CLI, in this order:
    credentialed runner — see the PR-tier trust model above. Never register the runner, or copy the
    variables and the secret, to the public mirror.
 
-Every full-tier run additionally creates and attaches `ci-agent-sa` to its own freshly created VM as part
-of the workflow itself (not a one-time step) — see step 3 above's per-run analogue in
-`.github/workflows/e2e-full.yml`.
+Every smoke scenario and full-tier run creates its own VM with `ci-agent-sa` attached as part of the
+workflow itself (`e2e/scripts/provision.sh`), not as a one-time step.

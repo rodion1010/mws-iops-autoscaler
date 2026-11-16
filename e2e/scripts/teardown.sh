@@ -1,32 +1,41 @@
 #!/usr/bin/env bash
-# Tears down the run-scoped VM and disks created by provision.sh.
+# Tears down the run-scoped VM and disks created by provision.sh (same E2E_TIER and identity env).
+# A resource that is already gone counts as deleted, so a partial provision tears down cleanly.
 set -uo pipefail
 
 : "${MWS_PROJECT:?}" "${E2E_RUN_ID:?}"
 
-VM_NAME="e2e-full-${E2E_RUN_ID}"
-BOOT_DISK="${VM_NAME}-boot"
-DATA_DISK="${VM_NAME}-data"
-NONAME_DISK="${VM_NAME}-noname"
-CHURN_DISK="${VM_NAME}-churn"
+here=$(dirname "$0")
+VM_NAME=$(bash "$here/names.sh" vm) || exit 2
+disks_out=$(bash "$here/names.sh" disks) || exit 2
+disk_names=()
+while IFS= read -r d; do disk_names+=("$d"); done <<<"$disks_out"
+
+# Runs an mws delete; NOT_FOUND is success.
+delete() {
+  local out
+  out=$("$@" 2>&1) && return 0
+  grep -q 'NOT_FOUND' <<<"$out" && return 0
+  echo "$out" >&2
+  return 1
+}
 
 # Attempt every deletion and report an aggregate status.
 status=0
 
-mws compute virtual-machine delete "compute/projects/${MWS_PROJECT}/virtualMachines/${VM_NAME}" --wait-timeout 5m || {
+# The VM goes first: its own dependent disks go with it, and a separately created disk cannot be
+# deleted while attached.
+delete mws compute virtual-machine delete "compute/projects/${MWS_PROJECT}/virtualMachines/${VM_NAME}" --wait-timeout 5m || {
   echo "teardown: failed to delete VM ${VM_NAME}" >&2
   status=1
 }
 
-# The four disks are independent of each other once the VM itself is gone
-# (CHURN_DISK may or may not have been attached, but --purge deletes it
-# either way) and run in parallel, each explicitly bounded so the phase's
-# own worst case is one disk delete's wait, not four — e2e/lifecycle_test.go's
-# teardownTimeout is the sum of this --wait-timeout and the VM delete's above.
-disk_names=("$DATA_DISK" "$NONAME_DISK" "$CHURN_DISK" "$BOOT_DISK")
+# The disks are independent of each other once the VM is gone and run in parallel, each bounded so
+# the phase's worst case is one disk delete's wait; the callers' teardown timeouts are the sum of
+# this --wait-timeout and the VM delete's above.
 disk_pids=()
 for disk in "${disk_names[@]}"; do
-  mws compute disk delete "compute/projects/${MWS_PROJECT}/disks/${disk}" --purge --wait-timeout 2m &
+  delete mws compute disk delete "compute/projects/${MWS_PROJECT}/disks/${disk}" --purge --wait-timeout 2m &
   disk_pids+=("$!")
 done
 for i in "${!disk_pids[@]}"; do
