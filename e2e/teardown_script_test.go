@@ -64,6 +64,10 @@ func writeStubMWS(t *testing.T, dir string, delay time.Duration) {
 if [ "$2" = "virtual-machine" ] && [ "$3" = "delete" ]; then
   exit 0
 fi
+if [ "$2" = "virtual-machine" ] && [ "$3" = "get" ]; then
+  echo "ERROR: api error. Code: 404. Status: NOT_FOUND" >&2
+  exit 1
+fi
 if [ "$2" = "disk" ] && [ "$3" = "delete" ]; then
   ref="$4"
   name="${ref##*/}"
@@ -84,13 +88,22 @@ exit 2
 }
 
 // writeRecordingMWS writes a fake mws CLI that records every delete and answers NOT_FOUND for the
-// names listed in missing.
+// names listed in missing. A VM get reports the VM present for the first $STUB_VM_ALIVE_GETS calls
+// (default 0) and NOT_FOUND after; STUB_VM_DELETE_FAILS makes the VM delete itself fail.
 func writeRecordingMWS(t *testing.T, dir string, missing ...string) {
 	t.Helper()
 	script := fmt.Sprintf(`#!/usr/bin/env bash
 ref="$4"; name="${ref##*/}"
-echo "$2 $name" >>"%s/calls"
-for m in %s; do
+if [ "$3" = get ]; then
+  n=$(cat "%[1]s/gets" 2>/dev/null || echo 0); echo $((n + 1)) >"%[1]s/gets"
+  [ "$n" -lt "${STUB_VM_ALIVE_GETS:-0}" ] && exit 0
+  echo "ERROR: api error. Code: 404. Status: NOT_FOUND" >&2; exit 1
+fi
+echo "$2 $name" >>"%[1]s/calls"
+if [ "$2" = virtual-machine ] && [ -n "${STUB_VM_DELETE_FAILS:-}" ]; then
+  echo "ERROR: unexpected response for deletion" >&2; exit 1
+fi
+for m in %[2]s; do
   [ "$name" = "$m" ] && { echo "ERROR: api error. Code: 404. Status: NOT_FOUND" >&2; exit 1; }
 done
 exit 0
@@ -145,5 +158,37 @@ func TestRegression_Teardown_RefusesMalformedIdentity(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "calls")); err == nil {
 		t.Error("teardown.sh issued deletes for a malformed identity")
+	}
+}
+
+// The VM delete call can fail while the platform keeps deleting the VM; its disks must wait for it.
+func TestRegression_Teardown_WaitsForTheVMBeforeDeletingDisks(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordingMWS(t, dir)
+	out, err := runTeardown(t, dir, "E2E_TIER=smoke", "E2E_RUN_ID=4242", "E2E_RUN_ATTEMPT=1", "E2E_SCENARIO_ID=0",
+		"STUB_VM_DELETE_FAILS=1", "STUB_VM_ALIVE_GETS=2", "TEARDOWN_POLL_SECONDS=0")
+	if err != nil {
+		t.Fatalf("teardown.sh failed although the VM disappeared: %v\n%s", err, out)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	if !strings.Contains(string(raw), "disk e2e-smoke-4242-1-s0-boot") || !strings.Contains(string(raw), "disk e2e-smoke-4242-1-s0-indep") {
+		t.Fatalf("calls = %q, want both disks deleted once the VM was gone", raw)
+	}
+	if gets, _ := os.ReadFile(filepath.Join(dir, "gets")); strings.TrimSpace(string(gets)) != "3" {
+		t.Errorf("VM gets = %q, want 3 (two present, then gone)", gets)
+	}
+}
+
+func TestRegression_Teardown_VMThatNeverDisappearsLeavesItsDisks(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordingMWS(t, dir)
+	out, err := runTeardown(t, dir, "E2E_TIER=smoke", "E2E_RUN_ID=4242", "E2E_RUN_ATTEMPT=1", "E2E_SCENARIO_ID=0",
+		"STUB_VM_ALIVE_GETS=100", "TEARDOWN_POLL_SECONDS=0", "TEARDOWN_POLL_ATTEMPTS=3")
+	if err == nil {
+		t.Fatalf("teardown.sh succeeded while the VM still existed\n%s", out)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	if strings.Contains(string(raw), "disk ") {
+		t.Errorf("calls = %q, want no disk deletes while the VM exists", raw)
 	}
 }

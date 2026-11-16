@@ -154,9 +154,9 @@ func provisionFullFixture(ctx context.Context, project string) (fullFixture, err
 	return fix, nil
 }
 
-// teardownTimeout sums teardown.sh's own two bounded phases — the VM
-// delete's --wait-timeout 5m then the parallel disks' --wait-timeout 2m —
-// plus 1 minute of margin for process/API overhead.
+// teardownTimeout sums teardown.sh's bounded phases — the VM delete's
+// --wait-timeout 3m, up to 2m waiting for the VM to disappear, then the
+// parallel disks' --wait-timeout 2m — plus 1 minute of margin.
 const teardownTimeout = 8 * time.Minute
 
 // TestMain tears down the full tier's shared ephemeral VM+disk exactly once,
