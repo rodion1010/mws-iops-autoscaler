@@ -42,7 +42,7 @@ The reference environment must provide:
 - an Ubuntu 24.04 VM with at least 2 vCPU;
 - an NBS-PL2 boot disk; one NBS-PL2 data disk created inline in the VM spec (dependent) and one
   created standalone and attached by ref (independent), both starting at 1000 IOPS
-  (docs/design.md §8.3's `iops-test-vm`; §4.7 for the dependent/independent distinction);
+  (docs/design.md §4.7 for the dependent/independent distinction);
 - a service account authorized for the exact API operations exercised by the test.
 
 A 2-vCPU VM has a 6000-IOPS aggregate pool and is useful for exercising the VM ceiling with two

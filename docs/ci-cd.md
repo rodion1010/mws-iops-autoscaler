@@ -14,7 +14,7 @@ the runner's own environment, not the repository.
 |---|---|---|---|
 | **Fast checks** | GitHub-hosted (`ubuntu-latest`) | Every PR, push to `main` | `gofmt`, `go vet`, `go test ./...`, `go test -race ./...`, plus the `docs/design.md` §8.2 integration suite against `internal/platformfake`. No cloud credentials involved. Implemented in `.github/workflows/ci.yml`. |
 | **PR-tier e2e ("smoke")** | Self-hosted runner | `pull_request_target`, running only for same-repository branches — the origin guard lives in workflow code loaded from the base branch; see below | The agent, built once from the PR's merge commit, actually changes real disks' IOPS limits on real MWS VMs. Each `TestSmoke_*` scenario runs in its own job on its own ephemeral VM (one dependent and one independent data disk), in parallel. |
-| **Merge-tier e2e ("full")** | Self-hosted runner | Push to `main`, `workflow_dispatch` | Same scenario as smoke, but provisions a fresh VM+disk from scratch and tears it down — the only tier that exercises create/destroy. |
+| **Merge-tier e2e ("full")** | Self-hosted runner | Push to `main`, `workflow_dispatch` | Every `TestFull_*` scenario on one shared ephemeral VM with three data disks, torn down after the run; covers device naming, live attach/detach and restart persistence. |
 
 Fast checks and PR-tier e2e are **intended** to be required status checks on `main`'s branch
 protection, so a PR cannot merge while either is red. Branch protection is not configured yet, for

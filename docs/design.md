@@ -1295,8 +1295,8 @@ during discovery):
 
 ### 8.3 End-to-end — against the live test environment
 
-The environment built during discovery is the E2E harness: `iops-test-vm` (`base-2-8`, 2 vCPU → 6000
-pool), one dependent disk, one independent disk attached by ref.
+Each scenario runs on an ephemeral VM created for it (2 vCPU → 6000 pool) with one dependent disk and
+one independent disk attached by ref; [ci-cd.md](ci-cd.md) describes the tiers.
 
 | Scenario | Method | Assertion |
 |---|---|---|
