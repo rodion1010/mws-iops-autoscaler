@@ -72,11 +72,14 @@ The **runner** executes pipeline steps and issues MWS API calls; it is never the
 **target VM** (an ephemeral smoke or full-tier VM) is what the agent under test
 actually runs on and whose disk gets scaled. They need separate credentials — see below.
 
-**Runner processes.** The runner VM (`base-4-16`) hosts five self-hosted runner processes, `ci-runner`
-and `ci-runner-2`…`ci-runner-5`, each in its own directory under the same user and with the same
-label, so up to five jobs run at once. GitHub Actions gives each process one job at a time. Smoke
+**Runner processes.** The runner VM (`base-8-32`, 100 GB boot disk) hosts sixteen self-hosted runner
+processes, `ci-runner` and `ci-runner-2`…`ci-runner-16`, each in its own directory under the same user
+and with the same label, so up to sixteen jobs run at once. GitHub Actions gives each process one job at
+a time. Each process's directory grows to about 2.5 GB (the runner, its `_work` checkout and the Go
+toolchain `setup-go` installs there), so the boot disk has to grow with the process count. Smoke
 scenarios share no target, so no concurrency group serializes them; the matrix's `max-parallel`
-(repository variable `E2E_SMOKE_MAX_PARALLEL`, default 4) caps one PR's concurrent VMs. The full tier
+(repository variable `E2E_SMOKE_MAX_PARALLEL`, set to 10 so every scenario of a PR runs at once; 4
+when unset) caps one PR's concurrent VMs. The full tier
 keeps its `e2e-full` concurrency group. Running out of project quota is an expected infrastructure
 failure, not a test failure: `provision.sh` exits 3, the job fails with "project quota exhausted",
 nothing is retried, and teardown removes what was created.
@@ -85,6 +88,15 @@ nothing is retried, and teardown removes what was created.
 over SSH at that address, so no test VM needs an external IP. Their outbound traffic (cloud-init's
 package install, the agent's MWS API calls) leaves through the Egress NAT `e2e-egress` on the test
 subnet, behind one external address. The runner VM keeps its own one-to-one NAT address.
+
+**The agent on the runner.** The runner VM runs the autoscaler itself in write mode, managing its own
+boot disk (`auto-discovery`, limits 1000–10000) under the runner/provisioner SA. It is a systemd unit,
+`mws-iops-autoscaler.service`, running as the `iops-autoscaler` system user: binary
+`/usr/local/bin/mws-iops-autoscaler`, config `/etc/mws-iops-autoscaler/config.yaml`, state
+`/var/lib/mws-iops-autoscaler`, decision journal `/var/log/mws-iops-autoscaler/decisions.jsonl`, HTTP on
+`127.0.0.1:9435`. To update it, build `./cmd/mws-iops-autoscaler` for `linux/amd64` from `main`, replace the
+binary and `sudo systemctl restart mws-iops-autoscaler`; keep the state directory. E2E harness cleanup
+matches only agents started from its own work directory on test VMs, so it never touches this one.
 
 **Naming.** `e2e/scripts/names.sh` derives every run-scoped name, and `provision.sh`, `teardown.sh` and
 the sweeper's patterns follow it: a smoke VM is `e2e-smoke-<run id>-<run attempt>-s<scenario index>`,
@@ -140,7 +152,7 @@ their environment from GitHub repository variables (non-secret) and one secret:
 | `E2E_SUBNET_ID`, `E2E_BOOT_IMAGE`, `E2E_AGENT_SA`, `E2E_SSH_PUBLIC_KEY`, `E2E_SSH_USER` | variable | smoke, full |
 | `E2E_VM_TYPE` | variable | full |
 | `E2E_SMOKE_VM_TYPE` | variable, optional | smoke — scenario VM type, default `compute/vmTypes/base-2-4` (2 vCPU keeps the 6000-IOPS pool the VM cap scenario relies on) |
-| `E2E_SMOKE_MAX_PARALLEL` | variable, optional | smoke — concurrent scenario jobs per PR, default 4; raise it with the project quota |
+| `E2E_SMOKE_MAX_PARALLEL` | variable, optional | smoke — concurrent scenario jobs per PR, 4 when unset; currently 10. Size it with the project quota and the runner process count |
 | `E2E_SWEEP_APPLY` | variable | sweep — `true` lets the scheduled run delete; any other value reports only (see "Orphan sweeper") |
 | `E2E_SSH_PRIVATE_KEY` | **secret** | smoke, full — written to a `runner.temp` file for the job's duration, removed in an `if: always()` step |
 

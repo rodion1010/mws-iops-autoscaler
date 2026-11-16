@@ -110,7 +110,7 @@ rather than a launch gate:
 
 - **Soak and chaos don't exist as a CI tier for any scenario today** (design.md §8.4: 24h diurnal-load
   soak, 20%-fault-injection chaos, both local-mode). A 24h job cannot fit either existing workflow's
-  timeout model (`docs/ci-cd.md`'s "Timeout budgets") and would hold one of the runner VM's five runner
+  timeout model (`docs/ci-cd.md`'s "Timeout budgets") and would hold one of the runner VM's runner
   processes and its VMs' share of the project quota for its entire duration, so it competes with PR and
   merge e2e runs unless it is scheduled off-hours. Chaos additionally needs a fault-injection layer
   nothing in `internal/platformfake` or `e2e/` has today. This needs its own decision (new runner vs.
