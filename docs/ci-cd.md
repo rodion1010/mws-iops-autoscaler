@@ -163,7 +163,7 @@ backstop teardown step — rather than by the job-level kill.
 | Workflow | `go test -timeout` | Worst-case test budget | `timeout-minutes` |
 |---|---|---|---|
 | `e2e-pr.yml` (smoke), per scenario job | 15m (test step, itself capped at 16m) | the longest single scenario's context, 12m (`TestSmoke_Decisions_NoFlapping`); plus a 20m provision step and an 8m teardown step | 50 |
-| `e2e-full.yml` (full) | 84m | ~83m (shared fixture's 15m provisioning context, paid once, + each `TestFull_*` test's own context + `TestMain`'s dedicated 8-minute teardown budget) | 96 |
+| `e2e-full.yml` (full) | 100m | ~98m (shared fixture's 15m provisioning context, paid once, + each `TestFull_*` test's own context — `TestFull_Budget_ExhaustionPersistsAcrossRestart` at 15m for its up/down cycle and agent restart — + `TestMain`'s dedicated 8-minute teardown budget) | 112 |
 
 `timeout-minutes` must also stay below the orphan sweeper's TTL floor (see "Orphan sweeper"). Recompute
 the relevant worst-case sum before shrinking either `timeout-minutes` value, and again
@@ -193,7 +193,7 @@ independently of the test jobs, so it still works after a job-level kill or a lo
   with `e2e-full-` or `e2e-smoke-` is never considered. A name that starts with it but does not match exactly, or a missing or unparseable
   `metadata.createTime`, is reported as `SKIP-AMBIGUOUS-*`, deleted never, and fails the run.
 - **Age.** `metadata.createTime` from the API, at least `ttl_hours` (default 3) old. The TTL must stay
-  above the longest job that owns resources, `e2e-full.yml`'s `timeout-minutes` (96): a younger
+  above the longest job that owns resources, `e2e-full.yml`'s `timeout-minutes` (112): a younger
   resource may belong to a live run, and `sweep.sh` refuses a TTL under 2 hours. A re-run of the full
   job keeps its `run_id`, so it reuses the same names and the old `createTime`; smoke names carry the
   run attempt, so a smoke re-run never does.

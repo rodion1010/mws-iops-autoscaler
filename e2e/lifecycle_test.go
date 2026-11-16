@@ -29,7 +29,7 @@ var fullEnv = []string{
 // platform defaults its guest device to mws-{alias} — used by
 // TestFull_DeviceNaming_NoDeviceNameDefaultsToAlias — and a churn disk
 // created but left unattached at creation, for scenarios that must observe
-// a live attach or detach (AttachChurnDisk/DetachChurnDisk, e2e/churn.go).
+// a live attach or detach (AttachChurnDisk/DetachChurnDisk, e2e/churn_test.go).
 // Every full-tier test builds its own Target against one of these rather
 // than provisioning again.
 //

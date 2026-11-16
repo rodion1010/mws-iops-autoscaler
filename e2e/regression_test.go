@@ -587,3 +587,74 @@ func TestRegression_VMCap_RecordMatchesOnlyPoolBoundCap(t *testing.T) {
 		})
 	}
 }
+
+// TestRegression_Budget_OverrideResolvesForManagedDisk checks the budget
+// scenario's config end to end: a mis-nested key would validate yet silently
+// fall back to the default budget.
+func TestRegression_Budget_OverrideResolvesForManagedDisk(t *testing.T) {
+	target := Target{DeviceName: "mws-data"}
+	rendered, err := withChangeBudget(agentConfigYAML(target), budgetScenarioMaxChanges)
+	if err != nil {
+		t.Fatalf("withChangeBudget: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.LoadAndValidate(path)
+	if err != nil {
+		t.Fatalf("budget config failed LoadAndValidate: %v\n%s", err, rendered)
+	}
+	got := config.Resolve(cfg).DiskPolicies[target.DeviceName].Advanced
+	if got.MaxChangesPer24h != budgetScenarioMaxChanges {
+		t.Fatalf("resolved max_changes_per_24h = %d, want %d", got.MaxChangesPer24h, budgetScenarioMaxChanges)
+	}
+	if got.CooldownScaleUp != 10*time.Second || got.ScaleUpWindow != e2eScaleUpWindow {
+		t.Fatalf("budget override changed the harness's other advanced values: %+v", got)
+	}
+}
+
+func TestRegression_Budget_OverrideFailsWithoutAdvancedBlock(t *testing.T) {
+	if _, err := withChangeBudget("version: 1\npolicy:\n  limits: {min_iops: 1000}\n", 2); err == nil {
+		t.Fatal("withChangeBudget succeeded on a config with no policy.advanced block")
+	}
+}
+
+func TestRegression_Budget_ExhaustedRecordNeedsZeroRemaining(t *testing.T) {
+	cases := map[string]struct {
+		line string
+		want bool
+	}{
+		"exhausted":                  {`{"action":"no_action","reason":"budget_exhausted","budget_remaining":0}`, true},
+		"over budget":                {`{"action":"no_action","reason":"budget_exhausted","budget_remaining":-1}`, true},
+		"reason without spent count": {`{"action":"no_action","reason":"budget_exhausted","budget_remaining":2}`, false},
+		"budget_remaining absent":    {`{"action":"no_action","reason":"budget_exhausted"}`, false},
+		"budget_remaining null":      {`{"action":"no_action","reason":"budget_exhausted","budget_remaining":null}`, false},
+		"last allowed change":        {`{"action":"scale_down","reason":"underutilized","budget_remaining":1}`, false},
+		"cooldown, not budget":       {`{"action":"no_action","reason":"cooldown_scale_up","budget_remaining":0}`, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var rec journalRecord
+			if err := json.Unmarshal([]byte(tc.line), &rec); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := isBudgetExhaustedRecord(rec); got != tc.want {
+				t.Fatalf("isBudgetExhaustedRecord = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRegression_Budget_CountsOnlyActuatingRecords(t *testing.T) {
+	recs := []journalRecord{
+		{Action: "no_action", Reason: "window_not_full"},
+		{Action: "scale_up"},
+		{Action: "vm_cap_reached"},
+		{Action: "scale_down"},
+		{Action: "no_action", Reason: "budget_exhausted"},
+	}
+	if got := countActuations(recs); got != 2 {
+		t.Fatalf("countActuations = %d, want 2", got)
+	}
+}

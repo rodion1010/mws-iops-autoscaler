@@ -492,13 +492,14 @@ func FetchJournal(ctx context.Context, t Target) string {
 // importing that type — the journal is an external contract, so an e2e
 // scenario reads it the same way any other external consumer would.
 type journalRecord struct {
-	Disk           string  `json:"disk"`
-	Action         string  `json:"action"`
-	Reason         string  `json:"reason"`
-	CurrentIOPS    int64   `json:"current_iops"`
-	TargetIOPS     int64   `json:"target_iops"`
-	Utilization    float64 `json:"utilization"`
-	VMHeadroomIOPS int64   `json:"vm_headroom_iops"`
+	Disk            string  `json:"disk"`
+	Action          string  `json:"action"`
+	Reason          string  `json:"reason"`
+	CurrentIOPS     int64   `json:"current_iops"`
+	TargetIOPS      int64   `json:"target_iops"`
+	Utilization     float64 `json:"utilization"`
+	VMHeadroomIOPS  int64   `json:"vm_headroom_iops"`
+	BudgetRemaining *int    `json:"budget_remaining"`
 }
 
 // journalRecords fetches and decodes every well-formed line the guest's

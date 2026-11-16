@@ -21,7 +21,7 @@ jobs:
     runs-on: [self-hosted, mws-iops-autoscaler-runner]
     # A job-level kill runs no cleanup, so this must exceed the sum of every TestFull_* worst-case
     # context plus provisioning and teardown, and stay below the sweeper's TTL floor.
-    timeout-minutes: 96
+    timeout-minutes: 112
     steps:
       # Pin third-party actions because this runner has cloud credentials.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,7 +54,7 @@ jobs:
           E2E_SSH_KEY_PATH: ${{ runner.temp }}/e2e_ssh_key
         # The harness builds the agent dynamically, so cached test results are unsafe.
         # -timeout stays below timeout-minutes so go test, not the job kill, stops a hung suite.
-        run: go test -count=1 -timeout=84m -tags e2e ./e2e/... -run 'TestFull|TestRegression' -v
+        run: go test -count=1 -timeout=100m -tags e2e ./e2e/... -run 'TestFull|TestRegression' -v
 
       # Backstop for go test's own -timeout killing the binary before
       # TestMain's teardown runs.
